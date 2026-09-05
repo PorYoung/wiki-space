@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import {
   useParams,
   useNavigate,
@@ -7,6 +7,7 @@ import {
 } from 'react-router-dom'
 import {
   FolderOpen,
+  Folder,
   FileText,
   ChevronRight,
   ChevronDown,
@@ -35,6 +36,11 @@ import {
   MessageSquare,
   History,
   Tag,
+  X,
+  Users,
+  Activity,
+  Layers,
+  GitFork,
 } from 'lucide-react'
 import {
   fetchDocuments,
@@ -316,8 +322,23 @@ function DocumentCard({ doc, onOpen, delayMs = 0 }) {
 }
 
 // ---------------------------------------------------------------------------
-// Tree sidebar row (folder / leaf)
+// Tree sidebar row (folder / leaf) — supports highlight keyword from parent
 // ---------------------------------------------------------------------------
+
+function highlight(text, keyword) {
+  if (!keyword) return text
+  const idx = text.toLowerCase().indexOf(keyword.toLowerCase())
+  if (idx < 0) return text
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-amber-200/70 text-amber-900 rounded px-0.5">
+        {text.slice(idx, idx + keyword.length)}
+      </mark>
+      {text.slice(idx + keyword.length)}
+    </>
+  )
+}
 
 function TreeNode({
   node,
@@ -327,18 +348,51 @@ function TreeNode({
   onToggle,
   onSelect,
   activeDocId,
+  keyword,
 }) {
   const nodePath = path ? `${path}/${node.name}` : node.name
   const isExpanded = expanded.has(nodePath)
+
+  // When searching, show folder if matches or has matching children/docs
+  const docMatch = (d) =>
+    !keyword ||
+    d.path.toLowerCase().includes(keyword.toLowerCase()) ||
+    d.title.toLowerCase().includes(keyword.toLowerCase())
+  const folderMatch =
+    !keyword ||
+    node.name.toLowerCase().includes(keyword.toLowerCase()) ||
+    Array.from(node.children.values()).some((c) => {
+      // cheap descend check: any descendant doc matches
+      const collectDocs = (n) => [...n.docs, ...Array.from(n.children.values()).flatMap(collectDocs)]
+      return collectDocs(c).some(docMatch)
+    }) ||
+    node.docs.some(docMatch)
+
+  const visibleDocs = keyword ? node.docs.filter(docMatch) : node.docs
+  const visibleChildren = keyword
+    ? Array.from(node.children.entries()).filter(([, c]) => {
+        const collectDocs = (n) => [...n.docs, ...Array.from(n.children.values()).flatMap(collectDocs)]
+        return (
+          c.name.toLowerCase().includes(keyword.toLowerCase()) ||
+          c.docs.some(docMatch) ||
+          Array.from(c.children.values()).some((g) => collectDocs(g).some(docMatch))
+        )
+      })
+    : Array.from(node.children.entries())
+
+  if (keyword && !folderMatch && visibleDocs.length === 0 && visibleChildren.length === 0) return null
+
+  const isActiveFolder = keyword && node.name.toLowerCase().includes(keyword.toLowerCase())
 
   return (
     <div>
       <button
         type="button"
         onClick={() => onToggle(nodePath)}
-        className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-sm text-neutral-700 hover:bg-neutral-100 transition ${
-          level === 0 ? 'font-medium text-neutral-800' : ''
-        }`}
+        className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-sm transition
+          ${level === 0 ? 'font-medium' : ''}
+          ${isActiveFolder ? 'bg-amber-50 text-amber-800' : 'text-neutral-700 hover:bg-neutral-100'}
+        `}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
       >
         {node.children.size > 0 || node.docs.length > 0 ? (
@@ -350,16 +404,22 @@ function TreeNode({
         ) : (
           <span className="w-3.5 shrink-0" />
         )}
-        <FolderOpen size={13} className="text-primary-500 shrink-0" />
-        <span className="truncate">{node.name}</span>
+        {isExpanded ? (
+          <FolderOpen size={13} className="text-primary-500 shrink-0" />
+        ) : (
+          <Folder size={13} className="text-primary-500 shrink-0" />
+        )}
+        <span className="truncate">
+          {keyword ? highlight(node.name, keyword) : node.name}
+        </span>
         <span className="ml-auto font-mono text-[10px] text-neutral-400">
-          {node.docs.length}
+          {visibleDocs.length}
         </span>
       </button>
 
       {isExpanded && (
         <>
-          {Array.from(node.children.entries()).map(([name, child]) => (
+          {visibleChildren.map(([name, child]) => (
             <TreeNode
               key={name}
               node={child}
@@ -369,26 +429,37 @@ function TreeNode({
               onToggle={onToggle}
               onSelect={onSelect}
               activeDocId={activeDocId}
+              keyword={keyword}
             />
           ))}
-          {node.docs.map((doc) => {
+          {visibleDocs.map((doc) => {
             const isActive = activeDocId === doc.id
             const status = STATUS_MAP[doc.status] || STATUS_MAP.synced
+            const fileName = doc.path.split('/').pop()
+            const docName = doc.title || fileName
+            const isActiveDoc = keyword && (
+              fileName.toLowerCase().includes(keyword.toLowerCase()) ||
+              (doc.title || '').toLowerCase().includes(keyword.toLowerCase())
+            )
             return (
               <button
                 key={doc.id}
                 type="button"
                 onClick={() => onSelect(doc)}
-                className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-sm transition ${
-                  isActive
+                className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-sm transition
+                  ${isActive
                     ? 'bg-primary-50 text-primary-700'
-                    : 'text-neutral-600 hover:bg-neutral-100'
-                }`}
+                    : isActiveDoc
+                    ? 'bg-amber-50 text-neutral-800'
+                    : 'text-neutral-600 hover:bg-neutral-100'}
+                `}
                 style={{ paddingLeft: `${(level + 1) * 16 + 8}px` }}
               >
                 <span className="w-3.5 shrink-0" />
                 <FileText size={13} className="text-neutral-400 shrink-0" />
-                <span className="truncate">{doc.path.split('/').pop()}</span>
+                <span className="truncate">
+                  {keyword ? highlight(docName, keyword) : docName}
+                </span>
                 <span
                   className={`ml-auto w-1.5 h-1.5 rounded-full shrink-0 ${status.dot}`}
                   title={status.label}
@@ -403,12 +474,57 @@ function TreeNode({
 }
 
 // ---------------------------------------------------------------------------
-// Focused mode: Tree sidebar (w-280, mini back row + collapsible tree)
+// Focused mode: Tree sidebar (w-280, search + auto-expand + status footer)
 // ---------------------------------------------------------------------------
 
-function TreeSidebar({ docs, activeDocId, onSelect, onBack }) {
+function TreeSidebar({ docs, activeDocId, onSelect, onBack, project }) {
   const tree = useMemo(() => buildTree(docs), [docs])
   const [expanded, setExpanded] = useState(new Set(['']))
+  const [keyword, setKeyword] = useState('')
+  const searchRef = useRef(null)
+
+  // Auto-expand parent folders when active doc changes
+  useEffect(() => {
+    if (!activeDocId) return
+    const activeDoc = docs.find((d) => d.id === activeDocId)
+    if (!activeDoc) return
+    const parts = activeDoc.path.split('/').filter((_, i, arr) => i < arr.length - 1)
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      parts.forEach((_, i) => {
+        const folderPath = parts.slice(0, i + 1).join('/')
+        next.add(folderPath)
+      })
+      // also keep root expanded
+      next.add('')
+      return next
+    })
+  }, [activeDocId, docs])
+
+  // When searching, auto-expand all folders that have matches
+  useEffect(() => {
+    if (!keyword.trim()) return
+    const kw = keyword.toLowerCase()
+    const toExpand = new Set([''])
+    const walk = (node, path) => {
+      // does this node or its descendants match?
+      const collectDocPaths = (n, p) => [
+        ...n.docs.map((d) => (p ? `${p}/${d.path.split('/').pop()}` : d.path)),
+        ...Array.from(n.children.entries()).flatMap(([name, c]) =>
+          collectDocPaths(c, p ? `${p}/${name}` : name),
+        ),
+      ]
+      const matches =
+        node.name.toLowerCase().includes(kw) ||
+        collectDocPaths(node, path).some((p) => p.toLowerCase().includes(kw))
+      if (matches) toExpand.add(path)
+      Array.from(node.children.entries()).forEach(([name, child]) => {
+        walk(child, path ? `${path}/${name}` : name)
+      })
+    }
+    walk(tree, '')
+    setExpanded(toExpand)
+  }, [keyword, tree])
 
   const toggleExpand = (path) => {
     setExpanded((prev) => {
@@ -419,30 +535,62 @@ function TreeSidebar({ docs, activeDocId, onSelect, onBack }) {
     })
   }
 
+  const branch = project?.sourceType === 'git' ? 'main' : 'local'
+  const modifiedCount = docs.filter((d) => d.status === 'modified' || d.status === 'conflict').length
+  const onlineCount = 3
+
   return (
-    <aside className="w-[280px] shrink-0 bg-white border-r border-neutral-200 flex flex-col">
-      {/* Mini top row: back to grid */}
-      <div className="h-11 px-3 border-b border-neutral-100 flex items-center shrink-0">
+    <aside className="w-[280px] shrink-0 bg-neutral-50/50 border-r border-neutral-200 flex flex-col">
+      {/* Top row: back + search */}
+      <div className="shrink-0 px-3 pt-3 pb-2 border-b border-neutral-100 bg-white">
         <button
           type="button"
           onClick={onBack}
-          className="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-primary-600 transition-colors"
+          className="inline-flex items-center gap-1.5 text-xs text-neutral-500 hover:text-primary-600 transition-colors mb-2"
         >
-          <ArrowLeft size={14} />
-          文档库
+          <ArrowLeft size={12} />
+          返回文档库
         </button>
-        <FolderKanban size={14} className="ml-auto text-neutral-300" />
+        <div className="relative">
+          <Search
+            size={13}
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"
+          />
+          <input
+            ref={searchRef}
+            type="text"
+            className="w-full h-8 pl-7 pr-6 rounded-md text-xs bg-neutral-100/80 border border-transparent focus:border-primary-200 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition placeholder:text-neutral-400"
+            placeholder="搜索文档 / 文件夹…"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+          {keyword && (
+            <button
+              type="button"
+              onClick={() => setKeyword('')}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-neutral-200 text-neutral-400 hover:text-neutral-600"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Tree area */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin py-2 min-h-0">
+      <div className="flex-1 overflow-y-auto scrollbar-thin py-2 min-h-0 bg-white">
         {tree.children.size === 0 && tree.docs.length === 0 ? (
           <div className="text-xs text-neutral-400 text-center py-6">暂无文档</div>
         ) : (
           <>
             {tree.docs.map((doc) => {
+              const matches =
+                !keyword ||
+                doc.path.toLowerCase().includes(keyword.toLowerCase()) ||
+                (doc.title || '').toLowerCase().includes(keyword.toLowerCase())
+              if (keyword && !matches) return null
               const isActive = activeDocId === doc.id
               const status = STATUS_MAP[doc.status] || STATUS_MAP.synced
+              const docName = doc.title || doc.path.split('/').pop()
               return (
                 <button
                   key={doc.id}
@@ -456,7 +604,9 @@ function TreeSidebar({ docs, activeDocId, onSelect, onBack }) {
                   style={{ paddingLeft: '8px' }}
                 >
                   <FileText size={13} className="text-neutral-400 shrink-0" />
-                  <span className="truncate font-mono text-[12px]">{doc.path}</span>
+                  <span className="truncate">
+                    {keyword ? highlight(docName, keyword) : docName}
+                  </span>
                   <span
                     className={`ml-auto w-1.5 h-1.5 rounded-full shrink-0 ${status.dot}`}
                     title={status.label}
@@ -474,10 +624,43 @@ function TreeSidebar({ docs, activeDocId, onSelect, onBack }) {
                 onToggle={toggleExpand}
                 onSelect={onSelect}
                 activeDocId={activeDocId}
+                keyword={keyword}
               />
             ))}
           </>
         )}
+      </div>
+
+      {/* Footer: branch + status + online */}
+      <div className="shrink-0 border-t border-neutral-200 bg-white px-3 py-2 space-y-1.5">
+        <div className="flex items-center gap-1.5 text-[11px] text-neutral-500">
+          {project?.sourceType === 'git' || project?.sourceType === 'repo-docs' ? (
+            <>
+              <GitFork size={12} className="text-neutral-400" />
+              <span className="font-mono">{branch}</span>
+              <span className="w-1 h-1 rounded-full bg-neutral-300" />
+              <span className="text-amber-600">{modifiedCount} 待同步</span>
+            </>
+          ) : (
+            <>
+              <Activity size={12} className="text-emerald-500" />
+              <span>已同步</span>
+              <span className="w-1 h-1 rounded-full bg-neutral-300" />
+              <span className="text-neutral-400">{docs.length} 篇文档</span>
+            </>
+          )}
+          <span className="flex-1" />
+          <div className="flex items-center -space-x-1">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="w-4 h-4 rounded-full border border-white ring-0 bg-gradient-to-br from-violet-400 to-sky-400"
+                title={`在线协作者 ${i + 1}`}
+              />
+            ))}
+          </div>
+          <span className="text-neutral-400">+{onlineCount}</span>
+        </div>
       </div>
     </aside>
   )
@@ -485,6 +668,7 @@ function TreeSidebar({ docs, activeDocId, onSelect, onBack }) {
 
 // ---------------------------------------------------------------------------
 // Focused mode: Document area (context bar + format toolbar + content)
+// Features: click-to-edit WYSIWYG, collaboration cursors, doc transitions
 // ---------------------------------------------------------------------------
 
 const FORMAT_TOOLS = [
@@ -497,16 +681,46 @@ const FORMAT_TOOLS = [
   { icon: Link2, label: '链接' },
 ]
 
-function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave, saving }) {
+// Mock remote collaboration cursors
+const MOCK_CURSORS = [
+  { name: '林川', color: '#0ea5e9', top: '22%', left: '38%' },
+  { name: '苏筱', color: '#ec4899', top: '55%', left: '62%' },
+]
+
+function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave, saving, team }) {
   if (!doc) return null
 
   const status = STATUS_MAP[doc.status] || STATUS_MAP.synced
   const pathParts = (doc.path || '').split('/').filter(Boolean)
+  const contentRef = useRef(null)
+  const [fadeKey, setFadeKey] = useState(0)
+
+  // Trigger fade-in animation when doc changes
+  useEffect(() => {
+    setFadeKey((k) => k + 1)
+  }, [doc?.id])
+
+  // Double-click preview → enter edit mode (WYSIWYG hint)
+  const handlePreviewClick = (e) => {
+    // Only trigger on direct prose content double-click, not on links/buttons
+    if (e.target.closest('a, button, code, pre')) return
+  }
+
+  const handlePreviewDoubleClick = () => {
+    setView('edit')
+  }
+
+  // Simulate presence bar in edit mode
+  const activeEditors = team?.slice(0, 2) || []
 
   return (
     <section className="flex-1 flex flex-col min-w-0 bg-white">
-      {/* Doc context bar */}
-      <div className="px-6 pt-4 pb-3 border-b border-neutral-200 shrink-0">
+      {/* Doc context bar — slimmer in preview mode for immersion */}
+      <div
+        className={`shrink-0 border-b border-neutral-200 transition-all duration-200 ${
+          view === 'preview' ? 'px-6 pt-3 pb-2 bg-white' : 'px-6 pt-4 pb-3 bg-white'
+        }`}
+      >
         {/* Line 1: path breadcrumb + status */}
         <div className="flex items-center justify-between gap-3">
           <div className="font-mono text-xs text-neutral-400 flex items-center gap-1 min-w-0">
@@ -523,11 +737,11 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
         </div>
 
         {/* Line 2: title + controls */}
-        <div className="flex items-center justify-between gap-3 mt-1.5">
+        <div className="flex items-center justify-between gap-3 mt-1">
           <h1 className="text-xl font-bold text-neutral-900 truncate">{doc.title}</h1>
 
           <div className="flex items-center gap-2 shrink-0">
-            {/* View mode pill */}
+            {/* View mode pill — click preview to hint at WYSIWYG */}
             <div className="bg-neutral-100 rounded-md p-0.5 inline-flex">
               <button
                 type="button"
@@ -537,6 +751,7 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
                     ? 'bg-white text-neutral-800 shadow-sm'
                     : 'text-neutral-500 hover:text-neutral-800'
                 }`}
+                title="双击内容可快速进入编辑"
               >
                 <Eye size={13} />
                 预览
@@ -555,13 +770,6 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
               </button>
             </div>
 
-            {/* Branch pill */}
-            <button type="button" className="btn-secondary !h-8 !text-xs" title="分支">
-              <GitBranch size={13} />
-              <span className="font-mono">main</span>
-              <span className="tag-neutral !px-1.5 !py-0 !text-[10px] !leading-4">+2</span>
-            </button>
-
             {/* Save */}
             <button
               type="button"
@@ -574,11 +782,37 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
             </button>
           </div>
         </div>
+
+        {/* Line 3: edit-mode collaboration presence bar */}
+        {view === 'edit' && (
+          <div className="mt-2 flex items-center gap-2 text-xs text-neutral-500 animate-fade-up">
+            <div className="flex items-center gap-1.5">
+              <Activity size={12} className="text-emerald-500 animate-pulse" />
+              <span className="text-emerald-700 font-medium">协作中</span>
+            </div>
+            <span className="text-neutral-300">·</span>
+            <span>{activeEditors.length + 1} 人正在编辑此文档</span>
+            <div className="flex items-center -space-x-1 ml-1">
+              {activeEditors.map((m) => (
+                <div
+                  key={m.id}
+                  className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-semibold ring-2 ring-white"
+                  style={{ backgroundColor: m.avatarColor }}
+                  title={`${m.name} · 正在输入`}
+                >
+                  {m.name.slice(0, 1).toUpperCase()}
+                </div>
+              ))}
+            </div>
+            <span className="flex-1" />
+            <span className="text-neutral-400 text-[11px]">Markdown · UTF-8</span>
+          </div>
+        )}
       </div>
 
-      {/* Format toolbar (edit mode only) */}
+      {/* Format toolbar (edit mode only) — sticky */}
       {view === 'edit' && (
-        <div className="h-10 px-4 flex items-center gap-1 bg-neutral-50 border-b border-neutral-200 text-neutral-500 shrink-0">
+        <div className="h-10 px-4 flex items-center gap-1 bg-neutral-50 border-b border-neutral-200 text-neutral-500 shrink-0 animate-fade-up">
           {FORMAT_TOOLS.map(({ icon: Icon, label }) => (
             <button
               key={label}
@@ -606,26 +840,103 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
           >
             <Redo2 size={14} />
           </button>
+          <span className="w-px h-4 bg-neutral-200 mx-1.5" />
+          <button
+            type="button"
+            title="切换到预览"
+            onClick={() => setView('preview')}
+            className="inline-flex items-center gap-1 px-2 h-7 rounded text-xs hover:bg-neutral-200 transition"
+          >
+            <Eye size={13} />
+            预览
+          </button>
         </div>
       )}
 
-      {/* Content */}
-      {view === 'preview' ? (
-        <div className="flex-1 overflow-y-auto scrollbar-thin min-h-0">
+      {/* Content area — fade-in on doc change */}
+      <div
+        key={fadeKey}
+        className="flex-1 flex flex-col min-h-0 animate-fade-up"
+        ref={contentRef}
+      >
+        {view === 'preview' ? (
+          /* ===== PREVIEW mode — immersive, clickable WYSIWYG ===== */
           <div
-            className="max-w-3xl mx-auto px-8 py-8 prose-doc"
-            dangerouslySetInnerHTML={{ __html: markdownToHtml(doc.content) }}
-          />
-        </div>
-      ) : (
-        <div className="flex-1 flex min-h-0">
-          <textarea
-            className="flex-1 w-full p-6 font-mono text-sm leading-7 outline-none resize-none text-neutral-800 placeholder:text-neutral-400"
-            value={editContent}
-            onChange={(e) => onEditChange(e.target.value)}
-            spellCheck={false}
-            placeholder="开始编写 Markdown 文档…"
-          />
+            className="flex-1 overflow-y-auto scrollbar-thin min-h-0 cursor-text"
+            onClick={handlePreviewClick}
+            onDoubleClick={handlePreviewDoubleClick}
+          >
+            <div
+              className="max-w-3xl mx-auto px-10 py-10 prose-doc relative group"
+              dangerouslySetInnerHTML={{ __html: markdownToHtml(doc.content) }}
+            />
+            {/* Subtle "double-click to edit" hint overlay */}
+            <div className="pointer-events-none fixed bottom-6 right-[320px] opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+              <div className="bg-neutral-900/80 text-white text-xs px-3 py-1.5 rounded-lg shadow-lg flex items-center gap-2">
+                <PenTool size={12} />
+                双击任意位置开始编辑
+                <span className="bg-neutral-700 px-1.5 py-0.5 rounded text-[10px]">Enter</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* ===== EDIT mode — markdown editor + remote cursors ===== */
+          <div className="flex-1 flex min-h-0 relative">
+            {/* The textarea */}
+            <textarea
+              className="flex-1 w-full p-6 font-mono text-sm leading-7 outline-none resize-none text-neutral-800 placeholder:text-neutral-400 bg-neutral-50/30"
+              value={editContent}
+              onChange={(e) => onEditChange(e.target.value)}
+              onDoubleClick={() => setView('preview')}
+              spellCheck={false}
+              placeholder="开始编写 Markdown 文档…"
+            />
+
+            {/* Fake remote collaboration cursors overlay */}
+            <div className="absolute inset-0 pointer-events-none overflow-hidden">
+              {MOCK_CURSORS.map((c) => (
+                <div
+                  key={c.name}
+                  className="absolute animate-pulse"
+                  style={{ top: c.top, left: c.left }}
+                >
+                  {/* Cursor line */}
+                  <div
+                    className="w-0.5 h-4 rounded-sm"
+                    style={{ backgroundColor: c.color }}
+                  />
+                  {/* Name tag */}
+                  <div
+                    className="absolute -top-5 left-0 px-1.5 py-0.5 rounded text-[10px] font-medium text-white whitespace-nowrap"
+                    style={{ backgroundColor: c.color }}
+                  >
+                    {c.name}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom status bar (edit mode) — optional mini info */}
+      {view === 'edit' && (
+        <div className="shrink-0 h-6 px-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between text-[11px] text-neutral-400">
+          <div className="flex items-center gap-3">
+            <span>行 {editContent.split('\n').length}</span>
+            <span>字 {editContent.length}</span>
+            <span className="flex items-center gap-1 text-emerald-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              实时同步中
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span>UTF-8</span>
+            <span>LF</span>
+            <span className="flex items-center gap-1">
+              <GitBranch size={10} /> main
+            </span>
+          </div>
         </div>
       )}
     </section>
@@ -1069,6 +1380,7 @@ export default function ProjectBrowse() {
         activeDocId={activeDoc?.id}
         onSelect={selectDocInSidebar}
         onBack={backToGrid}
+        project={project}
       />
       <DocumentEditor
         doc={activeDoc}
@@ -1078,6 +1390,7 @@ export default function ProjectBrowse() {
         setView={setFocusedView}
         onSave={handleSave}
         saving={focusedSaving}
+        team={team}
       />
       <CollaborativePanel
         doc={activeDoc}
