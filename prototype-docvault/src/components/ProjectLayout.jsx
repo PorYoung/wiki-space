@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { Outlet, useParams, NavLink, Link, useLocation } from 'react-router-dom'
+import { Outlet, useParams, NavLink, Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   FolderKanban, Activity, Rocket, Share2, MoreHorizontal, ChevronDown,
-  FolderOpen,
+  FolderOpen, Settings, Pencil, Trash2, ExternalLink, Users, UserCog,
 } from 'lucide-react'
 import { fetchProject, fetchTeam, fetchProjects } from '../api/stubs.js'
 
@@ -12,7 +12,7 @@ import { fetchProject, fetchTeam, fetchProjects } from '../api/stubs.js'
 const sourceTypeTagMap = {
   local:      { cls: 'tag-primary',  label: '本地源' },
   git:        { cls: 'tag-success',  label: 'Git 仓库' },
-  'repo-docs': { cls: 'tag-warning', label: '仓库 /docs' },
+  database:   { cls: 'tag-success',  label: '数据库' },
 }
 
 // ---------------------------------------------------------------------------
@@ -91,14 +91,17 @@ function ProjectNotFound({ id }) {
 export default function ProjectLayout() {
   const { id } = useParams()
   const location = useLocation()
+  const navigate = useNavigate()
 
   const [project, setProject] = useState(null)
   const [team, setTeam] = useState([])
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [toast, setToast] = useState(null)
   const menuRef = useRef(null)
+  const moreMenuRef = useRef(null)
 
   useEffect(() => {
     let cancelled = false
@@ -114,15 +117,16 @@ export default function ProjectLayout() {
     return () => { cancelled = true }
   }, [id])
 
-  // 点击外部关闭项目下拉
+  // 点击外部关闭项目下拉和更多操作菜单
   useEffect(() => {
-    if (!menuOpen) return
+    if (!menuOpen && !moreMenuOpen) return
     function handleClick(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
+      if (menuOpen && menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
+      if (moreMenuOpen && moreMenuRef.current && !moreMenuRef.current.contains(e.target)) setMoreMenuOpen(false)
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [menuOpen])
+  }, [menuOpen, moreMenuOpen])
 
   // Toast 自动消失
   useEffect(() => {
@@ -135,6 +139,8 @@ export default function ProjectLayout() {
     { to: 'browse',   label: '文档',    icon: FolderKanban },
     { to: 'activity', label: '项目动态', icon: Activity },
     { to: 'publish',  label: '发布配置', icon: Rocket },
+    { to: 'members',  label: '成员',    icon: Users },
+    { to: 'settings', label: '设置',    icon: UserCog },
   ]
 
   const topMembers = team.slice(0, 5)
@@ -274,9 +280,44 @@ export default function ProjectLayout() {
             <Share2 size={14} />
             分享
           </button>
-          <button className="btn-ghost !h-8 !w-8 !p-0" type="button" aria-label="更多">
-            <MoreHorizontal size={17} />
-          </button>
+          {/* btn-ghost more menu */}
+          <div className="relative" ref={moreMenuRef}>
+            <button
+              className={`btn-ghost !h-8 !w-8 !p-0 ${moreMenuOpen ? 'bg-neutral-100 text-primary-600' : ''}`}
+              type="button"
+              aria-label="更多"
+              onClick={() => setMoreMenuOpen((v) => !v)}
+            >
+              <MoreHorizontal size={17} />
+            </button>
+
+            {moreMenuOpen && (
+              <div className="absolute right-0 top-full mt-2 w-56 bg-white border border-neutral-200 rounded-lg shadow-lg py-2 z-30 animate-fade-up">
+                <button
+                  onClick={() => { setMoreMenuOpen(false); showToast('已复制项目链接') }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50 transition-colors"
+                >
+                  <ExternalLink size={14} className="text-neutral-400" />
+                  访问发布网站
+                </button>
+                <div className="my-1 h-px bg-neutral-200" />
+                <button
+                  onClick={() => { setMoreMenuOpen(false); showToast('重命名项目功能演示') }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50 transition-colors"
+                >
+                  <Pencil size={14} className="text-neutral-400" />
+                  重命名项目
+                </button>
+                <button
+                  onClick={() => { setMoreMenuOpen(false); showToast('删除项目功能演示') }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                >
+                  <Trash2 size={14} />
+                  删除项目
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 

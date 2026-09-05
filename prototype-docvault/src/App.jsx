@@ -6,7 +6,6 @@ import ProjectLayout from './components/ProjectLayout.jsx' // 项目聚焦视图
 import Dashboard from './pages/Dashboard.jsx'
 import Library from './pages/Library.jsx'
 import Sources from './pages/Sources.jsx'
-import Team from './pages/Team.jsx'
 import Themes from './pages/Themes.jsx'
 import Settings from './pages/Settings.jsx'
 
@@ -14,6 +13,8 @@ import Settings from './pages/Settings.jsx'
 import ProjectBrowse from './pages/ProjectBrowse.jsx'
 import ProjectActivity from './pages/ProjectActivity.jsx'
 import ProjectPublish from './pages/ProjectPublish.jsx'
+import ProjectMembers from './pages/ProjectMembers.jsx'
+import ProjectSettings from './pages/ProjectSettings.jsx'
 
 export default function App() {
   return (
@@ -24,7 +25,6 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/library" element={<Library />} />
         <Route path="/sources" element={<Sources />} />
-        <Route path="/team" element={<Team />} />
         <Route path="/themes" element={<Themes />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
@@ -35,6 +35,8 @@ export default function App() {
         <Route path="browse"   element={<ProjectBrowse />} />
         <Route path="activity" element={<ProjectActivity />} />
         <Route path="publish"  element={<ProjectPublish />} />
+        <Route path="members"  element={<ProjectMembers />} />
+        <Route path="settings" element={<ProjectSettings />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

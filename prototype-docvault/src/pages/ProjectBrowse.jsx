@@ -1,5 +1,10 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import {
+  PanelGroup,
+  Panel,
+  PanelResizeHandle,
+} from 'react-resizable-panels'
+import {
   useParams,
   useNavigate,
   useSearchParams,
@@ -10,6 +15,7 @@ import {
   Folder,
   FileText,
   ChevronRight,
+  ChevronLeft,
   ChevronDown,
   Clock,
   Search,
@@ -116,6 +122,32 @@ function getAuthorName(authorId) {
 }
 
 /** Minimal markdown → prose-doc HTML converter */
+// Generate URL-friendly id from heading text
+function slugify(text) {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\u4e00-\u9fa5\s-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+}
+
+// Extract table of contents from markdown source
+function extractToc(md) {
+  if (!md) return []
+  const lines = md.split('\n')
+  const toc = []
+  for (const line of lines) {
+    const h3 = line.match(/^###\s+(.+)$/)
+    const h2 = line.match(/^##\s+(.+)$/)
+    const h1 = line.match(/^#\s+(.+)$/)
+    if (h3) toc.push({ level: 3, text: h3[1].trim(), id: slugify(h3[1]) })
+    else if (h2) toc.push({ level: 2, text: h2[1].trim(), id: slugify(h2[1]) })
+    else if (h1) toc.push({ level: 1, text: h1[1].trim(), id: slugify(h1[1]) })
+  }
+  return toc
+}
+
 function markdownToHtml(md) {
   if (!md) return ''
   let src = md.replace(/\r\n/g, '\n')
@@ -130,9 +162,9 @@ function markdownToHtml(md) {
     return `<blockquote>${inlineMd(inner)}</blockquote>`
   })
 
-  src = src.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
-  src = src.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
-  src = src.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>')
+  src = src.replace(/^###\s+(.+)$/gm, (_, t) => `<h3 id="${slugify(t)}">${t}</h3>`)
+  src = src.replace(/^##\s+(.+)$/gm, (_, t) => `<h2 id="${slugify(t)}">${t}</h2>`)
+  src = src.replace(/^#\s+(.+)$/gm, (_, t) => `<h1 id="${slugify(t)}">${t}</h1>`)
   src = src.replace(/^---+$/gm, '<hr/>')
 
   const ulRegex = /((?:^[-*+]\s+.+\n?)+)/gm
@@ -477,11 +509,20 @@ function TreeNode({
 // Focused mode: Tree sidebar (w-280, search + auto-expand + status footer)
 // ---------------------------------------------------------------------------
 
-function TreeSidebar({ docs, activeDocId, onSelect, onBack, project }) {
+function TreeSidebar({ docs, activeDocId, onSelect, onBack, project, collapsed, onToggleCollapse }) {
   const tree = useMemo(() => buildTree(docs), [docs])
   const [expanded, setExpanded] = useState(new Set(['']))
   const [keyword, setKeyword] = useState('')
+  const [searchActive, setSearchActive] = useState(false)
   const searchRef = useRef(null)
+
+  // Auto-focus search input when activated
+  useEffect(() => {
+    if (searchActive) {
+      // focus on next tick to allow DOM render
+      setTimeout(() => searchRef.current?.focus(), 0)
+    }
+  }, [searchActive])
 
   // Auto-expand parent folders when active doc changes
   useEffect(() => {
@@ -539,41 +580,110 @@ function TreeSidebar({ docs, activeDocId, onSelect, onBack, project }) {
   const modifiedCount = docs.filter((d) => d.status === 'modified' || d.status === 'conflict').length
   const onlineCount = 3
 
-  return (
-    <aside className="w-[280px] shrink-0 bg-neutral-50/50 border-r border-neutral-200 flex flex-col">
-      {/* Top row: back + search */}
-      <div className="shrink-0 px-3 pt-3 pb-2 border-b border-neutral-100 bg-white">
+  if (collapsed) {
+    return (
+      <aside className="h-full flex flex-col items-center py-3 bg-neutral-50/50 border-r border-neutral-200">
         <button
           type="button"
-          onClick={onBack}
-          className="inline-flex items-center gap-1.5 text-xs text-neutral-500 hover:text-primary-600 transition-colors mb-2"
+          onClick={onToggleCollapse}
+          className="w-7 h-7 inline-flex items-center justify-center rounded-md text-neutral-500 hover:text-primary-600 hover:bg-primary-50 transition-colors"
+          title="展开目录树"
         >
-          <ArrowLeft size={12} />
-          返回文档库
+          <ChevronRight size={14} />
         </button>
-        <div className="relative">
-          <Search
-            size={13}
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"
-          />
-          <input
-            ref={searchRef}
-            type="text"
-            className="w-full h-8 pl-7 pr-6 rounded-md text-xs bg-neutral-100/80 border border-transparent focus:border-primary-200 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition placeholder:text-neutral-400"
-            placeholder="搜索文档 / 文件夹…"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-          />
-          {keyword && (
+        <div className="mt-3 flex-1 flex flex-col items-center gap-1.5 w-full overflow-hidden">
+          {docs.slice(0, 5).map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              onClick={() => onSelect(d)}
+              title={d.title || d.path}
+              className={`w-6 h-6 rounded-md inline-flex items-center justify-center transition ${
+                activeDocId === d.id ? 'bg-primary-50 text-primary-600' : 'text-neutral-400 hover:text-neutral-700 hover:bg-neutral-200/60'
+              }`}
+            >
+              <FileText size={12} />
+            </button>
+          ))}
+        </div>
+      </aside>
+    )
+  }
+
+  return (
+    <aside className="h-full bg-neutral-50/50 border-r border-neutral-200 flex flex-col min-w-0">
+      {/* Top row: back + search icon + collapse button */}
+      <div className="shrink-0 px-3 pt-3 pb-2 border-b border-neutral-100 bg-white">
+        {!searchActive ? (
+          <div className="flex items-center justify-between">
             <button
               type="button"
-              onClick={() => setKeyword('')}
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-neutral-200 text-neutral-400 hover:text-neutral-600"
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 text-xs text-neutral-500 hover:text-primary-600 transition-colors"
             >
-              <X size={12} />
+              <ArrowLeft size={12} />
+              返回文档库
             </button>
-          )}
-        </div>
+            <div className="flex items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => setSearchActive(true)}
+                className="w-7 h-7 inline-flex items-center justify-center rounded-md text-neutral-500 hover:text-primary-600 hover:bg-primary-50 transition-colors"
+                title="搜索文档 / 文件夹"
+              >
+                <Search size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={onToggleCollapse}
+                className="w-7 h-7 inline-flex items-center justify-center rounded-md text-neutral-500 hover:text-primary-600 hover:bg-primary-50 transition-colors"
+                title="收起目录树"
+              >
+                <ChevronLeft size={14} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="relative">
+            <Search
+              size={13}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"
+            />
+            <input
+              ref={searchRef}
+              type="text"
+              className="w-full h-8 pl-7 pr-8 rounded-md text-xs bg-neutral-100/80 border border-primary-200 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition placeholder:text-neutral-400"
+              placeholder="搜索文档 / 文件夹…"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              onBlur={(e) => {
+                // deactivate only if empty and not clicking clear button
+                if (!e.target.value) setSearchActive(false)
+              }}
+            />
+            {keyword ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setKeyword('')
+                  searchRef.current?.focus()
+                }}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-neutral-200 text-neutral-400 hover:text-neutral-600"
+              >
+                <X size={12} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setSearchActive(false)}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-neutral-200 text-neutral-400 hover:text-neutral-600"
+                title="取消搜索"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Tree area */}
@@ -693,12 +803,48 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
   const status = STATUS_MAP[doc.status] || STATUS_MAP.synced
   const pathParts = (doc.path || '').split('/').filter(Boolean)
   const contentRef = useRef(null)
+  const previewScrollRef = useRef(null)
   const [fadeKey, setFadeKey] = useState(0)
+  const [activeHeadingId, setActiveHeadingId] = useState(null)
+
+  // Extract TOC from markdown source
+  const tocItems = useMemo(() => extractToc(doc?.content), [doc?.content])
 
   // Trigger fade-in animation when doc changes
   useEffect(() => {
     setFadeKey((k) => k + 1)
+    setActiveHeadingId(null)
   }, [doc?.id])
+
+  // Scroll-spy: highlight current heading based on scroll position
+  useEffect(() => {
+    if (view !== 'preview' || !previewScrollRef.current) return
+    const container = previewScrollRef.current
+    const handleScroll = () => {
+      const headings = container.querySelectorAll('h1[id], h2[id], h3[id]')
+      let current = null
+      for (const h of headings) {
+        const rect = h.getBoundingClientRect()
+        const containerTop = container.getBoundingClientRect().top
+        if (rect.top - containerTop <= 80) {
+          current = h.id
+        }
+      }
+      setActiveHeadingId(current)
+    }
+    container.addEventListener('scroll', handleScroll, { passive: true })
+    handleScroll()
+    return () => container.removeEventListener('scroll', handleScroll)
+  }, [view, doc?.id])
+
+  // Jump to heading when TOC item clicked
+  const jumpToHeading = (id) => {
+    if (!id || !previewScrollRef.current) return
+    const el = previewScrollRef.current.querySelector(`#${CSS.escape(id)}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
 
   // Double-click preview → enter edit mode (WYSIWYG hint)
   const handlePreviewClick = (e) => {
@@ -782,32 +928,6 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
             </button>
           </div>
         </div>
-
-        {/* Line 3: edit-mode collaboration presence bar */}
-        {view === 'edit' && (
-          <div className="mt-2 flex items-center gap-2 text-xs text-neutral-500 animate-fade-up">
-            <div className="flex items-center gap-1.5">
-              <Activity size={12} className="text-emerald-500 animate-pulse" />
-              <span className="text-emerald-700 font-medium">协作中</span>
-            </div>
-            <span className="text-neutral-300">·</span>
-            <span>{activeEditors.length + 1} 人正在编辑此文档</span>
-            <div className="flex items-center -space-x-1 ml-1">
-              {activeEditors.map((m) => (
-                <div
-                  key={m.id}
-                  className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-semibold ring-2 ring-white"
-                  style={{ backgroundColor: m.avatarColor }}
-                  title={`${m.name} · 正在输入`}
-                >
-                  {m.name.slice(0, 1).toUpperCase()}
-                </div>
-              ))}
-            </div>
-            <span className="flex-1" />
-            <span className="text-neutral-400 text-[11px]">Markdown · UTF-8</span>
-          </div>
-        )}
       </div>
 
       {/* Format toolbar (edit mode only) — sticky */}
@@ -860,18 +980,54 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
         ref={contentRef}
       >
         {view === 'preview' ? (
-          /* ===== PREVIEW mode — immersive, clickable WYSIWYG ===== */
-          <div
-            className="flex-1 overflow-y-auto scrollbar-thin min-h-0 cursor-text"
-            onClick={handlePreviewClick}
-            onDoubleClick={handlePreviewDoubleClick}
-          >
+          /* ===== PREVIEW mode — immersive, clickable WYSIWYG + TOC ===== */
+          <div className="flex-1 relative min-h-0">
             <div
-              className="max-w-3xl mx-auto px-10 py-10 prose-doc relative group"
-              dangerouslySetInnerHTML={{ __html: markdownToHtml(doc.content) }}
-            />
-            {/* Subtle "double-click to edit" hint overlay */}
-            <div className="pointer-events-none fixed bottom-6 right-[320px] opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+              ref={previewScrollRef}
+              className="flex-1 h-full overflow-y-auto scrollbar-thin cursor-text"
+              onClick={handlePreviewClick}
+              onDoubleClick={handlePreviewDoubleClick}
+            >
+              <div
+                className="max-w-3xl mx-auto px-10 py-10 prose-doc relative group"
+                dangerouslySetInnerHTML={{ __html: markdownToHtml(doc.content) }}
+              />
+            </div>
+
+            {/* Floating TOC — only shown when doc has headings */}
+            {tocItems.length > 0 && (
+              <nav className="absolute right-4 top-4 bottom-4 w-52 shrink-0 hidden xl:flex xl:flex-col pt-2 pl-4 overflow-y-auto scrollbar-thin">
+                <div className="text-[10px] uppercase tracking-wider text-neutral-400 font-semibold mb-2 px-2">
+                  目录
+                </div>
+                <ul className="space-y-0.5">
+                  {tocItems.map((item, idx) => (
+                    <li
+                      key={`${item.id}-${idx}`}
+                      className={`transition-all duration-150 ${
+                        item.level === 2 ? 'pl-0' : item.level === 3 ? 'pl-3' : 'pl-0'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => jumpToHeading(item.id)}
+                        className={`block w-full text-left text-xs leading-5 px-2 py-0.5 rounded truncate transition-colors ${
+                          activeHeadingId === item.id
+                            ? 'bg-primary-50 text-primary-700 font-medium'
+                            : 'text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100'
+                        }`}
+                        title={item.text}
+                      >
+                        {item.text}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+            )}
+
+            {/* Subtle "double-click to edit" hint overlay — positioned outside TOC area */}
+            <div className="pointer-events-none fixed bottom-6 right-[340px] opacity-0 hover-group:opacity-100 transition-opacity duration-200 group-hover:opacity-100">
               <div className="bg-neutral-900/80 text-white text-xs px-3 py-1.5 rounded-lg shadow-lg flex items-center gap-2">
                 <PenTool size={12} />
                 双击任意位置开始编辑
@@ -919,16 +1075,31 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
         )}
       </div>
 
-      {/* Bottom status bar (edit mode) — optional mini info */}
+      {/* Bottom status bar (edit mode) — with collab presence merged in */}
       {view === 'edit' && (
         <div className="shrink-0 h-6 px-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between text-[11px] text-neutral-400">
           <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1 text-emerald-600">
+              <Activity size={10} className="animate-pulse" />
+              协同中
+            </span>
+            <span className="text-neutral-300">·</span>
+            <span>{activeEditors.length + 1} 人正在编辑</span>
+            <div className="flex items-center -space-x-1 ml-0.5">
+              {activeEditors.map((m) => (
+                <div
+                  key={m.id}
+                  className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[8px] font-semibold ring-2 ring-neutral-50"
+                  style={{ backgroundColor: m.avatarColor }}
+                  title={`${m.name} · 正在编辑`}
+                >
+                  {m.name.slice(0, 1).toUpperCase()}
+                </div>
+              ))}
+            </div>
+            <span className="text-neutral-300">·</span>
             <span>行 {editContent.split('\n').length}</span>
             <span>字 {editContent.length}</span>
-            <span className="flex items-center gap-1 text-emerald-600">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              实时同步中
-            </span>
           </div>
           <div className="flex items-center gap-3">
             <span>UTF-8</span>
@@ -947,7 +1118,7 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
 // Focused mode: Collaboration panel (AI / comments / history + presence)
 // ---------------------------------------------------------------------------
 
-function CollaborativePanel({ doc, team, versions }) {
+function CollaborativePanel({ doc, team, versions, collapsed, onToggleCollapse }) {
   const [tab, setTab] = useState('ai')
   const [aiInput, setAiInput] = useState('')
   const [aiReply, setAiReply] = useState(null)
@@ -957,8 +1128,6 @@ function CollaborativePanel({ doc, team, versions }) {
     team.forEach((t) => (m[t.id] = t))
     return m
   }, [team])
-
-  const presenceMembers = team.slice(0, 3)
 
   const sendAI = (prompt) => {
     const q = prompt || aiInput.trim()
@@ -995,25 +1164,68 @@ function CollaborativePanel({ doc, team, versions }) {
     { id: 'history', icon: History, label: '历史' },
   ]
 
+  if (collapsed) {
+    return (
+      <aside className="h-full flex flex-col items-center py-3 bg-white border-l border-neutral-200">
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          className="w-7 h-7 inline-flex items-center justify-center rounded-md text-neutral-500 hover:text-primary-600 hover:bg-primary-50 transition-colors"
+          title="展开协作面板"
+        >
+          <ChevronLeft size={14} />
+        </button>
+        <div className="mt-3 flex-1 flex flex-col items-center gap-2 w-full overflow-hidden">
+          {tabs.map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => {
+                setTab(id)
+                onToggleCollapse()
+              }}
+              title={label}
+              className={`w-7 h-7 rounded-md inline-flex items-center justify-center transition ${
+                tab === id ? 'bg-primary-50 text-primary-600' : 'text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100'
+              }`}
+            >
+              <Icon size={13} />
+            </button>
+          ))}
+        </div>
+      </aside>
+    )
+  }
+
   return (
-    <aside className="w-[300px] shrink-0 bg-white border-l border-neutral-200 flex flex-col">
-      {/* Tabs header */}
-      <div className="h-11 border-b border-neutral-200 flex shrink-0">
-        {tabs.map(({ id, icon: Icon, label }) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            className={`flex-1 inline-flex items-center justify-center gap-1.5 text-xs font-medium transition border-b-2 ${
-              tab === id
-                ? 'text-primary-700 border-primary-500'
-                : 'text-neutral-500 border-transparent hover:text-neutral-800'
-            }`}
-          >
-            <Icon size={13} />
-            {label}
-          </button>
-        ))}
+    <aside className="h-full bg-white border-l border-neutral-200 flex flex-col min-w-0">
+      {/* Tabs header + collapse */}
+      <div className="h-11 border-b border-neutral-200 flex shrink-0 items-center">
+        <div className="flex-1 flex h-full">
+          {tabs.map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              className={`flex-1 inline-flex items-center justify-center gap-1.5 text-xs font-medium transition border-b-2 ${
+                tab === id
+                  ? 'text-primary-700 border-primary-500'
+                  : 'text-neutral-500 border-transparent hover:text-neutral-800'
+              }`}
+            >
+              <Icon size={13} />
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          className="w-8 h-full inline-flex items-center justify-center text-neutral-500 hover:text-primary-600 hover:bg-primary-50/50 transition-colors border-l border-neutral-200"
+          title="收起协作面板"
+        >
+          <ChevronRight size={14} />
+        </button>
       </div>
 
       {/* Tab content */}
@@ -1111,23 +1323,6 @@ function CollaborativePanel({ doc, team, versions }) {
         )}
       </div>
 
-      {/* Presence footer */}
-      <div className="border-t border-neutral-200 p-3 flex items-center gap-2 shrink-0">
-        <div className="flex items-center -space-x-1.5">
-          {presenceMembers.map((m) => (
-            <div
-              key={m.id}
-              className="relative w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-semibold ring-2 ring-white"
-              style={{ backgroundColor: m.avatarColor }}
-              title={`${m.name} · 正在编辑`}
-            >
-              {m.name.slice(0, 1).toUpperCase()}
-              <span className="absolute -bottom-0 -right-0 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-white" />
-            </div>
-          ))}
-        </div>
-        <span className="text-xs text-neutral-500">+3 人正在编辑</span>
-      </div>
     </aside>
   )
 }
@@ -1159,6 +1354,27 @@ export default function ProjectBrowse() {
   const [focusedView, setFocusedView] = useState('preview')
   const [editContent, setEditContent] = useState('')
   const [focusedSaving, setFocusedSaving] = useState(false)
+
+  // Panel refs for programmatic collapse/expand
+  const leftPanelRef = useRef(null)
+  const rightPanelRef = useRef(null)
+
+  // Panel collapse state (driven by Panel events + toggles from child buttons)
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
+
+  const toggleLeftPanel = () => {
+    const p = leftPanelRef.current
+    if (!p) return
+    if (p.isCollapsed()) p.expand()
+    else p.collapse()
+  }
+  const toggleRightPanel = () => {
+    const p = rightPanelRef.current
+    if (!p) return
+    if (p.isCollapsed()) p.expand()
+    else p.collapse()
+  }
 
   // Grid-mode local UI state
   const [keyword, setKeyword] = useState('')
@@ -1371,32 +1587,62 @@ export default function ProjectBrowse() {
   }
 
   // =======================================================================
-  // FOCUSED MODE — full-height three-column flex, each column own overflow
+  // FOCUSED MODE — full-height resizable three-column layout
   // =======================================================================
   return (
-    <div className="h-full flex">
-      <TreeSidebar
-        docs={documents}
-        activeDocId={activeDoc?.id}
-        onSelect={selectDocInSidebar}
-        onBack={backToGrid}
-        project={project}
-      />
-      <DocumentEditor
-        doc={activeDoc}
-        editContent={editContent}
-        onEditChange={handleEditChange}
-        view={focusedView}
-        setView={setFocusedView}
-        onSave={handleSave}
-        saving={focusedSaving}
-        team={team}
-      />
-      <CollaborativePanel
-        doc={activeDoc}
-        team={team}
-        versions={versions}
-      />
-    </div>
+    <PanelGroup direction="horizontal" className="h-full">
+      <Panel
+        ref={leftPanelRef}
+        id="left-sidebar"
+        defaultSize={22}
+        minSize={14}
+        collapsible
+        collapsedSize={4}
+        onCollapse={() => setLeftCollapsed(true)}
+        onExpand={() => setLeftCollapsed(false)}
+      >
+        <TreeSidebar
+          docs={documents}
+          activeDocId={activeDoc?.id}
+          onSelect={selectDocInSidebar}
+          onBack={backToGrid}
+          project={project}
+          collapsed={leftCollapsed}
+          onToggleCollapse={toggleLeftPanel}
+        />
+      </Panel>
+      <PanelResizeHandle className="resize-handle" />
+      <Panel id="center-editor" defaultSize={56} minSize={30}>
+        <DocumentEditor
+          doc={activeDoc}
+          editContent={editContent}
+          onEditChange={handleEditChange}
+          view={focusedView}
+          setView={setFocusedView}
+          onSave={handleSave}
+          saving={focusedSaving}
+          team={team}
+        />
+      </Panel>
+      <PanelResizeHandle className="resize-handle" />
+      <Panel
+        ref={rightPanelRef}
+        id="right-panel"
+        defaultSize={22}
+        minSize={14}
+        collapsible
+        collapsedSize={4}
+        onCollapse={() => setRightCollapsed(true)}
+        onExpand={() => setRightCollapsed(false)}
+      >
+        <CollaborativePanel
+          doc={activeDoc}
+          team={team}
+          versions={versions}
+          collapsed={rightCollapsed}
+          onToggleCollapse={toggleRightPanel}
+        />
+      </Panel>
+    </PanelGroup>
   )
 }

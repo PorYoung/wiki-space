@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard,
   FolderOpen,
@@ -13,6 +13,10 @@ import {
   BookOpen,
   RefreshCw,
   AlertCircle,
+  X,
+  Database,
+  HardDrive,
+  GitFork,
 } from 'lucide-react'
 import {
   fetchProjects,
@@ -105,11 +109,14 @@ function ActivityItemSkeleton() {
 // ---- main page --------------------------------------------------------
 
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [projects, setProjects] = useState([])
   const [documents, setDocuments] = useState([])
   const [team, setTeam] = useState([])
   const [activities, setActivities] = useState([])
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [toast, setToast] = useState(null)
 
   useEffect(() => {
     ;(async () => {
@@ -149,23 +156,51 @@ export default function Dashboard() {
   const avatarColor = (actor) => teamMap.get(actor)?.avatarColor || '#6366f1'
   const avatarInitial = (actor) => (actor || '?').slice(0, 1).toUpperCase()
 
-  // 需要关注
+  // 需要关注 —— 带跳转目标的交互式提醒
   const conflictDocs = documents.filter((d) => d.status === 'conflict')
   const outdatedProjects = projects.filter((p) => {
     const days = (Date.now() - new Date(p.lastSynced).getTime()) / 86400000
     return days > 2
   })
+  const modifiedDocs = documents.filter((d) => d.status === 'modified')
 
   const alerts = []
   if (conflictDocs.length > 0) {
-    alerts.push(`有 ${conflictDocs.length} 个文档存在 Git 冲突待处理`)
+    alerts.push({
+      icon: AlertCircle,
+      title: `${conflictDocs.length} 个文档存在 Git 冲突`,
+      desc: '点击进入项目处理冲突合并',
+      cta: '立即处理',
+      target: `/project/${conflictDocs[0].projectId}/browse`,
+      tone: 'danger',
+      count: conflictDocs.length,
+    })
   }
   outdatedProjects.forEach((p) => {
     const days = Math.floor(
       (Date.now() - new Date(p.lastSynced).getTime()) / 86400000,
     )
-    alerts.push(`${p.name} 上次同步已过期 ${days} 天`)
+    alerts.push({
+      icon: RefreshCw,
+      title: `${p.name} 同步过期 ${days} 天`,
+      desc: '建议手动触发一次同步以保持最新',
+      cta: '查看项目',
+      target: `/project/${p.id}/publish`,
+      tone: 'warning',
+      count: null,
+    })
   })
+  if (modifiedDocs.length > 0 && modifiedDocs.length <= 5) {
+    alerts.push({
+      icon: FileText,
+      title: `${modifiedDocs.length} 个文档有本地修改待提交`,
+      desc: '检查改动是否需要提交到 Git',
+      cta: '查看改动',
+      target: `/library`,
+      tone: 'primary',
+      count: modifiedDocs.length,
+    })
+  }
 
   // ---------- render ----------
   return (
@@ -190,10 +225,14 @@ export default function Dashboard() {
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <Link to="/library/new" className="btn-primary">
+              <button
+                type="button"
+                onClick={() => setShowNewProject(true)}
+                className="btn-primary"
+              >
                 <Plus size={16} />
                 新建文档库
-              </Link>
+              </button>
               <Link to="/sources" className="btn-secondary">
                 <RefreshCw size={16} />
                 从 Git 导入
@@ -355,31 +394,97 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Alerts */}
+      {/* Alerts — interactive cards */}
       {!loading && alerts.length > 0 && (
         <section
           className="animate-fade-up"
           style={{ animationDelay: '180ms' }}
         >
-          <div className="card p-5 border-warning/40 bg-amber-50/40">
-            <div className="flex items-start gap-3">
-              <AlertCircle
-                size={18}
-                className="text-warning flex-shrink-0 mt-0.5"
-              />
-              <div className="flex-1">
-                <h3 className="text-sm font-semibold text-neutral-900">
-                  需要关注
-                </h3>
-                <ul className="mt-2 space-y-1.5 text-sm text-neutral-600 list-disc list-inside marker:text-warning">
-                  {alerts.map((text, idx) => (
-                    <li key={idx}>{text}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
+          <SectionHeading
+            title="需要关注"
+            icon={<AlertCircle size={16} className="text-warning" />}
+          />
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {alerts.map((alert, idx) => {
+              const Icon = alert.icon
+              const toneMap = {
+                danger: {
+                  bg: 'bg-red-50 border-red-100 hover:border-red-200 hover:bg-red-100/60',
+                  iconBg: 'bg-danger/10 text-danger',
+                  ctaCls: 'text-danger hover:text-red-700',
+                },
+                warning: {
+                  bg: 'bg-amber-50 border-amber-100 hover:border-amber-200 hover:bg-amber-100/60',
+                  iconBg: 'bg-amber-100 text-amber-600',
+                  ctaCls: 'text-amber-600 hover:text-amber-700',
+                },
+                primary: {
+                  bg: 'bg-primary-50 border-primary-100 hover:border-primary-200 hover:bg-primary-100/60',
+                  iconBg: 'bg-primary-100 text-primary-600',
+                  ctaCls: 'text-primary-600 hover:text-primary-700',
+                },
+              }
+              const tone = toneMap[alert.tone] || toneMap.warning
+
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => navigate(alert.target)}
+                  className={`group p-4 rounded-xl border text-left transition-all animate-fade-up ${tone.bg}`}
+                  style={{ animationDelay: `${200 + idx * 60}ms` }}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${tone.iconBg}`}>
+                      <Icon size={18} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-sm font-semibold text-neutral-900 truncate">
+                          {alert.title}
+                        </h4>
+                        {alert.count != null && alert.count > 1 && (
+                          <span className="shrink-0 text-[10px] font-semibold text-white bg-neutral-800 rounded-full px-1.5 py-0.5">
+                            {alert.count}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-neutral-500 mt-1 leading-relaxed line-clamp-2">
+                        {alert.desc}
+                      </p>
+                      <div className={`mt-2 inline-flex items-center gap-1 text-xs font-medium ${tone.ctaCls} group-hover:gap-1.5 transition-all`}>
+                        {alert.cta}
+                        <ChevronRight size={13} />
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              )
+            })}
           </div>
         </section>
+      )}
+
+      {/* New Project Modal */}
+      {showNewProject && (
+        <NewProjectModal
+          onClose={() => setShowNewProject(false)}
+          onCreate={(project) => {
+            setShowNewProject(false)
+            setToast(`已创建项目「${project.name}」`)
+            setTimeout(() => setToast(null), 2000)
+          }}
+        />
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-fade-up">
+          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-sm font-medium text-neutral-800 bg-white border border-neutral-200">
+            <span className="text-emerald-500">✓</span>
+            {toast}
+          </div>
+        </div>
       )}
     </div>
   )
@@ -426,6 +531,209 @@ function SectionHeading({ title, icon, to }) {
           <ChevronRight size={14} />
         </Link>
       )}
+    </div>
+  )
+}
+
+// ---- New Project Modal ------------------------------------------------
+
+const PROJECT_SOURCE_OPTIONS = [
+  { key: 'local', label: '本地文件夹', desc: '从本地磁盘读取 Markdown 文档', icon: HardDrive },
+  { key: 'git', label: 'Git 仓库', desc: '绑定 GitHub / GitLab 仓库自动同步', icon: GitFork },
+  { key: 'sources', label: '使用已有数据源', desc: '从已连接的数据源创建项目', icon: Database },
+]
+
+const PROJECT_COLORS = [
+  'bg-violet-100', 'bg-sky-100', 'bg-rose-100', 'bg-amber-100',
+  'bg-emerald-100', 'bg-indigo-100', 'bg-teal-100', 'bg-orange-100',
+]
+
+function NewProjectModal({ onClose, onCreate }) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [sourceType, setSourceType] = useState('git')
+  const [url, setUrl] = useState('')
+  const [color, setColor] = useState(PROJECT_COLORS[0])
+  const [creating, setCreating] = useState(false)
+
+  const SourceIcon = PROJECT_SOURCE_OPTIONS.find((o) => o.key === sourceType)?.icon || GitFork
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (!name.trim()) return
+    setCreating(true)
+    await new Promise((r) => setTimeout(r, 600))
+    onCreate({
+      id: `p-new-${Date.now()}`,
+      name: name.trim(),
+      description: description.trim() || '新建文档库',
+      sourceType,
+      sourceUrl: url.trim(),
+      color,
+      docCount: 0,
+      lastSynced: new Date().toISOString(),
+    })
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-900/40 backdrop-blur-sm animate-fade-up p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg max-h-[85vh] bg-white rounded-xl shadow-xl border border-neutral-200 overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-200 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="h-9 w-9 rounded-lg bg-primary-50 text-primary-600 flex items-center justify-center">
+              <FolderOpen size={18} />
+            </div>
+            <div>
+              <h3 className="font-semibold text-neutral-900">新建文档库</h3>
+              <p className="text-xs text-neutral-500">创建一个新的知识库或文档项目</p>
+            </div>
+          </div>
+          <button className="btn-ghost !p-2" onClick={onClose} title="关闭">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Form body - scrollable */}
+        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto scrollbar-thin">
+          <div className="p-5 space-y-4">
+            {/* Name */}
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                项目名称 <span className="text-danger">*</span>
+              </label>
+              <input
+                type="text"
+                className="input"
+                placeholder="例如：EdgeAgent Platform"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+
+            {/* Description */}
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                描述
+              </label>
+              <input
+                type="text"
+                className="input"
+                placeholder="简短描述这个项目的用途"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+
+            {/* Source type */}
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-2">
+                数据源类型
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {PROJECT_SOURCE_OPTIONS.map((opt) => {
+                  const Icon = opt.icon
+                  const active = sourceType === opt.key
+                  return (
+                    <button
+                      type="button"
+                      key={opt.key}
+                      onClick={() => setSourceType(opt.key)}
+                      className={`p-2.5 rounded-lg border text-left transition-all ${
+                        active
+                          ? 'border-primary-400 bg-primary-50 ring-2 ring-primary-100'
+                          : 'border-neutral-200 bg-white hover:border-neutral-300'
+                      }`}
+                    >
+                      <Icon size={16} className={active ? 'text-primary-600' : 'text-neutral-500'} />
+                      <div className="text-[12px] font-medium text-neutral-800 mt-1">{opt.label}</div>
+                      <div className="text-[10px] text-neutral-500 leading-tight mt-0.5">{opt.desc}</div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* Source URL */}
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                {sourceType === 'local' ? '文件夹路径' : sourceType === 'git' ? '仓库地址' : '数据源'}
+                <span className="text-danger ml-0.5">*</span>
+              </label>
+              <div className="relative">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400">
+                  <SourceIcon size={14} />
+                </div>
+                <input
+                  type="text"
+                  className="input pl-9 font-mono"
+                  placeholder={
+                    sourceType === 'local'
+                      ? 'C:/Users/poryo/Documents/MyVault'
+                      : sourceType === 'git'
+                      ? 'https://github.com/user/repo.git'
+                      : '选择已有数据源'
+                  }
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+
+            {/* Color picker */}
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-2">
+                项目颜色
+              </label>
+              <div className="flex gap-2">
+                {PROJECT_COLORS.map((c) => (
+                  <button
+                    type="button"
+                    key={c}
+                    onClick={() => setColor(c)}
+                    className={`w-8 h-8 rounded-lg ${c} transition-all ${
+                      color === c ? 'ring-2 ring-offset-2 ring-primary-400 scale-110' : 'hover:scale-105'
+                    }`}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Footer - always visible */}
+          <div className="sticky bottom-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-neutral-100 bg-white">
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              取消
+            </button>
+            <button
+              type="submit"
+              className="btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
+              disabled={creating || !name.trim()}
+            >
+              {creating ? (
+                <>
+                  <RefreshCw size={14} className="animate-spin" />
+                  创建中...
+                </>
+              ) : (
+                <>
+                  <Plus size={14} />
+                  创建项目
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }

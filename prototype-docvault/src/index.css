@@ -105,6 +105,14 @@ body {
   animation: fadeUp 0.4s ease-out both;
 }
 
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+.animate-slide-in {
+  animation: slideInRight 0.25s ease-out both;
+}
+
 /* Editor markdown preview styling (for WYSIWYG mock) */
 .prose-doc h1 { @apply font-display text-2xl font-bold text-neutral-900 mt-6 mb-3; }
 .prose-doc h2 { @apply font-display text-xl font-semibold text-neutral-900 mt-5 mb-2; }
@@ -117,3 +125,18 @@ body {
 .prose-doc blockquote { @apply border-l-4 border-primary-300 pl-4 my-3 text-sm text-neutral-600 italic; }
 .prose-doc a { @apply text-primary-600 hover:text-primary-700 underline underline-offset-2; }
 .prose-doc hr { @apply my-6 border-neutral-200; }
+
+/* Resize handle for resizable panels */
+.resize-handle {
+  width: 4px;
+  background-color: #e5e5e5;
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease;
+}
+.resize-handle:hover {
+  background-color: #b5c6e8;
+}
+.resize-handle[data-resize-handle-active] {
+  background-color: #93aede;
+}
