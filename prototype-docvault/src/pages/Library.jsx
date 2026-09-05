@@ -17,6 +17,9 @@ import {
   User,
   Tag,
   ChevronRight,
+  LayoutGrid,
+  FolderKanban,
+  ArrowRight,
 } from 'lucide-react'
 import { fetchProjects, fetchDocuments } from '../api/stubs.js'
 import { authors as authorsData } from '../mock/data.js'
@@ -39,6 +42,13 @@ const SOURCE_ICON = {
   web: ExternalLink,
 }
 
+const SOURCE_LABEL = {
+  git: 'Git',
+  local: '本地',
+  'repo-docs': '仓库 /docs',
+  web: '网页',
+}
+
 function relativeTime(isoString) {
   const now = new Date('2026-09-05T10:30:00+08:00')
   const date = new Date(isoString)
@@ -57,7 +67,6 @@ function relativeTime(isoString) {
 
 function extractPreview(content) {
   if (!content) return ''
-  // Strip markdown headings and code fences to get plain preview text
   const lines = content
     .split('\n')
     .map((l) => l.replace(/^#+\s*/, '').replace(/[`*_>-]/g, '').trim())
@@ -71,7 +80,6 @@ function getAuthorName(authorId) {
 }
 
 function avatarColor(authorId) {
-  // Deterministic hue by id so the same user always has the same color
   const palette = [
     'bg-violet-500',
     'bg-sky-500',
@@ -99,7 +107,6 @@ function avatarColor(authorId) {
 function LibrarySkeleton() {
   return (
     <>
-      {/* Header skeleton */}
       <div className="animate-fade-up flex items-start justify-between mb-6">
         <div>
           <div className="skeleton h-7 w-28 mb-2" />
@@ -111,10 +118,8 @@ function LibrarySkeleton() {
         </div>
       </div>
 
-      {/* Filter strip skeleton */}
       <div className="skeleton h-8 w-full mb-5" />
 
-      {/* Grid skeleton */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
         {Array.from({ length: 6 }).map((_, i) => (
           <div
@@ -163,7 +168,6 @@ function DocumentCard({ doc, delayMs = 0 }) {
       style={{ animationDelay: `${delayMs}ms` }}
     >
       <div className="p-4 space-y-3">
-        {/* Top row: path breadcrumb + status */}
         <div className="flex items-center justify-between gap-2">
           <div className="font-mono text-[11px] text-neutral-400 truncate flex items-center gap-1">
             <span>{parentFolder}</span>
@@ -173,7 +177,6 @@ function DocumentCard({ doc, delayMs = 0 }) {
           <span className={`shrink-0 ${status.cls}`}>{status.label}</span>
         </div>
 
-        {/* Title + preview */}
         <div className="space-y-1.5">
           <h3 className="text-base font-semibold text-neutral-900 leading-tight line-clamp-1">
             {doc.title}
@@ -184,7 +187,6 @@ function DocumentCard({ doc, delayMs = 0 }) {
           />
         </div>
 
-        {/* Meta row */}
         <div className="flex items-center gap-2 text-xs text-neutral-500 pt-1 border-t border-neutral-100">
           <div
             className={`w-6 h-6 rounded-full ${avatarColor(
@@ -201,7 +203,6 @@ function DocumentCard({ doc, delayMs = 0 }) {
           </span>
         </div>
 
-        {/* Tags */}
         {doc.tags?.length > 0 && (
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {doc.tags.slice(0, 3).map((t) => (
@@ -213,11 +214,76 @@ function DocumentCard({ doc, delayMs = 0 }) {
           </div>
         )}
 
-        {/* Hover reveal button */}
         <div className="absolute bottom-3 right-3 opacity-0 translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-150">
           <span className="btn-ghost !px-2 !py-1 text-xs">
             打开编辑器
             <ChevronRight size={12} />
+          </span>
+        </div>
+      </div>
+    </Link>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Project card (for "按项目" view)
+// ---------------------------------------------------------------------------
+
+function ProjectCard({ project, docCount, delayMs = 0 }) {
+  const Icon = SOURCE_ICON[project.sourceType] || HardDrive
+  const iconTextCls = project.color
+    .replace('bg-', 'text-')
+    .replace('-100', '-600')
+
+  return (
+    <Link
+      to={`/project/${project.id}`}
+      className="card-hover animate-fade-up block relative group overflow-hidden"
+      style={{ animationDelay: `${delayMs}ms` }}
+    >
+      <div className="p-5 space-y-4">
+        {/* Top row: icon + source tag */}
+        <div className="flex items-start justify-between gap-3">
+          <div
+            className={`w-12 h-12 rounded-xl ${project.color} flex items-center justify-center shrink-0`}
+          >
+            <Icon size={22} className={iconTextCls} />
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <span className="tag-neutral !text-[10px] !px-1.5 !py-0">
+              {SOURCE_LABEL[project.sourceType] || project.sourceType}
+            </span>
+            <span className="text-[11px] text-neutral-400 flex items-center gap-0.5">
+              <Clock size={10} />
+              {relativeTime(project.lastSynced)}
+            </span>
+          </div>
+        </div>
+
+        {/* Name + description */}
+        <div className="space-y-1">
+          <h3 className="text-base font-semibold text-neutral-900 leading-tight line-clamp-1">
+            {project.name}
+          </h3>
+          <p className="text-xs text-neutral-500 leading-relaxed line-clamp-2">
+            {project.description}
+          </p>
+        </div>
+
+        {/* Doc count preview */}
+        <div className="flex items-center gap-2 pt-2 border-t border-neutral-100">
+          <div className="flex items-center gap-1.5 text-xs text-neutral-600">
+            <FileText size={13} className="text-neutral-400" />
+            <span className="font-semibold text-neutral-800">{docCount}</span>
+            <span className="text-neutral-500">篇文档</span>
+          </div>
+        </div>
+
+        {/* Hover reveal button */}
+        <div className="absolute bottom-4 right-4 opacity-0 translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-150">
+          <span className="btn-primary !px-3 !py-1.5 text-xs inline-flex items-center gap-1">
+            进入项目聚焦
+            <ArrowRight size={13} />
           </span>
         </div>
       </div>
@@ -269,71 +335,6 @@ function ProjectChips({ projects, selected, onSelect, docCounts }) {
 }
 
 // ---------------------------------------------------------------------------
-// Quick jump project tiles
-// ---------------------------------------------------------------------------
-
-function ProjectTiles({ projects, docCounts }) {
-  return (
-    <section className="animate-fade-up" style={{ animationDelay: '300ms' }}>
-      <div className="flex items-center gap-2 mb-3">
-        <span className="text-sm font-semibold text-neutral-800">快速跳转</span>
-        <span className="text-xs text-neutral-400">· 全部项目</span>
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-3">
-        {projects.map((p) => {
-          const Icon = SOURCE_ICON[p.sourceType] || HardDrive
-          return (
-            <Link
-              key={p.id}
-              to={`/library?project=${p.id}`}
-              className="card-hover p-3 flex items-center gap-3"
-            >
-              <div
-                className={`w-10 h-10 rounded-lg ${p.color} flex items-center justify-center shrink-0`}
-              >
-                <Icon
-                  size={18}
-                  className={p.color.replace('bg-', 'text-').replace('-100', '-600')}
-                />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium text-neutral-900 truncate">
-                  {p.name}
-                </div>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="text-[11px] text-neutral-500">
-                    {docCounts[p.id] || 0} 篇文档
-                  </span>
-                  <span
-                    className={`tag-neutral !px-1.5 !py-0 !text-[10px] ${
-                      p.sourceType === 'git'
-                        ? '!text-emerald-700 !bg-emerald-50'
-                        : p.sourceType === 'local'
-                        ? '!text-amber-700 !bg-amber-50'
-                        : p.sourceType === 'repo-docs'
-                        ? '!text-indigo-700 !bg-indigo-50'
-                        : ''
-                    }`}
-                  >
-                    {p.sourceType === 'git'
-                      ? 'Git'
-                      : p.sourceType === 'local'
-                      ? '本地'
-                      : p.sourceType === 'repo-docs'
-                      ? '仓库 /docs'
-                      : p.sourceType}
-                  </span>
-                </div>
-              </div>
-            </Link>
-          )
-        })}
-      </div>
-    </section>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
@@ -342,8 +343,9 @@ export default function Library() {
   const [projects, setProjects] = useState([])
   const [documents, setDocuments] = useState([])
   const [selectedProject, setSelectedProject] = useState(null)
-  const [viewMode, setViewMode] = useState('grid') // visual only
+  const [viewMode, setViewMode] = useState('grid') // document density within flat mode
   const [keyword, setKeyword] = useState('')
+  const [browseMode, setBrowseMode] = useState('flat') // 'flat' | 'project'
 
   useEffect(() => {
     let active = true
@@ -352,7 +354,6 @@ export default function Library() {
       if (!active) return
       setProjects(ps)
       setDocuments(ds)
-      // Show skeleton for a guaranteed 400ms on mount
       setTimeout(() => setLoading(false), 400)
     }
     run()
@@ -361,7 +362,6 @@ export default function Library() {
     }
   }, [])
 
-  // Doc counts per project
   const docCounts = useMemo(() => {
     const c = {}
     documents.forEach((d) => {
@@ -370,7 +370,6 @@ export default function Library() {
     return c
   }, [documents])
 
-  // Filtered document list
   const filteredDocs = useMemo(() => {
     let list = documents
     if (selectedProject) list = list.filter((d) => d.projectId === selectedProject)
@@ -383,7 +382,6 @@ export default function Library() {
           (d.tags || []).some((t) => t.toLowerCase().includes(needle)),
       )
     }
-    // Sort by lastModified desc
     return [...list].sort(
       (a, b) => new Date(b.lastModified) - new Date(a.lastModified),
     )
@@ -406,7 +404,35 @@ export default function Library() {
                 管理所有项目、知识库和代码仓库中的文档
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
+              {/* View-mode pill toggle: flat vs project */}
+              <div className="inline-flex items-center bg-neutral-100 rounded-full p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setBrowseMode('flat')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                    browseMode === 'flat'
+                      ? 'bg-white text-neutral-900 shadow-sm'
+                      : 'text-neutral-500 hover:text-neutral-700'
+                  }`}
+                >
+                  <LayoutGrid size={13} />
+                  平铺
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBrowseMode('project')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                    browseMode === 'project'
+                      ? 'bg-white text-neutral-900 shadow-sm'
+                      : 'text-neutral-500 hover:text-neutral-700'
+                  }`}
+                >
+                  <FolderKanban size={13} />
+                  按项目
+                </button>
+              </div>
+
               <button type="button" className="btn-secondary">
                 <ExternalLink size={16} />
                 导入源
@@ -418,96 +444,106 @@ export default function Library() {
             </div>
           </header>
 
-          {/* 2. Search + toolbar */}
-          <div
-            className="animate-fade-up flex flex-wrap items-center gap-3 mb-5"
-            style={{ animationDelay: '80ms' }}
-          >
-            {/* Search */}
-            <div className="relative flex-1 min-w-[220px] max-w-[360px]">
-              <Search
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400"
-              />
-              <input
-                type="text"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="按标题、路径或标签搜索..."
-                className="input !pl-9 !h-9"
-              />
-            </div>
-
-            {/* Filter chips */}
-            <ProjectChips
-              projects={projects}
-              selected={selectedProject}
-              onSelect={setSelectedProject}
-              docCounts={docCounts}
-            />
-
-            {/* View mode toggle (visual only) */}
-            <div className="flex items-center ml-auto">
-              <div className="inline-flex items-center bg-neutral-100 rounded-md p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('grid')}
-                  className={`p-1.5 rounded transition ${
-                    viewMode === 'grid'
-                      ? 'bg-white text-primary-600 shadow-sm'
-                      : 'text-neutral-500 hover:text-neutral-700'
-                  }`}
-                  aria-label="网格视图"
-                >
-                  <Grid3X3 size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('list')}
-                  className={`p-1.5 rounded transition ${
-                    viewMode === 'list'
-                      ? 'bg-white text-primary-600 shadow-sm'
-                      : 'text-neutral-500 hover:text-neutral-700'
-                  }`}
-                  aria-label="列表视图"
-                >
-                  <List size={16} />
-                </button>
-              </div>
-              <button type="button" className="btn-ghost !p-1.5 ml-1">
-                <Filter size={16} className="text-neutral-500" />
-              </button>
-            </div>
-          </div>
-
-          {/* 3. Document grid */}
-          {filteredDocs.length === 0 ? (
+          {/* 2. Search + toolbar (only in flat mode) */}
+          {browseMode === 'flat' && (
             <div
-              className="animate-fade-up card p-12 text-center"
-              style={{ animationDelay: '120ms' }}
+              className="animate-fade-up flex flex-wrap items-center gap-3 mb-5"
+              style={{ animationDelay: '80ms' }}
             >
-              <FileText size={48} className="mx-auto text-neutral-300 mb-4" />
-              <div className="text-sm font-medium text-neutral-700 mb-1">
-                没有找到匹配的文档
+              <div className="relative flex-1 min-w-[220px] max-w-[360px]">
+                <Search
+                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400"
+                />
+                <input
+                  type="text"
+                  value={keyword}
+                  onChange={(e) => setKeyword(e.target.value)}
+                  placeholder="按标题、路径或标签搜索..."
+                  className="input !pl-9 !h-9"
+                />
               </div>
-              <div className="text-xs text-neutral-400">
-                尝试切换项目筛选条件或清空搜索关键词
+
+              <ProjectChips
+                projects={projects}
+                selected={selectedProject}
+                onSelect={setSelectedProject}
+                docCounts={docCounts}
+              />
+
+              <div className="flex items-center ml-auto">
+                <div className="inline-flex items-center bg-neutral-100 rounded-md p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('grid')}
+                    className={`p-1.5 rounded transition ${
+                      viewMode === 'grid'
+                        ? 'bg-white text-primary-600 shadow-sm'
+                        : 'text-neutral-500 hover:text-neutral-700'
+                    }`}
+                    aria-label="网格视图"
+                  >
+                    <Grid3X3 size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('list')}
+                    className={`p-1.5 rounded transition ${
+                      viewMode === 'list'
+                        ? 'bg-white text-primary-600 shadow-sm'
+                        : 'text-neutral-500 hover:text-neutral-700'
+                    }`}
+                    aria-label="列表视图"
+                  >
+                    <List size={16} />
+                  </button>
+                </div>
+                <button type="button" className="btn-ghost !p-1.5 ml-1">
+                  <Filter size={16} className="text-neutral-500" />
+                </button>
               </div>
             </div>
+          )}
+
+          {/* 3. Content area: flat = document grid, project = project cards */}
+          {browseMode === 'flat' ? (
+            filteredDocs.length === 0 ? (
+              <div
+                className="animate-fade-up card p-12 text-center"
+                style={{ animationDelay: '120ms' }}
+              >
+                <FileText size={48} className="mx-auto text-neutral-300 mb-4" />
+                <div className="text-sm font-medium text-neutral-700 mb-1">
+                  没有找到匹配的文档
+                </div>
+                <div className="text-xs text-neutral-400">
+                  尝试切换项目筛选条件或清空搜索关键词
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+                {filteredDocs.map((doc, i) => (
+                  <DocumentCard
+                    key={doc.id}
+                    doc={doc}
+                    delayMs={120 + i * 60}
+                  />
+                ))}
+              </div>
+            )
           ) : (
+            /* Project view */
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-              {filteredDocs.map((doc, i) => (
-                <DocumentCard
-                  key={doc.id}
-                  doc={doc}
-                  delayMs={120 + i * 60}
+              {projects.map((p, i) => (
+                <ProjectCard
+                  key={p.id}
+                  project={p}
+                  docCount={docCounts[p.id] || 0}
+                  delayMs={60 + i * 50}
                 />
               ))}
             </div>
           )}
-
-          {/* 4. Project tiles — 快速跳转 */}
-          <ProjectTiles projects={projects} docCounts={docCounts} />
         </>
       )}
     </div>

@@ -1,26 +1,63 @@
 import { useState, useEffect } from 'react'
 import {
   Palette,
-  Eye,
+  Rocket,
   Sparkles,
+  Check,
+  Star,
+  Eye,
+  X,
+  ChevronDown,
   ArrowRight,
+  Copy,
+  Download,
   Layout,
   BookOpen,
   LifeBuoy,
-  Rocket,
   FileCode,
   Grid3X3,
-  Star,
-  Check,
-  Copy,
-  X,
-  ChevronDown,
 } from 'lucide-react'
 import { fetchTemplates, fetchProjects, renderPreview } from '../api/stubs.js'
 
 // ---------------------------------------------------------------------------
-// 模板元数据（补充 mock 中没有的字段）
+// UI Themes — 管理视图主题（本地固定选项）
 // ---------------------------------------------------------------------------
+
+const UI_THEMES = [
+  {
+    id: 'fresh-emerald',
+    name: '清新翠绿',
+    accent: '#10b981',
+    description: '低饱和翠绿为主色，适合长时间阅读不疲劳，侧边栏清爽。',
+    bodyFont: 'font-sans',
+  },
+  {
+    id: 'deep-indigo',
+    name: '深邃靛蓝',
+    accent: '#4f46e5',
+    description: '沉稳靛蓝搭配冷灰，科技感强，适合工程团队。',
+    bodyFont: 'font-sans',
+  },
+  {
+    id: 'warm-amber',
+    name: '暖阳琥珀',
+    accent: '#f59e0b',
+    description: '暖色调主色，卡片密度舒适，适合内容创作场景。',
+    bodyFont: 'font-serif',
+  },
+  {
+    id: 'minimal-rose',
+    name: '极简玫瑰',
+    accent: '#f43f5e',
+    description: '低饱和玫红点缀，紧凑卡片密度，适合追求简约的团队。',
+    bodyFont: 'font-sans',
+  },
+]
+
+// ---------------------------------------------------------------------------
+// Publishing Theme Meta（从旧 Templates.jsx 复制）
+// ---------------------------------------------------------------------------
+
 const TEMPLATE_META = {
   't-docs': {
     zhLabel: '文档站',
@@ -77,20 +114,94 @@ const CATEGORY_TABS = [
 ]
 
 // ---------------------------------------------------------------------------
-// 模板预览区 — 内联 SVG + Tailwind mock（每个都风格迥异）
+// UI Theme Card — 管理视图主题卡片
+// ---------------------------------------------------------------------------
+
+function UiThemeCard({ theme, isActive, onApply, delayMs = 0 }) {
+  return (
+    <div
+      className="card-hover animate-fade-up relative group"
+      style={{ animationDelay: `${delayMs}ms` }}
+    >
+      <div className="p-5 space-y-4">
+        {/* Accent swatch + active check */}
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className="w-11 h-11 rounded-xl ring-2 ring-white shadow-sm flex items-center justify-center"
+              style={{ backgroundColor: theme.accent }}
+            >
+              <Sparkles size={18} className="text-white" />
+            </div>
+            {isActive && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[11px] font-semibold">
+                <Check size={11} />
+                已应用
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Name + description */}
+        <div className="space-y-1">
+          <h3 className="text-base font-semibold text-neutral-900 leading-tight">
+            {theme.name}
+          </h3>
+          <p className="text-xs text-neutral-500 leading-relaxed line-clamp-2">
+            {theme.description}
+          </p>
+        </div>
+
+        {/* Accent bar */}
+        <div className="flex items-center gap-1.5">
+          <div
+            className="h-1.5 flex-1 rounded-full"
+            style={{ backgroundColor: theme.accent }}
+          />
+          <span className="text-[10px] font-mono text-neutral-400 uppercase">
+            {theme.accent}
+          </span>
+        </div>
+
+        {/* Apply button */}
+        <button
+          type="button"
+          onClick={() => onApply(theme.id)}
+          className={`w-full inline-flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition ${
+            isActive
+              ? 'bg-neutral-100 text-neutral-500 cursor-default'
+              : 'btn-primary'
+          }`}
+        >
+          {isActive ? (
+            <>
+              <Check size={13} />
+              当前主题
+            </>
+          ) : (
+            <>
+              应用
+              <ArrowRight size={13} />
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 模板预览区 — 内联 SVG + Tailwind mock（从旧 Templates.jsx 复制）
 // ---------------------------------------------------------------------------
 
 function DocsPreview() {
-  // 白底窄内容列 + 侧边栏轮廓，VitePress / MkDocs 感
   return (
     <div className="h-full w-full bg-gradient-to-b from-sky-50 to-white relative overflow-hidden">
-      {/* 顶栏 */}
       <div className="h-5 bg-white border-b border-neutral-200 flex items-center px-2">
         <div className="w-10 h-1 rounded bg-sky-500/60" />
         <div className="w-6 h-1 rounded bg-neutral-200 ml-2" />
       </div>
       <div className="flex h-[calc(100%-20px)]">
-        {/* 侧边栏 */}
         <div className="w-[34%] bg-white border-r border-neutral-200 p-2.5 space-y-1.5">
           <div className="h-1.5 w-full rounded bg-sky-100" />
           <div className="h-1 w-3/4 rounded bg-sky-100/70" />
@@ -100,7 +211,6 @@ function DocsPreview() {
           <div className="h-1 w-1/2 rounded bg-neutral-100 mt-1.5" />
           <div className="h-1 w-3/5 rounded bg-neutral-100" />
         </div>
-        {/* 内容列 */}
         <div className="flex-1 p-3">
           <div className="h-2.5 w-11/12 rounded bg-neutral-800 mb-2" />
           <div className="h-1.5 w-full rounded bg-neutral-200 mb-1" />
@@ -121,10 +231,8 @@ function DocsPreview() {
 }
 
 function BlogPreview() {
-  // 杂志风：文章卡 + hero 图块 + 摘要 + read-more
   return (
     <div className="h-full w-full bg-gradient-to-br from-rose-50 via-white to-amber-50 relative overflow-hidden p-2.5">
-      {/* 顶部小字 */}
       <div className="flex items-center justify-between mb-2">
         <div className="text-[7px] font-semibold tracking-wider text-rose-500 uppercase">
           The Journal
@@ -136,7 +244,6 @@ function BlogPreview() {
       </div>
 
       <div className="grid grid-cols-5 gap-1.5 h-[calc(100%-20px)]">
-        {/* 左：大图 hero */}
         <div className="col-span-3 rounded-sm overflow-hidden relative bg-gradient-to-br from-rose-400 via-rose-500 to-pink-600">
           <div className="absolute inset-0 opacity-30">
             <svg viewBox="0 0 100 100" className="w-full h-full">
@@ -151,7 +258,6 @@ function BlogPreview() {
           </div>
         </div>
 
-        {/* 右：列表 */}
         <div className="col-span-2 space-y-1.5">
           {[0, 1, 2].map((i) => (
             <div key={i} className="bg-white/80 rounded-sm p-1.5 border border-neutral-200">
@@ -163,7 +269,6 @@ function BlogPreview() {
         </div>
       </div>
 
-      {/* 底部 read-more 指示 */}
       <div className="absolute bottom-1.5 right-2 text-[7px] text-rose-500 font-medium flex items-center gap-0.5">
         阅读更多
         <ArrowRight size={8} />
@@ -173,10 +278,8 @@ function BlogPreview() {
 }
 
 function ProductSitePreview() {
-  // Hero banner + 特性网格 + CTA buttons
   return (
     <div className="h-full w-full bg-white relative overflow-hidden">
-      {/* Hero */}
       <div className="h-[42%] bg-gradient-to-br from-teal-500 via-teal-600 to-cyan-700 relative overflow-hidden">
         <svg viewBox="0 0 200 80" className="absolute inset-0 w-full h-full opacity-25">
           <defs>
@@ -196,7 +299,6 @@ function ProductSitePreview() {
         </div>
       </div>
 
-      {/* Feature grid */}
       <div className="h-[58%] grid grid-cols-3 gap-1.5 p-2.5">
         {[0, 1, 2].map((i) => (
           <div key={i} className="rounded-md border border-neutral-200 p-1.5 bg-neutral-50/50">
@@ -217,10 +319,8 @@ function ProductSitePreview() {
 }
 
 function WikiPreview() {
-  // Obsidian 风：知识图谱节点 + 侧边栏树
   return (
     <div className="h-full w-full bg-gradient-to-br from-violet-50 via-white to-indigo-50 relative overflow-hidden">
-      {/* 顶栏 */}
       <div className="h-5 bg-white/90 backdrop-blur border-b border-neutral-200 flex items-center px-2 gap-1.5">
         <div className="w-1.5 h-1.5 rounded-full bg-violet-500" />
         <div className="h-1 w-12 rounded bg-neutral-300" />
@@ -228,7 +328,6 @@ function WikiPreview() {
       </div>
 
       <div className="flex h-[calc(100%-20px)]">
-        {/* 侧边栏树 */}
         <div className="w-[30%] p-1.5 bg-white/60 border-r border-neutral-200 space-y-1">
           {['📁 方法论', '📁 读书笔记', '📁 AI', '📄 第二大脑.md', '📄 提示词工程', '📄 思考快与慢'].map(
             (label, i) => (
@@ -244,24 +343,20 @@ function WikiPreview() {
           )}
         </div>
 
-        {/* 图谱主区 */}
         <div className="flex-1 relative">
           <svg viewBox="0 0 200 160" className="w-full h-full">
-            {/* 连接线 */}
             <line x1="100" y1="80" x2="50" y2="40" stroke="#c4b5fd" strokeWidth="0.8" />
             <line x1="100" y1="80" x2="160" y2="50" stroke="#c4b5fd" strokeWidth="0.8" />
             <line x1="100" y1="80" x2="60" y2="130" stroke="#c4b5fd" strokeWidth="0.8" />
             <line x1="100" y1="80" x2="150" y2="125" stroke="#c4b5fd" strokeWidth="0.8" />
             <line x1="50" y1="40" x2="160" y2="50" stroke="#ddd6fe" strokeWidth="0.6" strokeDasharray="2,2" />
 
-            {/* 中心节点 */}
             <circle cx="100" cy="80" r="10" fill="#8b5cf6" />
             <circle cx="100" cy="80" r="14" fill="#8b5cf6" opacity="0.18" />
             <text x="100" y="83" textAnchor="middle" fontSize="6" fill="white" fontWeight="600">
               中心笔记
             </text>
 
-            {/* 周边节点 */}
             {[
               { x: 50, y: 40, label: '方法论', color: '#a78bfa' },
               { x: 160, y: 50, label: 'AI', color: '#c084fc' },
@@ -284,10 +379,8 @@ function WikiPreview() {
 }
 
 function ApiRefPreview() {
-  // 代码优先：左端点列表 + 右深色代码块
   return (
     <div className="h-full w-full bg-neutral-50 relative overflow-hidden flex font-mono">
-      {/* 左：端点列表 */}
       <div className="w-[40%] bg-white border-r border-neutral-200 flex flex-col">
         <div className="h-5 px-2 flex items-center border-b border-neutral-200 bg-neutral-50">
           <div className="h-1 w-10 rounded bg-neutral-300" />
@@ -318,7 +411,6 @@ function ApiRefPreview() {
         </div>
       </div>
 
-      {/* 右：深色代码块 */}
       <div className="flex-1 bg-neutral-900 p-2 relative">
         <div className="flex gap-1 mb-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-rose-500" />
@@ -369,10 +461,17 @@ const PREVIEW_MAP = {
 }
 
 // ---------------------------------------------------------------------------
-// 卡片组件
+// Publishing Template Card — 带"发布"悬停按钮 + 官方/社区标签
 // ---------------------------------------------------------------------------
 
-function TemplateCard({ template, onOpen, onToggleFavorite, favorite, index }) {
+function PublishingTemplateCard({
+  template,
+  onOpen,
+  onToggleFavorite,
+  favorite,
+  onPublish,
+  index,
+}) {
   const meta = TEMPLATE_META[template.id] || {
     zhLabel: template.name,
     accent: '#6366f1',
@@ -385,25 +484,41 @@ function TemplateCard({ template, onOpen, onToggleFavorite, favorite, index }) {
 
   return (
     <div
-      className="card-hover overflow-hidden animate-fade-up"
+      className="card-hover overflow-hidden animate-fade-up relative group"
       style={{ animationDelay: `${index * 70}ms` }}
       onClick={() => onOpen(template)}
     >
-      {/* 预览区 */}
+      {/* Top-right category tag */}
+      <div className="absolute top-2 right-2 z-10">
+        <span
+          className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+            meta.category === 'official'
+              ? 'bg-primary-50 text-primary-700 ring-1 ring-primary-200'
+              : 'bg-violet-50 text-violet-700 ring-1 ring-violet-200'
+          }`}
+        >
+          {meta.category === 'official' ? (
+            <>
+              <Sparkles size={9} />
+              官方
+            </>
+          ) : (
+            <>
+              <Grid3X3 size={9} />
+              社区
+            </>
+          )}
+        </span>
+      </div>
+
+      {/* Preview area */}
       <div
         className="h-[180px] border-b border-neutral-100 relative"
         style={{ background: meta.bg || '#fff' }}
       >
         <PreviewComp />
-        {/* 角标：中文类型名 */}
-        <div
-          className="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white shadow-sm"
-          style={{ backgroundColor: meta.accent }}
-        >
-          {meta.zhLabel}
-        </div>
-        {/* 悬停遮罩 */}
-        <div className="absolute inset-0 bg-neutral-900/0 hover:bg-neutral-900/40 transition-colors flex items-center justify-center opacity-0 hover:opacity-100">
+        {/* Hover overlay */}
+        <div className="absolute inset-0 bg-neutral-900/0 hover:bg-neutral-900/40 transition-colors flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100">
           <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-md shadow text-xs font-medium text-neutral-800">
             <Eye size={13} />
             预览效果
@@ -411,11 +526,13 @@ function TemplateCard({ template, onOpen, onToggleFavorite, favorite, index }) {
         </div>
       </div>
 
-      {/* 信息区 */}
+      {/* Info area */}
       <div className="p-4">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <h3 className="font-semibold text-neutral-900 truncate">{meta.zhLabel} · {template.name.replace(/^(标准文档|博客|产品官网|团队 Wiki|API 参考)\s*/, '')}</h3>
+            <h3 className="font-semibold text-neutral-900 truncate">
+              {meta.zhLabel} · {template.name.replace(/^(标准文档|博客|产品官网|团队 Wiki|API 参考)\s*/, '')}
+            </h3>
             <p className="text-xs text-neutral-500 mt-0.5 line-clamp-2 leading-snug">
               {meta.description}
             </p>
@@ -435,8 +552,8 @@ function TemplateCard({ template, onOpen, onToggleFavorite, favorite, index }) {
           </span>
         </div>
 
-        {/* 底部操作 */}
-        <div className="flex items-center justify-between mt-3 pt-3 border-t border-neutral-100">
+        {/* Bottom actions */}
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-neutral-100 relative">
           <button
             className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition ${
               favorite
@@ -455,16 +572,30 @@ function TemplateCard({ template, onOpen, onToggleFavorite, favorite, index }) {
             {favorite ? '已收藏' : '收藏'}
           </button>
 
-          <button
-            className="inline-flex items-center gap-1 text-xs text-primary-600 hover:text-primary-700 font-medium"
-            onClick={(e) => {
-              e.stopPropagation()
-              onOpen(template)
-            }}
-          >
-            应用到…
-            <ArrowRight size={13} />
-          </button>
+          {/* Group: hover reveals "发布" button */}
+          <div className="flex items-center gap-2">
+            <button
+              className="inline-flex items-center gap-1 text-xs text-primary-600 hover:text-primary-700 font-medium"
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpen(template)
+              }}
+            >
+              应用到…
+              <ArrowRight size={13} />
+            </button>
+            {/* Hover reveal "发布" btn-primary */}
+            <button
+              className="inline-flex items-center gap-1 text-xs opacity-0 translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 btn-primary !py-1 !px-2.5 !text-[11px]"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPublish(template)
+              }}
+            >
+              <Rocket size={11} />
+              发布
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -472,7 +603,7 @@ function TemplateCard({ template, onOpen, onToggleFavorite, favorite, index }) {
 }
 
 // ---------------------------------------------------------------------------
-// Preview Modal — 大预览 + 设置面板
+// Preview Modal
 // ---------------------------------------------------------------------------
 
 function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
@@ -498,7 +629,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
         className="bg-white rounded-xl shadow-2xl w-full max-w-5xl max-h-[88vh] overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-200">
           <div>
             <div className="flex items-center gap-2 text-xs text-neutral-500 mb-0.5">
@@ -518,9 +648,7 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
           </button>
         </div>
 
-        {/* Body */}
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_280px] min-h-0">
-          {/* 左侧大预览 */}
           <div className="bg-neutral-100 p-6 overflow-auto min-h-[360px]">
             <div
               className="bg-white rounded-lg shadow-md overflow-hidden mx-auto max-w-[680px]"
@@ -529,7 +657,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
                 borderRight: sidebarRight ? `3px solid ${primaryColor}` : undefined,
               }}
             >
-              {/* 模拟浏览器顶栏 */}
               <div className="h-8 bg-neutral-50 border-b border-neutral-200 flex items-center gap-2 px-3">
                 <div className="flex gap-1">
                   <span className="w-2.5 h-2.5 rounded-full bg-rose-400" />
@@ -560,7 +687,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
             </div>
           </div>
 
-          {/* 右侧设置面板 */}
           <div className="border-l border-neutral-200 bg-neutral-50/40 overflow-auto">
             <div className="p-5 space-y-5">
               <div>
@@ -569,7 +695,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
                   外观定制
                 </h3>
 
-                {/* 主色 */}
                 <label className="block text-xs text-neutral-500 mb-2">主色调</label>
                 <div className="flex items-center gap-1.5 mb-2">
                   {colorPresets.map((c) => (
@@ -602,7 +727,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
                 </div>
               </div>
 
-              {/* 侧边栏位置 */}
               <div>
                 <label className="block text-xs text-neutral-500 mb-2">侧边栏位置</label>
                 <div className="grid grid-cols-2 gap-2">
@@ -625,7 +749,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
                 </div>
               </div>
 
-              {/* 项目选择 */}
               <div>
                 <label className="block text-xs text-neutral-500 mb-2">
                   应用到已有项目
@@ -646,7 +769,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
                 </div>
               </div>
 
-              {/* 操作提示 */}
               <div className="rounded-md border border-primary-100 bg-primary-50/50 p-3 text-xs text-primary-800">
                 <div className="flex items-start gap-1.5">
                   <Sparkles size={13} className="mt-0.5 flex-shrink-0" />
@@ -654,7 +776,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
                 </div>
               </div>
 
-              {/* 复制代码 */}
               <button
                 onClick={copyHtml}
                 className="w-full inline-flex items-center justify-center gap-1.5 py-2 rounded-md border border-neutral-200 bg-white text-xs text-neutral-600 hover:bg-neutral-50"
@@ -675,7 +796,6 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
           </div>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-neutral-200 bg-white">
           <button className="btn-secondary" onClick={onClose}>
             取消
@@ -691,22 +811,29 @@ function PreviewModal({ template, projects, html, onClose, onApply, loading }) {
 }
 
 // ---------------------------------------------------------------------------
-// 主页面
+// HERO icons
 // ---------------------------------------------------------------------------
 
 const HERO_ICONS = [Palette, BookOpen, Layout, LifeBuoy, FileCode, Grid3X3]
 
-export default function Templates() {
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
+export default function Themes() {
+  const [activeTab, setActiveTab] = useState('ui') // 'ui' | 'publishing'
   const [loading, setLoading] = useState(true)
   const [templates, setTemplates] = useState([])
   const [projects, setProjects] = useState([])
-  const [activeTab, setActiveTab] = useState('all')
+
+  const [activeUiTheme, setActiveUiTheme] = useState('fresh-emerald')
   const [favorites, setFavorites] = useState(['t-docs'])
+  const [categoryTab, setCategoryTab] = useState('all')
 
   const [openTemplate, setOpenTemplate] = useState(null)
   const [previewHtml, setPreviewHtml] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
-  const [applyToast, setApplyToast] = useState(false)
+  const [toast, setToast] = useState({ show: false, msg: '' })
 
   useEffect(() => {
     ;(async () => {
@@ -717,17 +844,28 @@ export default function Templates() {
     })()
   }, [])
 
-  // 过滤
+  const showToast = (msg) => {
+    setToast({ show: true, msg })
+    setTimeout(() => setToast({ show: false, msg: '' }), 1800)
+  }
+
+  // UI theme apply
+  const handleApplyUiTheme = (id) => {
+    if (id === activeUiTheme) return
+    setActiveUiTheme(id)
+    showToast('主题已应用')
+  }
+
+  // Publishing template filter
   const filteredTemplates = templates.filter((t) => {
     const meta = TEMPLATE_META[t.id] || { category: 'community' }
-    if (activeTab === 'all') return true
-    if (activeTab === 'official') return meta.category === 'official'
-    if (activeTab === 'community') return meta.category === 'community'
-    if (activeTab === 'favorites') return favorites.includes(t.id)
+    if (categoryTab === 'all') return true
+    if (categoryTab === 'official') return meta.category === 'official'
+    if (categoryTab === 'community') return meta.category === 'community'
+    if (categoryTab === 'favorites') return favorites.includes(t.id)
     return true
   })
 
-  // 打开预览
   const openPreview = async (tpl) => {
     setOpenTemplate(tpl)
     setPreviewLoading(true)
@@ -742,10 +880,13 @@ export default function Templates() {
     )
   }
 
-  const handleApply = () => {
-    setApplyToast(true)
-    setTimeout(() => setApplyToast(false), 1800)
+  const handleApplyPublishing = () => {
+    showToast('模板已应用成功 ✨')
     setOpenTemplate(null)
+  }
+
+  const handlePublish = (tpl) => {
+    showToast(`正在使用「${TEMPLATE_META[tpl.id]?.zhLabel || tpl.name}」发布...`)
   }
 
   return (
@@ -753,7 +894,6 @@ export default function Templates() {
       {/* Page Header */}
       <section className="animate-fade-up">
         <div className="card p-6 bg-gradient-to-br from-primary-50 via-white to-white border-primary-100 relative overflow-hidden">
-          {/* 装饰图标 */}
           <div className="absolute -right-4 -top-4 w-40 h-40 opacity-[0.08] pointer-events-none">
             <div className="grid grid-cols-3 gap-3">
               {HERO_ICONS.map((I, i) => (
@@ -766,113 +906,163 @@ export default function Templates() {
             <div>
               <div className="flex items-center gap-2 text-primary-600 text-xs font-medium mb-1">
                 <Palette size={14} />
-                <span>Template Gallery</span>
+                Theme & Template Center
               </div>
               <h1 className="font-display text-2xl font-bold text-neutral-900">
-                主题模板
+                主题与模板
               </h1>
               <p className="text-sm text-neutral-500 mt-1 max-w-lg">
-                选择合适的渲染模板，让你的文档库以不同形态呈现 —— 从技术文档站、博客到产品官网，一键切换。
+                管理 DocVault 界面外观 + 选择合适的发布模板，让你的文档库以不同形态呈现。
               </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                className="btn-primary"
-                onClick={() => setApplyToast(true)}
-              >
-                <Sparkles size={16} />
-                从模板创建新项目
-              </button>
             </div>
           </div>
         </div>
       </section>
 
-      {/* 分类 Tabs */}
+      {/* Main tabs: UI vs Publishing */}
       <section
         className="animate-fade-up"
         style={{ animationDelay: '60ms' }}
       >
-        <div className="inline-flex items-center gap-1 p-1 bg-neutral-100 rounded-lg">
-          {CATEGORY_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
-                activeTab === tab.key
-                  ? 'bg-white text-neutral-900 shadow-sm'
-                  : 'text-neutral-500 hover:text-neutral-700'
-              }`}
-            >
-              {tab.label}
-              {tab.key === 'favorites' && favorites.length > 0 && (
-                <span className="ml-1 text-xs text-amber-500">· {favorites.length}</span>
-              )}
-            </button>
-          ))}
+        <div className="inline-flex items-center gap-1 p-1 bg-neutral-100 rounded-full shadow-inner">
+          <button
+            type="button"
+            onClick={() => setActiveTab('ui')}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all ${
+              activeTab === 'ui'
+                ? 'bg-white text-neutral-900 shadow-sm'
+                : 'text-neutral-500 hover:text-neutral-700'
+            }`}
+          >
+            <Palette size={15} />
+            管理视图主题
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('publishing')}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all ${
+              activeTab === 'publishing'
+                ? 'bg-white text-neutral-900 shadow-sm'
+                : 'text-neutral-500 hover:text-neutral-700'
+            }`}
+          >
+            <Rocket size={15} />
+            发布网站主题
+          </button>
         </div>
       </section>
 
-      {/* 模板网格 */}
-      <section
-        className="animate-fade-up"
-        style={{ animationDelay: '120ms' }}
-      >
-        {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="card overflow-hidden">
-                <div className="h-[180px] skeleton" />
-                <div className="p-4 space-y-3">
-                  <div className="skeleton h-4 w-3/5" />
-                  <div className="skeleton h-3 w-full" />
-                  <div className="skeleton h-3 w-2/3" />
-                  <div className="flex justify-between pt-2">
-                    <div className="skeleton h-4 w-14" />
-                    <div className="skeleton h-4 w-16" />
-                  </div>
-                </div>
-              </div>
-            ))}
+      {/* Tab content */}
+      {activeTab === 'ui' ? (
+        /* =============== UI THEMES =============== */
+        <section
+          className="animate-fade-up"
+          style={{ animationDelay: '100ms' }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-neutral-800">
+                管理视图主题
+              </span>
+              <span className="text-xs text-neutral-400">· 控制 DocVault 界面本身的配色与密度</span>
+            </div>
           </div>
-        ) : filteredTemplates.length === 0 ? (
-          <div className="card p-12 text-center text-neutral-400">
-            该分类下暂无模板
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {filteredTemplates.map((tpl, i) => (
-              <TemplateCard
-                key={tpl.id}
-                template={tpl}
-                index={i}
-                onOpen={openPreview}
-                onToggleFavorite={toggleFavorite}
-                favorite={favorites.includes(tpl.id)}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {UI_THEMES.map((t, i) => (
+              <UiThemeCard
+                key={t.id}
+                theme={t}
+                isActive={activeUiTheme === t.id}
+                onApply={handleApplyUiTheme}
+                delayMs={i * 60}
               />
             ))}
           </div>
-        )}
-      </section>
+        </section>
+      ) : (
+        /* =============== PUBLISHING THEMES =============== */
+        <section
+          className="animate-fade-up"
+          style={{ animationDelay: '100ms' }}
+        >
+          {/* Sub-category filter pills */}
+          <div className="flex items-center gap-2 mb-5 flex-wrap">
+            {CATEGORY_TABS.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setCategoryTab(tab.key)}
+                className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium transition ${
+                  categoryTab === tab.key
+                    ? 'bg-white text-neutral-900 shadow-sm ring-1 ring-neutral-200'
+                    : 'text-neutral-500 hover:text-neutral-700 bg-neutral-50'
+                }`}
+              >
+                {tab.label}
+                {tab.key === 'favorites' && favorites.length > 0 && (
+                  <span className="ml-1 text-amber-500">· {favorites.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
 
-      {/* 预览 Modal */}
-      {openTemplate && (
+          {loading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="card overflow-hidden">
+                  <div className="h-[180px] skeleton" />
+                  <div className="p-4 space-y-3">
+                    <div className="skeleton h-4 w-3/5" />
+                    <div className="skeleton h-3 w-full" />
+                    <div className="skeleton h-3 w-2/3" />
+                    <div className="flex justify-between pt-2">
+                      <div className="skeleton h-4 w-14" />
+                      <div className="skeleton h-4 w-16" />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filteredTemplates.length === 0 ? (
+            <div className="card p-12 text-center text-neutral-400">
+              该分类下暂无模板
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {filteredTemplates.map((tpl, i) => (
+                <PublishingTemplateCard
+                  key={tpl.id}
+                  template={tpl}
+                  index={i}
+                  onOpen={openPreview}
+                  onToggleFavorite={toggleFavorite}
+                  favorite={favorites.includes(tpl.id)}
+                  onPublish={handlePublish}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Preview Modal (only for publishing tab) */}
+      {openTemplate && activeTab === 'publishing' && (
         <PreviewModal
           template={openTemplate}
           projects={projects}
           html={previewHtml}
           loading={previewLoading}
           onClose={() => setOpenTemplate(null)}
-          onApply={handleApply}
+          onApply={handleApplyPublishing}
         />
       )}
 
-      {/* Apply Toast */}
-      {applyToast && (
+      {/* Toast */}
+      {toast.show && (
         <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60] animate-fade-up">
           <div className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-neutral-900 text-white text-sm shadow-lg">
             <Check size={15} className="text-emerald-400" />
-            模板已应用成功 ✨
+            {toast.msg}
           </div>
         </div>
       )}

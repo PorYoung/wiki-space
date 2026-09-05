@@ -268,7 +268,7 @@ export default function Dashboard() {
               : topProjects.map((p) => (
                   <Link
                     key={p.id}
-                    to={`/library/${p.id}`}
+                    to={`/project/${p.id}`}
                     className="card-hover p-4 flex items-center gap-4"
                   >
                     <div
