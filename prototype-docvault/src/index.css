@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============== Design Contract: DocVault Global Styles ============== */
+
+:root {
+  --sidebar-w: 248px;
+  --topbar-h: 56px;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  color: #1f2937;
+  background: #f8fafc;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Reusable component classes ---------- */
+@layer components {
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium transition-all duration-150 select-none;
+  }
+  .btn-primary {
+    @apply btn bg-primary-500 text-white hover:bg-primary-600 shadow-sm;
+  }
+  .btn-secondary {
+    @apply btn bg-white text-neutral-700 border border-neutral-200 hover:bg-neutral-50;
+  }
+  .btn-ghost {
+    @apply btn text-neutral-600 hover:bg-neutral-100;
+  }
+  .btn-danger {
+    @apply btn bg-white text-danger border border-neutral-200 hover:bg-red-50 hover:text-danger hover:border-danger;
+  }
+
+  /* Tags */
+  .tag {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+  }
+  .tag-primary   { @apply tag bg-primary-50 text-primary-700; }
+  .tag-success   { @apply tag bg-emerald-50 text-emerald-700; }
+  .tag-warning   { @apply tag bg-amber-50 text-amber-700; }
+  .tag-neutral   { @apply tag bg-neutral-100 text-neutral-600; }
+  .tag-danger    { @apply tag bg-red-50 text-red-700; }
+
+  /* Cards */
+  .card {
+    @apply bg-white border border-neutral-200 rounded-lg shadow-sm;
+  }
+  .card-hover {
+    @apply card transition-all duration-200 hover:shadow-md hover:border-neutral-300 cursor-pointer;
+  }
+
+  /* Inputs */
+  .input {
+    @apply w-full px-3 py-2 rounded-md border border-neutral-200 bg-white text-sm text-neutral-800 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-400 transition;
+  }
+
+  /* Nav items */
+  .nav-item {
+    @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-800 transition cursor-pointer;
+  }
+  .nav-item.active {
+    @apply bg-primary-50 text-primary-700 hover:bg-primary-50 hover:text-primary-700;
+  }
+  .nav-item.active .nav-icon {
+    @apply text-primary-600;
+  }
+  .nav-icon {
+    @apply text-neutral-400 transition;
+  }
+
+  /* Skeleton loader */
+  .skeleton {
+    @apply bg-neutral-200/70 rounded animate-pulse;
+  }
+}
+
+/* ---------- Utility helpers ---------- */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #d0d5dd;
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #9da3ae;
+}
+
+/* Page load choreography */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up {
+  animation: fadeUp 0.4s ease-out both;
+}
+
+/* Editor markdown preview styling (for WYSIWYG mock) */
+.prose-doc h1 { @apply font-display text-2xl font-bold text-neutral-900 mt-6 mb-3; }
+.prose-doc h2 { @apply font-display text-xl font-semibold text-neutral-900 mt-5 mb-2; }
+.prose-doc h3 { @apply font-display text-lg font-semibold text-neutral-800 mt-4 mb-2; }
+.prose-doc p  { @apply text-sm leading-7 text-neutral-700 my-3; }
+.prose-doc ul { @apply list-disc pl-5 my-2 space-y-1 text-sm text-neutral-700; }
+.prose-doc ol { @apply list-decimal pl-5 my-2 space-y-1 text-sm text-neutral-700; }
+.prose-doc code { @apply font-mono text-xs bg-neutral-100 text-primary-700 px-1.5 py-0.5 rounded; }
+.prose-doc pre  { @apply font-mono text-xs bg-neutral-900 text-neutral-100 p-4 rounded-lg overflow-x-auto my-3; }
+.prose-doc blockquote { @apply border-l-4 border-primary-300 pl-4 my-3 text-sm text-neutral-600 italic; }
+.prose-doc a { @apply text-primary-600 hover:text-primary-700 underline underline-offset-2; }
+.prose-doc hr { @apply my-6 border-neutral-200; }
