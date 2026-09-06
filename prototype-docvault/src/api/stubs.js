@@ -5,6 +5,7 @@
 // is mechanical.
 
 import { DB, pushActivity, pushVersion } from '../mock/data.js'
+import { starterPacks, graphData, importJobs, aiClassifyRuns } from '../mock/data.js'
 
 /**
  * Wait for `ms` milliseconds. Useful to simulate network latency in prototypes.
@@ -125,6 +126,61 @@ export async function fetchSources() {
 }
 
 // TODO: replace with real API
+// POST /api/sources
+// Request body: Source （git 或 database）
+// Response: Source（新创建的数据源，含 id/status）
+export async function createSource(payload) {
+  await delay(500)
+  const id = `s-${Date.now().toString().slice(-5)}`
+  const status = 'connected'
+  const now = new Date().toISOString()
+
+  let source
+  if (payload.type === 'git') {
+    source = {
+      id,
+      name: payload.name || 'Git 仓库',
+      type: 'git',
+      url: payload.url,
+      branch: payload.branch || 'main',
+      authType: payload.authType || 'ssh',
+      username: payload.username || null,
+      // token/password 不在前端 mock 中持久化（真实场景走加密存储）
+      status,
+      lastSync: now,
+      description: payload.description || null,
+    }
+  } else if (payload.type === 'database') {
+    source = {
+      id,
+      name: payload.name || `${payload.dbType || 'database'} 连接`,
+      type: 'database',
+      dbType: payload.dbType || 'mysql',
+      host: payload.host,
+      port: payload.port || null,
+      database: payload.database,
+      table: payload.table || null,
+      username: payload.username || null,
+      status,
+      lastSync: now,
+      description: payload.description || null,
+    }
+  } else {
+    source = {
+      id,
+      name: payload.name || '数据源',
+      type: payload.type || 'web-link',
+      status,
+      lastSync: now,
+      ...payload,
+    }
+  }
+
+  DB.sources.push(source)
+  return source
+}
+
+// TODO: replace with real API
 // POST /api/sources/:id/sync
 // Response: Source (status transitions idle -> syncing -> synced/idle)
 export async function syncSource(id) {
@@ -188,4 +244,184 @@ export function subscribe(fn) {
   // eslint-disable-next-line no-console
   console.log('[stubs.subscribe] placeholder called; fn =', typeof fn === 'function' ? fn.name : fn)
   return () => { /* unsubscribe placeholder */ }
+}
+
+// ---------------------------------------------------------------------------
+// Starter Packs（项目模板种子包）
+// ---------------------------------------------------------------------------
+
+// TODO: replace with real API
+// GET /api/starter-packs
+// Response: { starterPacks: StarterPack[] }
+export async function fetchStarterPacks() {
+  await delay(200)
+  return starterPacks
+}
+
+// TODO: replace with real API
+// POST /api/projects/init-from-starter
+// Request body: { name, starterPackId, visibility, description?, sourceBackend?, sourceId?, localFolderPath? }
+// Response: Project (新建项目 + 初始化好的目录骨架)
+export async function initProjectFromStarter({
+  name, starterPackId, visibility = 'private', description = '',
+  sourceBackend = 'local', sourceId = null, localFolderPath = null,
+}) {
+  await delay(900)
+  const pack = starterPacks.find((p) => p.id === starterPackId)
+  const id = `p-${Date.now().toString().slice(-5)}`
+  const colors = ['bg-violet-100', 'bg-sky-100', 'bg-emerald-100', 'bg-amber-100', 'bg-rose-100', 'bg-teal-100']
+  const color = colors[Math.floor(Math.random() * colors.length)]
+
+  // 根据 sourceBackend 确定 sourceType 和 sourceUrl
+  let sourceType = 'local'
+  const basePath = (localFolderPath || 'C:/Users/poryo/Documents/DocVault/').replace(/[\\/]+$/, '')
+  let sourceUrl = `${basePath}/${name}`
+
+  if (sourceBackend === 'git') {
+    const src = DB.sources.find((s) => s.id === sourceId)
+    sourceType = 'git'
+    sourceUrl = src?.url || 'https://github.com/example/' + name + '.git'
+  } else if (sourceBackend === 'database') {
+    const src = DB.sources.find((s) => s.id === sourceId)
+    sourceType = 'database'
+    if (src) {
+      sourceUrl = `${src.dbType || 'db'}://${src.host || ''}${src.port ? ':' + src.port : ''}/${src.database || ''}`
+    }
+  }
+
+  return {
+    id,
+    name,
+    description: description || pack?.description || '基于模板创建',
+    icon: 'folder-kanban',
+    sourceType,
+    sourceUrl,
+    sourceId: sourceId || null,
+    lastSynced: new Date().toISOString(),
+    docCount: pack?.docCount || 0,
+    template: 'wiki',
+    visibility,
+    color,
+    members: [1],
+    starterPackId,
+    initialized: true,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 知识图谱
+// ---------------------------------------------------------------------------
+
+// TODO: replace with real API
+// GET /api/projects/:id/graph
+// Query: { view?: 'explore' | 'orphans' | 'hubs' }
+// Response: { nodes, edges, clusters, orphans, hubs, brokenEdges }
+export async function fetchProjectGraph(projectId, view = 'explore') {
+  await delay(400)
+  const data = graphData[projectId] || { nodes: [], edges: [], clusters: [], orphans: [], hubs: [] }
+  if (view === 'orphans') {
+    return {
+      ...data,
+      nodes: data.nodes.filter((n) => data.orphans.includes(n.id)),
+      edges: [],
+    }
+  }
+  if (view === 'hubs') {
+    return {
+      ...data,
+      nodes: data.nodes.filter((n) => data.hubs.includes(n.id)),
+      edges: data.edges.filter((e) => data.hubs.includes(e.from) || data.hubs.includes(e.to)),
+    }
+  }
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// AI 自动分类
+// ---------------------------------------------------------------------------
+
+// TODO: replace with real API
+// GET /api/projects/:id/ai-classify/runs
+// Response: { runs: AIClassifyRun[] }
+export async function fetchAIClassifyRuns(projectId) {
+  await delay(200)
+  return aiClassifyRuns.filter((r) => r.projectId === projectId)
+}
+
+// TODO: replace with real API
+// POST /api/projects/:id/ai-classify/run
+// Request body: { scope: 'all' | 'inbox' | 'folders[]', tagsAuto, foldersAuto }
+// Response: AIClassifyRun (任务立即返回，后续通过轮询或 SSE 通知进度)
+export async function runAIClassify(projectId, options = {}) {
+  await delay(1400)
+  const run = {
+    id: `ac-${Date.now()}`,
+    projectId,
+    scope: options.scope || 'all',
+    classifierVersion: 'v2.3',
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    durationSec: 12 + Math.floor(Math.random() * 30),
+    stats: {
+      scanned: 30 + Math.floor(Math.random() * 20),
+      foldersCreated: Math.floor(Math.random() * 4),
+      docsRelocated: 5 + Math.floor(Math.random() * 15),
+      tagsAdded: 10 + Math.floor(Math.random() * 30),
+    },
+    status: 'completed',
+    by: 'system',
+  }
+  aiClassifyRuns.unshift(run)
+  return run
+}
+
+// ---------------------------------------------------------------------------
+// 导入器（外部内容导入）
+// ---------------------------------------------------------------------------
+
+// TODO: replace with real API
+// GET /api/projects/:id/imports
+// Response: { jobs: ImportJob[] }
+export async function fetchImportJobs(projectId) {
+  await delay(200)
+  return importJobs.filter((j) => j.projectId === projectId)
+}
+
+// TODO: replace with real API
+// POST /api/projects/:id/imports/run
+// Request body: { importer: 'web-crawler' | 'notion' | 'obsidian' | 'folder', sourceUrl, options? }
+// Response: ImportJob (立即返回，后续异步推进)
+export async function runImport(projectId, { importer, sourceUrl, title }) {
+  const job = {
+    id: `ij-${Date.now()}`,
+    projectId,
+    importer,
+    sourceUrl,
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    stats: { pagesFetched: 0, pagesImported: 0, skipped: 0, newDocs: 0 },
+    title: title || sourceUrl,
+  }
+  importJobs.unshift(job)
+
+  // 模拟异步完成
+  const totalPages = importer === 'web-crawler' ? 30 + Math.floor(Math.random() * 60) : 60 + Math.floor(Math.random() * 80)
+  let elapsed = 0
+  const tick = 300
+  const steps = 6
+  const interval = setInterval(async () => {
+    elapsed += tick
+    const progress = Math.min(1, elapsed / (tick * steps))
+    job.stats.pagesFetched = Math.round(totalPages * progress)
+    job.stats.pagesImported = Math.round(totalPages * progress * 0.9)
+    job.stats.newDocs = job.stats.pagesImported
+    if (progress >= 1) {
+      clearInterval(interval)
+      job.status = 'completed'
+      job.finishedAt = new Date().toISOString()
+    }
+  }, tick)
+
+  return job
 }

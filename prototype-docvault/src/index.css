@@ -7,6 +7,328 @@
 :root {
   --sidebar-w: 248px;
   --topbar-h: 56px;
+
+  /* Primary palette (fresh-emerald fallback before ThemeContext mounts) */
+  --color-primary-50:  #ecfdf5;
+  --color-primary-100: #d1fae5;
+  --color-primary-200: #a7f3d0;
+  --color-primary-300: #6ee7b7;
+  --color-primary-400: #34d399;
+  --color-primary-500: #10b981;
+  --color-primary-600: #059669;
+  --color-primary-700: #047857;
+  --color-primary-800: #065f46;
+  --color-primary-900: #064e3b;
+
+  /* Light-mode neutral overrides (applied by ThemeContext for light / system-light) */
+  --color-neutral-50:  #f8fafc;
+  --color-neutral-100: #f1f5f9;
+  --color-neutral-200: #e2e8f0;
+  --color-neutral-300: #cbd5e1;
+  --color-neutral-400: #94a3b8;
+  --color-neutral-500: #64748b;
+  --color-neutral-600: #475569;
+  --color-neutral-700: #334155;
+  --color-neutral-800: #1e293b;
+  --color-neutral-900: #0f172a;
+
+  /* Semantic surface / text vars */
+  --bg-page:        #f8fafc;
+  --bg-surface:     #ffffff;
+  --bg-subtle:      #f1f5f9;
+  --bg-hover:       #f1f5f9;
+  --border-soft:    #e2e8f0;
+  --border-strong:  #cbd5e1;
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --text-on-accent: #ffffff;
+}
+
+/* ===== Dark mode overrides ===== */
+html[data-appearance='dark'] {
+  --color-neutral-50:  #0b1220;
+  --color-neutral-100: #111827;
+  --color-neutral-200: #1e293b;
+  --color-neutral-300: #334155;
+  --color-neutral-400: #475569;
+  --color-neutral-500: #64748b;
+  --color-neutral-600: #94a3b8;
+  --color-neutral-700: #cbd5e1;
+  --color-neutral-800: #e2e8f0;
+  --color-neutral-900: #f1f5f9;
+
+  --bg-page:        #0b1220;
+  --bg-surface:     #111827;
+  --bg-subtle:      #1e293b;
+  --bg-hover:       #1e293b;
+  --border-soft:    #1e293b;
+  --border-strong:  #334155;
+  --text-primary:   #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted:     #64748b;
+  --text-on-accent: #0b1220;
+}
+
+/* ===== Tailwind dark-mode hook (class-based) — so `dark:` utilities work ===== */
+html[data-appearance='dark'] {
+  color-scheme: dark;
+}
+
+html[data-appearance='dark'] body {
+  background: var(--bg-page);
+  color: var(--text-primary);
+}
+
+/* ================================================================
+   Tailwind Utility Override Layer for Dark Mode
+   解决组件中硬编码的 bg-white / text-neutral-* / border-neutral-*
+   在暗色模式下仍显示亮色的问题。
+   特异性：html[data-appearance='dark'] .xxx （0-2-0）
+   高于 Tailwind 生成的 .xxx （0-1-0），且写在文件后段，双重保险。
+   ================================================================ */
+
+/* ---- Background ---- */
+html[data-appearance='dark'] .bg-white                  { background-color: var(--bg-surface); }
+html[data-appearance='dark'] .bg-neutral-50              { background-color: var(--bg-subtle); }
+html[data-appearance='dark'] .bg-neutral-100             { background-color: var(--bg-subtle); }
+html[data-appearance='dark'] .bg-neutral-200             { background-color: var(--border-soft); }
+html[data-appearance='dark'] .bg-neutral-300             { background-color: var(--border-strong); }
+html[data-appearance='dark'] .bg-neutral-400             { background-color: #475569; }
+html[data-appearance='dark'] .bg-neutral-500             { background-color: #64748b; }
+html[data-appearance='dark'] .bg-neutral-900             { background-color: #0b1220; }
+html[data-appearance='dark'] .bg-black                   { background-color: #0b1220; }
+
+/* ---- Background opacity variants ---- */
+html[data-appearance='dark'] .bg-white\/50               { background-color: color-mix(in srgb, var(--bg-surface) 50%, transparent); }
+html[data-appearance='dark'] .bg-white\/60               { background-color: color-mix(in srgb, var(--bg-surface) 60%, transparent); }
+html[data-appearance='dark'] .bg-white\/70               { background-color: color-mix(in srgb, var(--bg-surface) 70%, transparent); }
+html[data-appearance='dark'] .bg-white\/80               { background-color: color-mix(in srgb, var(--bg-surface) 80%, transparent); }
+html[data-appearance='dark'] .bg-neutral-100\/50         { background-color: color-mix(in srgb, var(--bg-subtle) 50%, transparent); }
+html[data-appearance='dark'] .bg-neutral-100\/80         { background-color: color-mix(in srgb, var(--bg-subtle) 80%, transparent); }
+
+/* ---- Text color ---- */
+html[data-appearance='dark'] .text-neutral-900           { color: var(--text-primary); }
+html[data-appearance='dark'] .text-neutral-800           { color: var(--text-primary); }
+html[data-appearance='dark'] .text-neutral-700           { color: var(--text-secondary); }
+html[data-appearance='dark'] .text-neutral-600           { color: var(--text-secondary); }
+html[data-appearance='dark'] .text-neutral-500           { color: var(--text-muted); }
+html[data-appearance='dark'] .text-neutral-400           { color: var(--text-muted); }
+html[data-appearance='dark'] .text-neutral-300           { color: #475569; }
+html[data-appearance='dark'] .text-neutral-200           { color: #64748b; }
+html[data-appearance='dark'] .text-black                 { color: var(--text-primary); }
+
+/* Text opacity variants */
+html[data-appearance='dark'] .text-neutral-700\/90       { color: color-mix(in srgb, var(--text-secondary) 90%, transparent); }
+html[data-appearance='dark'] .text-neutral-700\/80       { color: color-mix(in srgb, var(--text-secondary) 80%, transparent); }
+html[data-appearance='dark'] .text-neutral-600\/90       { color: color-mix(in srgb, var(--text-secondary) 90%, transparent); }
+
+/* ---- Border color ---- */
+html[data-appearance='dark'] .border-neutral-50          { border-color: var(--border-soft); }
+html[data-appearance='dark'] .border-neutral-100         { border-color: var(--border-soft); }
+html[data-appearance='dark'] .border-neutral-200         { border-color: var(--border-soft); }
+html[data-appearance='dark'] .border-neutral-300         { border-color: var(--border-strong); }
+html[data-appearance='dark'] .border-neutral-400         { border-color: var(--border-strong); }
+html[data-appearance='dark'] .border-white               { border-color: var(--border-strong); }
+html[data-appearance='dark'] .border-black               { border-color: var(--border-soft); }
+
+/* ---- Ring color (focus states) ---- */
+html[data-appearance='dark'] .ring-neutral-200           { --tw-ring-color: var(--border-strong); }
+html[data-appearance='dark'] .ring-neutral-300           { --tw-ring-color: var(--border-strong); }
+
+/* ---- Hover states ---- */
+html[data-appearance='dark'] .hover\:bg-neutral-50:hover     { background-color: var(--bg-hover); }
+html[data-appearance='dark'] .hover\:bg-neutral-100:hover    { background-color: var(--bg-hover); }
+html[data-appearance='dark'] .hover\:bg-neutral-200:hover    { background-color: var(--border-soft); }
+html[data-appearance='dark'] .hover\:bg-white:hover          { background-color: var(--bg-subtle); }
+html[data-appearance='dark'] .hover\:text-neutral-800:hover  { color: var(--text-primary); }
+html[data-appearance='dark'] .hover\:text-neutral-700:hover  { color: var(--text-primary); }
+html[data-appearance='dark'] .hover\:text-neutral-600:hover  { color: var(--text-secondary); }
+html[data-appearance='dark'] .hover\:text-neutral-500:hover  { color: var(--text-secondary); }
+html[data-appearance='dark'] .hover\:border-neutral-300:hover { border-color: var(--border-strong); }
+html[data-appearance='dark'] .hover\:border-neutral-200:hover { border-color: var(--border-strong); }
+
+/* ---- Placeholder ---- */
+html[data-appearance='dark'] .placeholder\:text-neutral-400::placeholder { color: var(--text-muted); opacity: 1; }
+html[data-appearance='dark'] .placeholder\:text-neutral-500::placeholder { color: var(--text-muted); opacity: 1; }
+
+/* ---- Skeleton (bg-neutral-200/70) ---- */
+html[data-appearance='dark'] .skeleton,
+html[data-appearance='dark'] .bg-neutral-200\/70          { background-color: var(--border-soft); }
+
+/* ---- Scrollbar colors (override ::webkit-scrollbar-thumb) ---- */
+html[data-appearance='dark'] ::-webkit-scrollbar-thumb     { background: var(--color-neutral-300); }
+html[data-appearance='dark'] ::-webkit-scrollbar-thumb:hover { background: var(--color-neutral-400); }
+
+/* ---- SVG fill / stroke for decorative icons ---- */
+html[data-appearance='dark'] .fill-neutral-800             { fill: var(--text-primary); }
+html[data-appearance='dark'] .fill-neutral-700             { fill: var(--text-secondary); }
+html[data-appearance='dark'] .fill-neutral-500             { fill: var(--text-muted); }
+html[data-appearance='dark'] .stroke-neutral-800           { stroke: var(--text-primary); }
+html[data-appearance='dark'] .stroke-neutral-700           { stroke: var(--text-secondary); }
+html[data-appearance='dark'] .stroke-neutral-500           { stroke: var(--text-muted); }
+
+/* ---- Shadows need to be darker / have less spread on dark bg ---- */
+html[data-appearance='dark'] .shadow-sm                    { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.4); }
+html[data-appearance='dark'] .shadow-md                    { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.45), 0 2px 4px -2px rgba(0, 0, 0, 0.35); }
+html[data-appearance='dark'] .shadow-lg                    { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.4); }
+html[data-appearance='dark'] .shadow-xl                    { box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.55), 0 8px 10px -6px rgba(0, 0, 0, 0.45); }
+
+/* ---- outline (focus ring variants) ---- */
+html[data-appearance='dark'] .outline-none:focus           { outline: none; }
+html[data-appearance='dark'] button:focus-visible {
+  outline: 2px solid var(--color-primary-400);
+  outline-offset: 2px;
+}
+html[data-appearance='dark'] a:focus-visible {
+  outline: 2px solid var(--color-primary-400);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ---- Divider ---- */
+html[data-appearance='dark'] hr                            { border-color: var(--border-soft); }
+html[data-appearance='dark'] .border-t                     { border-top-color: var(--border-soft); }
+html[data-appearance='dark'] .border-b                     { border-bottom-color: var(--border-soft); }
+html[data-appearance='dark'] .border-l                     { border-left-color: var(--border-soft); }
+html[data-appearance='dark'] .border-r                     { border-right-color: var(--border-soft); }
+html[data-appearance='dark'] .w-px                         { background-color: var(--border-soft); }
+
+/* ---- tag backgrounds (tag-neutral uses neutral-100 / neutral-600) ---- */
+html[data-appearance='dark'] .tag-neutral                  { background-color: var(--bg-subtle); color: var(--text-secondary); }
+
+/* ---- Modal overlay backdrop ---- */
+html[data-appearance='dark'] .bg-neutral-900\/20           { background-color: rgba(0, 0, 0, 0.45); }
+html[data-appearance='dark'] .bg-neutral-900\/30           { background-color: rgba(0, 0, 0, 0.55); }
+html[data-appearance='dark'] .bg-neutral-900\/40           { background-color: rgba(0, 0, 0, 0.65); }
+html[data-appearance='dark'] .bg-neutral-900\/50           { background-color: rgba(0, 0, 0, 0.7); }
+html[data-appearance='dark'] .bg-neutral-900\/60           { background-color: rgba(0, 0, 0, 0.75); }
+html[data-appearance='dark'] .bg-neutral-900\/70           { background-color: rgba(0, 0, 0, 0.8); }
+html[data-appearance='dark'] .bg-black\/30                 { background-color: rgba(0, 0, 0, 0.55); }
+html[data-appearance='dark'] .bg-black\/40                 { background-color: rgba(0, 0, 0, 0.65); }
+html[data-appearance='dark'] .bg-black\/50                 { background-color: rgba(0, 0, 0, 0.7); }
+html[data-appearance='dark'] .bg-black\/60                 { background-color: rgba(0, 0, 0, 0.75); }
+html[data-appearance='dark'] .bg-black\/70                 { background-color: rgba(0, 0, 0, 0.8); }
+
+/* ---- Hover opacity variants (bg-neutral-50/60 / bg-white/50 in hover) ---- */
+html[data-appearance='dark'] .hover\:bg-neutral-50\/60:hover   { background-color: color-mix(in srgb, var(--bg-hover) 60%, transparent); }
+html[data-appearance='dark'] .hover\:bg-neutral-50\/80:hover   { background-color: color-mix(in srgb, var(--bg-hover) 80%, transparent); }
+html[data-appearance='dark'] .bg-neutral-50\/60                { background-color: color-mix(in srgb, var(--bg-subtle) 60%, transparent); }
+
+/* ---- bg-white/95 / bg-white/90 / bg-white/80 / bg-white/70 / bg-white/60 — 半透明浮层 ---- */
+html[data-appearance='dark'] .bg-white\/90                { background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent); }
+html[data-appearance='dark'] .bg-white\/95                { background-color: color-mix(in srgb, var(--bg-surface) 95%, transparent); }
+
+/* ---- Custom Tailwind theme tokens (bg-surface-subtle etc. from tailwind.config) ---- */
+html[data-appearance='dark'] .bg-surface-subtle            { background-color: var(--bg-page); }
+html[data-appearance='dark'] .bg-surface                  { background-color: var(--bg-surface); }
+
+/* ---- Primary palette dimmed variants for dark mode ---- */
+/* primary-50 / primary-100 在暗色模式下应该是更深的色阶，而不是亮色调（否则 active nav-item 等太刺眼） */
+html[data-appearance='dark'] .bg-primary-50               { background-color: color-mix(in srgb, var(--color-primary-600) 20%, transparent); }
+html[data-appearance='dark'] .bg-primary-100              { background-color: color-mix(in srgb, var(--color-primary-600) 30%, transparent); }
+html[data-appearance='dark'] .border-primary-50           { border-color: color-mix(in srgb, var(--color-primary-500) 30%, transparent); }
+html[data-appearance='dark'] .border-primary-100          { border-color: color-mix(in srgb, var(--color-primary-500) 40%, transparent); }
+html[data-appearance='dark'] .text-primary-600            { color: var(--color-primary-300); }
+html[data-appearance='dark'] .text-primary-700            { color: var(--color-primary-300); }
+html[data-appearance='dark'] .hover\:bg-primary-100:hover { background-color: color-mix(in srgb, var(--color-primary-600) 30%, transparent); }
+
+/* Tag backgrounds — primary / success / warning / danger 在暗色下也要调 */
+html[data-appearance='dark'] .tag-primary                 { background-color: color-mix(in srgb, var(--color-primary-600) 25%, transparent); color: var(--color-primary-300); }
+html[data-appearance='dark'] .tag-success                 { background-color: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
+html[data-appearance='dark'] .tag-warning                 { background-color: rgba(245, 158, 11, 0.18); color: #fcd34d; }
+html[data-appearance='dark'] .tag-danger                  { background-color: rgba(239, 68, 68, 0.18); color: #fca5a5; }
+html[data-appearance='dark'] .tag-neutral                 { background-color: var(--bg-subtle); color: var(--text-secondary); }
+
+/* ---- Other palette tints used for icon containers: emerald-50, amber-50, sky-100, violet-100 ---- */
+html[data-appearance='dark'] .bg-emerald-50               { background-color: rgba(16, 185, 129, 0.18); }
+html[data-appearance='dark'] .bg-amber-50                 { background-color: rgba(245, 158, 11, 0.18); }
+html[data-appearance='dark'] .bg-sky-50                  { background-color: rgba(14, 165, 233, 0.18); }
+html[data-appearance='dark'] .bg-sky-100                 { background-color: rgba(14, 165, 233, 0.25); }
+html[data-appearance='dark'] .bg-violet-50               { background-color: rgba(139, 92, 246, 0.18); }
+html[data-appearance='dark'] .bg-violet-100              { background-color: rgba(139, 92, 246, 0.25); }
+html[data-appearance='dark'] .bg-rose-50                 { background-color: rgba(244, 63, 94, 0.18); }
+html[data-appearance='dark'] .bg-indigo-50               { background-color: rgba(99, 102, 241, 0.18); }
+html[data-appearance='dark'] .bg-teal-50                 { background-color: rgba(20, 184, 166, 0.18); }
+html[data-appearance='dark'] .bg-teal-100                { background-color: rgba(20, 184, 166, 0.25); }
+html[data-appearance='dark'] .bg-red-50                  { background-color: rgba(239, 68, 68, 0.18); }
+html[data-appearance='dark'] .bg-green-50                { background-color: rgba(34, 197, 94, 0.18); }
+html[data-appearance='dark'] .bg-blue-50                 { background-color: rgba(59, 130, 246, 0.18); }
+html[data-appearance='dark'] .bg-blue-100                { background-color: rgba(59, 130, 246, 0.25); }
+
+/* Matching text colors for those icon containers */
+html[data-appearance='dark'] .text-emerald-600            { color: #6ee7b7; }
+html[data-appearance='dark'] .text-amber-600              { color: #fcd34d; }
+html[data-appearance='dark'] .text-sky-600                { color: #7dd3fc; }
+html[data-appearance='dark'] .text-violet-600             { color: #c4b5fd; }
+html[data-appearance='dark'] .text-rose-600               { color: #fda4af; }
+html[data-appearance='dark'] .text-indigo-600             { color: #a5b4fc; }
+html[data-appearance='dark'] .text-teal-600               { color: #5eead4; }
+
+/* ---- Gradients (bg-gradient-to-br from-primary-50 to-white / from-white ...) ---- */
+html[data-appearance='dark'] [class*="from-primary-50"][class*="to-white"],
+html[data-appearance='dark'] [class*="from-white"][class*="to-primary-50"] {
+  background-image: linear-gradient(to bottom right,
+    color-mix(in srgb, var(--color-primary-600) 20%, transparent),
+    var(--bg-surface));
+}
+html[data-appearance='dark'] [class*="from-white"][class*="to-white"] {
+  background-image: linear-gradient(to bottom right, var(--bg-surface), var(--bg-surface));
+}
+
+/* ---- Additional opacity variants we missed (mass batch) ---- */
+/* neutral-50 family */
+html[data-appearance='dark'] .bg-neutral-50\/30          { background-color: color-mix(in srgb, var(--bg-subtle) 30%, transparent); }
+html[data-appearance='dark'] .bg-neutral-50\/40          { background-color: color-mix(in srgb, var(--bg-subtle) 40%, transparent); }
+html[data-appearance='dark'] .bg-neutral-50\/50          { background-color: color-mix(in srgb, var(--bg-subtle) 50%, transparent); }
+html[data-appearance='dark'] .bg-neutral-50\/60          { background-color: color-mix(in srgb, var(--bg-subtle) 60%, transparent); }
+html[data-appearance='dark'] .bg-neutral-50\/80          { background-color: color-mix(in srgb, var(--bg-subtle) 80%, transparent); }
+/* neutral-100 */
+html[data-appearance='dark'] .bg-neutral-100\/80         { background-color: color-mix(in srgb, var(--bg-subtle) 80%, transparent); }
+/* neutral-200 */
+html[data-appearance='dark'] .bg-neutral-200\/60         { background-color: color-mix(in srgb, var(--border-soft) 60%, transparent); }
+/* neutral-900 (overlay variants — darken more on dark to keep "overlay" effect) */
+html[data-appearance='dark'] .bg-neutral-900\/0          { background-color: transparent; }
+html[data-appearance='dark'] .bg-neutral-900\/30         { background-color: rgba(0, 0, 0, 0.55); }
+html[data-appearance='dark'] .bg-neutral-900\/40         { background-color: rgba(0, 0, 0, 0.65); }
+html[data-appearance='dark'] .bg-neutral-900\/60         { background-color: rgba(0, 0, 0, 0.75); }
+html[data-appearance='dark'] .bg-neutral-900\/80         { background-color: rgba(0, 0, 0, 0.85); }
+html[data-appearance='dark'] .bg-neutral-900\/90         { background-color: rgba(0, 0, 0, 0.9); }
+
+/* ---- Editor-specific overrides ---- */
+/* Markdown textarea in edit mode: use a slightly deeper bg than surface so it reads as "canvas" */
+html[data-appearance='dark'] textarea {
+  background-color: #0b1220 !important;
+  color: #e2e8f0;
+  caret-color: #6ee7b7;
+}
+html[data-appearance='dark'] textarea::placeholder {
+  color: #475569;
+}
+
+/* Bottom editor status bar */
+html[data-appearance='dark'] [class*="border-t"][class*="bg-neutral-50"].h-6,
+html[data-appearance='dark'] div.bg-neutral-50.border-t.border-neutral-200.h-6 {
+  background-color: var(--bg-subtle);
+  border-top-color: var(--border-soft);
+}
+
+/* Smooth color transitions when theme changes (avoid flicker on textarea bg) */
+
+/* ---- Prevent ::selection from looking off ---- */
+html[data-appearance='dark'] ::selection                   { background: color-mix(in srgb, var(--color-primary-500) 40%, transparent); color: var(--text-primary); }
+
+/* Smooth color transitions when theme changes */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition:
+    background-color 300ms ease,
+    border-color 300ms ease,
+    color 300ms ease,
+    fill 300ms ease,
+    stroke 300ms ease !important;
 }
 
 html, body, #root {
@@ -16,8 +338,8 @@ html, body, #root {
 
 body {
   font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
-  color: #1f2937;
-  background: #f8fafc;
+  color: var(--text-primary);
+  background: var(--bg-page);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -29,15 +351,16 @@ body {
   }
   .btn-primary {
     @apply btn bg-primary-500 text-white hover:bg-primary-600 shadow-sm;
+    /* text-on-accent is semantic white; keep explicit here so Tailwind JIT works */
   }
   .btn-secondary {
-    @apply btn bg-white text-neutral-700 border border-neutral-200 hover:bg-neutral-50;
+    @apply btn bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-soft)] hover:bg-[var(--bg-hover)];
   }
   .btn-ghost {
-    @apply btn text-neutral-600 hover:bg-neutral-100;
+    @apply btn text-[var(--text-secondary)] hover:bg-[var(--bg-hover)];
   }
   .btn-danger {
-    @apply btn bg-white text-danger border border-neutral-200 hover:bg-red-50 hover:text-danger hover:border-danger;
+    @apply btn bg-[var(--bg-surface)] text-danger border border-[var(--border-soft)] hover:bg-red-50 hover:text-danger hover:border-danger;
   }
 
   /* Tags */
@@ -52,20 +375,27 @@ body {
 
   /* Cards */
   .card {
-    @apply bg-white border border-neutral-200 rounded-lg shadow-sm;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 0.5rem;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   }
   .card-hover {
-    @apply card transition-all duration-200 hover:shadow-md hover:border-neutral-300 cursor-pointer;
+    @apply card transition-all duration-200 hover:shadow-md cursor-pointer;
+    border-color: var(--border-soft);
+  }
+  .card-hover:hover {
+    border-color: var(--border-strong);
   }
 
   /* Inputs */
   .input {
-    @apply w-full px-3 py-2 rounded-md border border-neutral-200 bg-white text-sm text-neutral-800 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-400 transition;
+    @apply w-full px-3 py-2 rounded-md border border-[var(--border-soft)] bg-[var(--bg-surface)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-400 transition;
   }
 
   /* Nav items */
   .nav-item {
-    @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-800 transition cursor-pointer;
+    @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition cursor-pointer;
   }
   .nav-item.active {
     @apply bg-primary-50 text-primary-700 hover:bg-primary-50 hover:text-primary-700;
@@ -74,7 +404,7 @@ body {
     @apply text-primary-600;
   }
   .nav-icon {
-    @apply text-neutral-400 transition;
+    @apply text-[var(--text-muted)] transition;
   }
 
   /* Skeleton loader */
@@ -89,11 +419,11 @@ body {
   height: 6px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: #d0d5dd;
+  background: var(--color-neutral-300);
   border-radius: 3px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: #9da3ae;
+  background: var(--color-neutral-400);
 }
 
 /* Page load choreography */
@@ -113,30 +443,195 @@ body {
   animation: slideInRight 0.25s ease-out both;
 }
 
-/* Editor markdown preview styling (for WYSIWYG mock) */
-.prose-doc h1 { @apply font-display text-2xl font-bold text-neutral-900 mt-6 mb-3; }
-.prose-doc h2 { @apply font-display text-xl font-semibold text-neutral-900 mt-5 mb-2; }
-.prose-doc h3 { @apply font-display text-lg font-semibold text-neutral-800 mt-4 mb-2; }
-.prose-doc p  { @apply text-sm leading-7 text-neutral-700 my-3; }
-.prose-doc ul { @apply list-disc pl-5 my-2 space-y-1 text-sm text-neutral-700; }
-.prose-doc ol { @apply list-decimal pl-5 my-2 space-y-1 text-sm text-neutral-700; }
-.prose-doc code { @apply font-mono text-xs bg-neutral-100 text-primary-700 px-1.5 py-0.5 rounded; }
-.prose-doc pre  { @apply font-mono text-xs bg-neutral-900 text-neutral-100 p-4 rounded-lg overflow-x-auto my-3; }
-.prose-doc blockquote { @apply border-l-4 border-primary-300 pl-4 my-3 text-sm text-neutral-600 italic; }
-.prose-doc a { @apply text-primary-600 hover:text-primary-700 underline underline-offset-2; }
-.prose-doc hr { @apply my-6 border-neutral-200; }
+/* ============== Prose-doc: Markdown renderer base + 渲染主题 ============== */
+/* 基础样式 — 亮/暗通用 */
+.prose-doc h1 { @apply font-display text-2xl font-bold mt-6 mb-3; }
+.prose-doc h2 { @apply font-display text-xl font-semibold mt-5 mb-2; }
+.prose-doc h3 { @apply font-display text-lg font-semibold mt-4 mb-2; }
+.prose-doc p  { @apply text-sm leading-7 my-3; }
+.prose-doc ul { @apply list-disc pl-5 my-2 space-y-1 text-sm; }
+.prose-doc ol { @apply list-decimal pl-5 my-2 space-y-1 text-sm; }
+.prose-doc code { @apply font-mono text-xs px-1.5 py-0.5 rounded; }
+.prose-doc pre  { @apply font-mono text-xs p-4 rounded-lg overflow-x-auto my-3; }
+.prose-doc blockquote { @apply border-l-4 pl-4 my-3 text-sm italic; }
+.prose-doc a { @apply underline underline-offset-2; }
+.prose-doc hr { @apply my-6; }
+
+/* --- 亮色默认 --- */
+.prose-doc h1, .prose-doc h2, .prose-doc h3 { color: #0f172a; }
+.prose-doc p, .prose-doc ul, .prose-doc ol  { color: #334155; }
+.prose-doc code { background: #f1f5f9; color: #059669; }
+.prose-doc pre  { background: #0f172a; color: #e2e8f0; }
+.prose-doc blockquote { border-color: #10b981; color: #64748b; }
+.prose-doc a { color: #059669; }
+.prose-doc a:hover { color: #047857; }
+.prose-doc hr { border-color: #e2e8f0; }
+
+/* --- 暗色覆盖 --- */
+html[data-appearance='dark'] .prose-doc h1,
+html[data-appearance='dark'] .prose-doc h2,
+html[data-appearance='dark'] .prose-doc h3 { color: #f1f5f9; }
+html[data-appearance='dark'] .prose-doc p,
+html[data-appearance='dark'] .prose-doc ul,
+html[data-appearance='dark'] .prose-doc ol  { color: #cbd5e1; }
+html[data-appearance='dark'] .prose-doc code { background: #1e293b; color: #6ee7b7; }
+html[data-appearance='dark'] .prose-doc pre  { background: #0b1220; color: #cbd5e1; border: 1px solid #1e293b; }
+html[data-appearance='dark'] .prose-doc blockquote { border-color: #10b981; color: #94a3b8; }
+html[data-appearance='dark'] .prose-doc a { color: #6ee7b7; }
+html[data-appearance='dark'] .prose-doc a:hover { color: #34d399; }
+html[data-appearance='dark'] .prose-doc hr { border-color: #1e293b; }
+
+/* --- 渲染主题变体 --- */
+/* 每个主题覆盖色彩、字号、行距、字体、最大宽度 */
+
+/* theme-plain （默认 / 紧凑科技风） */
+.prose-doc.prose-plain { font-size: 14px; line-height: 1.75; max-width: 48rem; }
+
+/* theme-book （书籍 / 衬线 / 宽松） */
+.prose-doc.prose-book {
+  font-family: Georgia, 'Noto Serif SC', 'Source Han Serif SC', serif;
+  font-size: 16px;
+  line-height: 1.9;
+  max-width: 44rem;
+  color: #1f2937;
+}
+.prose-doc.prose-book h1, .prose-doc.prose-book h2, .prose-doc.prose-book h3 { letter-spacing: -0.01em; }
+html[data-appearance='dark'] .prose-doc.prose-book { color: #e2e8f0; }
+
+/* theme-journal （期刊 / 窄栏 / 经典衬线） */
+.prose-doc.prose-journal {
+  font-family: 'Noto Serif SC', 'Source Han Serif SC', Georgia, serif;
+  font-size: 15px;
+  line-height: 1.85;
+  max-width: 38rem;
+  text-align: justify;
+  color: #374151;
+}
+.prose-doc.prose-journal h1, .prose-doc.prose-journal h2 {
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.prose-doc.prose-journal blockquote {
+  border-left-color: #94a3b8;
+  font-style: italic;
+}
+html[data-appearance='dark'] .prose-doc.prose-journal { color: #cbd5e1; }
+
+/* theme-compact （紧凑 / 大密度 / 工程风） */
+.prose-doc.prose-compact {
+  font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 60rem;
+  color: #1f2937;
+}
+.prose-doc.prose-compact h1 { font-size: 18px; }
+.prose-doc.prose-compact h2 { font-size: 16px; }
+.prose-doc.prose-compact h3 { font-size: 14px; }
+.prose-doc.prose-compact pre { font-size: 12px; background: #0f172a; color: #e2e8f0; }
+html[data-appearance='dark'] .prose-doc.prose-compact { color: #cbd5e1; }
+html[data-appearance='dark'] .prose-doc.prose-compact pre { background: #0b1220; }
+
+/* theme-tech （科技蓝 / 冷色调 / 无衬线） */
+.prose-doc.prose-tech {
+  font-family: ui-sans-serif, system-ui, 'Inter', 'PingFang SC', sans-serif;
+  font-size: 14px;
+  line-height: 1.8;
+  max-width: 50rem;
+}
+.prose-doc.prose-tech h1, .prose-doc.prose-tech h2, .prose-doc.prose-tech h3 {
+  color: #4f46e5;
+  letter-spacing: -0.01em;
+}
+.prose-doc.prose-tech code { background: #eef2ff; color: #4f46e5; }
+.prose-doc.prose-tech pre { background: #1e1b4b; color: #e0e7ff; }
+.prose-doc.prose-tech blockquote { border-color: #4f46e5; }
+.prose-doc.prose-tech a { color: #4f46e5; }
+html[data-appearance='dark'] .prose-doc.prose-tech h1,
+html[data-appearance='dark'] .prose-doc.prose-tech h2,
+html[data-appearance='dark'] .prose-doc.prose-tech h3 { color: #a5b4fc; }
+html[data-appearance='dark'] .prose-doc.prose-tech code { background: #312e81; color: #c7d2fe; }
+html[data-appearance='dark'] .prose-doc.prose-tech pre { background: #0f172a; color: #c7d2fe; border: 1px solid #1e293b; }
+html[data-appearance='dark'] .prose-doc.prose-tech blockquote { border-color: #818cf8; }
+html[data-appearance='dark'] .prose-doc.prose-tech a { color: #a5b4fc; }
+
+/* theme-solarized-light / theme-solarized-dark （经典阅读） */
+.prose-doc.prose-solarized-light {
+  background: #fdf6e3;
+  color: #586e75;
+  font-family: ui-monospace, 'SF Mono', 'Menlo', monospace;
+  font-size: 14px;
+  line-height: 1.8;
+  max-width: 52rem;
+}
+.prose-doc.prose-solarized-light h1,
+.prose-doc.prose-solarized-light h2,
+.prose-doc.prose-solarized-light h3 { color: #b58900; }
+.prose-doc.prose-solarized-light code { background: #eee8d5; color: #d33682; }
+.prose-doc.prose-solarized-light pre { background: #002b36; color: #839496; }
+.prose-doc.prose-solarized-light blockquote { border-color: #2aa198; color: #657b83; }
+
+.prose-doc.prose-solarized-dark {
+  background: #002b36;
+  color: #93a1a1;
+  font-family: ui-monospace, 'SF Mono', 'Menlo', monospace;
+  font-size: 14px;
+  line-height: 1.8;
+  max-width: 52rem;
+}
+.prose-doc.prose-solarized-dark h1,
+.prose-doc.prose-solarized-dark h2,
+.prose-doc.prose-solarized-dark h3 { color: #b58900; }
+.prose-doc.prose-solarized-dark code { background: #073642; color: #d33682; }
+.prose-doc.prose-solarized-dark pre { background: #073642; color: #839496; }
+.prose-doc.prose-solarized-dark blockquote { border-color: #2aa198; color: #839496; }
 
 /* Resize handle for resizable panels */
 .resize-handle {
-  width: 4px;
-  background-color: #e5e5e5;
+  width: 6px;
+  margin-left: -3px;
+  margin-right: -3px;
+  background-color: transparent;
   cursor: col-resize;
   flex-shrink: 0;
+  position: relative;
+  z-index: 1;
   transition: background-color 0.15s ease;
 }
-.resize-handle:hover {
-  background-color: #b5c6e8;
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background-color: transparent;
+  border-radius: 1px;
+  transition: background-color 0.15s ease, width 0.15s ease;
 }
-.resize-handle[data-resize-handle-active] {
-  background-color: #93aede;
+.resize-handle:hover::after,
+.resize-handle[data-resize-handle-active]::after {
+  width: 2px;
+  background-color: var(--color-neutral-400);
+}
+.resize-handle[data-resize-handle-active]::after {
+  background-color: var(--color-neutral-500);
+}
+/* 纵向分隔栏的变体（如果后续需要） */
+.resize-handle[data-panel-group-direction="vertical"] {
+  height: 6px;
+  margin-top: -3px;
+  margin-bottom: -3px;
+  cursor: row-resize;
+}
+.resize-handle[data-panel-group-direction="vertical"]::after {
+  left: 25%;
+  right: 25%;
+  top: 50%;
+  bottom: auto;
+  width: auto;
+  height: 1px;
+  transform: translateY(-50%);
 }

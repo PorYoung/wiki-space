@@ -7,18 +7,18 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Design tokens from Design Contract
+        // Design tokens — primary 通过 CSS 变量动态注入（ThemeContext）
         primary: {
-          50:  '#eefbf9',
-          100: '#d7f5f0',
-          200: '#b0ebe1',
-          300: '#7fdcc9',
-          400: '#4ac6ae',
-          500: '#2ca894',  // primary
-          600: '#228777',  // primary-hover
-          700: '#1f6c60',
-          800: '#1e564f',
-          900: '#1b4842',
+          50:  'var(--color-primary-50)',
+          100: 'var(--color-primary-100)',
+          200: 'var(--color-primary-200)',
+          300: 'var(--color-primary-300)',
+          400: 'var(--color-primary-400)',
+          500: 'var(--color-primary-500)',
+          600: 'var(--color-primary-600)',
+          700: 'var(--color-primary-700)',
+          800: 'var(--color-primary-800)',
+          900: 'var(--color-primary-900)',
         },
         neutral: {
           50:  '#fafbfc',
@@ -55,6 +55,10 @@ export default {
         sm: '6px',
         md: '10px',
         lg: '16px',
+      },
+      // Smooth color transitions on theme change
+      transitionDuration: {
+        theme: '300ms',
       },
     },
   },

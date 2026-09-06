@@ -70,12 +70,11 @@ function UserMenu({ onClose }) {
       items: [
         { icon: User,     label: '个人资料',       desc: '编辑头像与个人信息', action: () => { onClose(); navigate('/settings') } },
         { icon: Bell,     label: '通知偏好',       desc: '管理提醒频率',       action: () => { onClose(); navigate('/settings') } },
-        { icon: Settings, label: '工作区设置',     desc: '通用偏好与外观',     action: () => { onClose(); navigate('/settings') } },
+        { icon: Settings, label: '偏好设置',       desc: '通用偏好与外观',     action: () => { onClose(); navigate('/settings') } },
       ],
     },
     {
       items: [
-        { icon: Users,      label: '切换工作区',     desc: '加入的 3 个工作区', action: () => onClose() },
         { icon: Sparkles,   label: '升级 Pro',       desc: '更多高级功能',     action: () => onClose() },
         { icon: CreditCard, label: '账单与订阅',     desc: '查看用量与发票',   action: () => onClose() },
       ],
@@ -100,7 +99,7 @@ function UserMenu({ onClose }) {
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold text-neutral-900 truncate">张明</div>
-              <div className="text-xs text-neutral-500 truncate">Workspace Owner · Pro</div>
+              <div className="text-xs text-neutral-500 truncate">Pro 会员</div>
             </div>
           </div>
         </div>
@@ -173,17 +172,17 @@ export default function Sidebar() {
             <BookOpen size={20} className="text-white" />
           </div>
           <div>
-            <div className="text-base font-bold text-neutral-900 leading-tight">
-              DocVault
+              <div className="text-base font-bold text-neutral-900 leading-tight">
+                DocVault
+              </div>
+              <div className="text-xs text-neutral-400">文档知识管理平台</div>
             </div>
-            <div className="text-xs text-neutral-400">全局管理视图</div>
-          </div>
         </div>
       </div>
 
       {/* Navigation */}
       <div className="flex-1 overflow-y-auto scrollbar-thin px-3">
-        <NavGroup label="工作区" items={mainNav} currentPath={currentPath} />
+        <NavGroup label="导航" items={mainNav} currentPath={currentPath} />
         <NavGroup label="配置" items={secondaryNav} currentPath={currentPath} />
 
         {/* 提示入口 */}
@@ -208,7 +207,7 @@ export default function Sidebar() {
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-sm font-medium text-neutral-800 truncate">张明</div>
-              <div className="text-xs text-neutral-400 truncate">Workspace Owner</div>
+              <div className="text-xs text-neutral-400 truncate">Pro 会员</div>
             </div>
             <ChevronUp
               size={16}

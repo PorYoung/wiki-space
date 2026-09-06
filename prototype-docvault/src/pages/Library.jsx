@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   FolderOpen,
@@ -27,8 +28,12 @@ import {
   EyeOff,
   SlidersHorizontal,
   RotateCcw,
+  Sparkles,
+  Wand2,
+  ArrowLeft,
+  CheckCircle2,
 } from 'lucide-react'
-import { fetchProjects, fetchDocuments } from '../api/stubs.js'
+import { fetchProjects, fetchDocuments, fetchStarterPacks, initProjectFromStarter, fetchSources, createSource } from '../api/stubs.js'
 import { authors as authorsData } from '../mock/data.js'
 
 // ---------------------------------------------------------------------------
@@ -40,6 +45,39 @@ const STATUS_MAP = {
   modified: { label: '本地修改', cls: 'tag-warning' },
   conflict: { label: '冲突', cls: 'tag-danger' },
   untracked: { label: '未跟踪', cls: 'tag-primary' },
+}
+
+// ========================================================================
+// 辅助：从 packForm 构造新建数据源请求，调 createSource stub
+// ========================================================================
+
+async function createSourceFromPackForm(form, packName) {
+  if (form.sourceBackend === 'git') {
+    return createSource({
+      type: 'git',
+      name: `${form.name} · Git 仓库`,
+      url: form.newGitUrl.trim(),
+      branch: form.newGitBranch || 'main',
+      authType: form.newGitAuth,
+      username: form.newGitAuth === 'https' ? form.newGitUsername : '',
+      token: form.newGitAuth === 'https' ? form.newGitToken : '',
+      description: `「${form.name}」知识库的 Git 仓库数据源（${packName} 模板）`,
+    })
+  } else if (form.sourceBackend === 'database') {
+    return createSource({
+      type: 'database',
+      name: `${form.name} · ${form.newDbType}`,
+      dbType: form.newDbType,
+      host: form.newDbHost.trim(),
+      port: form.newDbPort ? Number(form.newDbPort) : null,
+      database: form.newDbDatabase.trim(),
+      table: form.newDbTable.trim() || null,
+      username: form.newDbUsername.trim(),
+      password: form.newDbPassword,
+      description: `「${form.name}」知识库的数据库数据源`,
+    })
+  }
+  return null
 }
 
 const SOURCE_ICON = {
@@ -55,6 +93,13 @@ const SOURCE_LABEL = {
   database: '数据库',
   web: '网页',
 }
+
+// 存储后端类型（新建知识库时可选）
+const STORAGE_BACKEND_TYPES = [
+  { key: 'local',    icon: HardDrive,  label: '本地文件夹',   desc: '存储在本地磁盘，适合个人使用', color: 'bg-violet-50 text-violet-600 border-violet-100' },
+  { key: 'git',      icon: GitBranch,  label: 'Git 仓库',     desc: '绑定 GitHub/GitLab 仓库，支持版本追踪', color: 'bg-sky-50 text-sky-600 border-sky-100' },
+  { key: 'database', icon: Database,    label: '数据库',       desc: '存储到对象数据库 / 关系型数据库', color: 'bg-emerald-50 text-emerald-600 border-emerald-100' },
+]
 
 const TEMPLATE_LABEL = {
   docs: '标准文档',
@@ -280,6 +325,97 @@ function DocumentCard({ doc, projects, delayMs = 0 }) {
 }
 
 // ---------------------------------------------------------------------------
+// Document list row (for list view)
+// ---------------------------------------------------------------------------
+
+function DocumentListRow({ doc, projects, delayMs = 0 }) {
+  const status = STATUS_MAP[doc.status] || STATUS_MAP.synced
+  const authorName = getAuthorName(doc.modifiedBy)
+  const project = projects.find((p) => p.id === doc.projectId)
+
+  return (
+    <Link
+      to={`/project/${doc.projectId}/browse?doc=${doc.id}`}
+      className="animate-fade-up block group"
+      style={{ animationDelay: `${delayMs}ms` }}
+    >
+      <div className="flex items-center gap-4 px-4 py-3 border-b border-neutral-100 hover:bg-neutral-50/80 transition-colors">
+        {/* File icon */}
+        <div className="w-8 h-8 rounded-md bg-neutral-100 text-neutral-500 flex items-center justify-center shrink-0">
+          <FileText size={16} />
+        </div>
+
+        {/* Main info */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h4 className="text-sm font-medium text-neutral-900 truncate group-hover:text-primary-600 transition-colors">
+              {doc.title}
+            </h4>
+            <span className={`shrink-0 text-[10px] ${status.cls}`}>{status.label}</span>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-0.5 font-mono">
+            {project && (
+              <span className="text-primary-600 truncate">{project.name}</span>
+            )}
+            <ChevronRight size={10} className="text-neutral-300 shrink-0" />
+            <span className="truncate">{doc.path}</span>
+          </div>
+        </div>
+
+        {/* Tags */}
+        {doc.tags?.length > 0 && (
+          <div className="hidden md:flex items-center gap-1 shrink-0">
+            {doc.tags.slice(0, 2).map((t) => (
+              <span key={t} className="tag-neutral !text-[10px] !py-0">
+                <Tag size={9} />
+                {t}
+              </span>
+            ))}
+            {doc.tags.length > 2 && (
+              <span className="text-[10px] text-neutral-400">+{doc.tags.length - 2}</span>
+            )}
+          </div>
+        )}
+
+        {/* Author + time */}
+        <div className="hidden sm:flex items-center gap-2 shrink-0 text-[11px] text-neutral-500 w-[160px]">
+          <div
+            className={`w-5 h-5 rounded-full ${avatarColor(
+              doc.modifiedBy,
+            )} flex items-center justify-center text-white text-[9px] font-semibold shrink-0`}
+          >
+            {authorName.slice(0, 1).toUpperCase()}
+          </div>
+          <span className="truncate">{authorName}</span>
+        </div>
+        <div className="hidden lg:flex items-center gap-1 shrink-0 text-[11px] text-neutral-400 w-[90px] justify-end">
+          <Clock size={10} />
+          <span>{relativeTime(doc.lastModified)}</span>
+        </div>
+      </div>
+    </Link>
+  )
+}
+
+function DocumentListView({ docs, projects }) {
+  return (
+    <div className="card p-0 overflow-hidden divide-y divide-neutral-100">
+      {/* Header row */}
+      <div className="flex items-center gap-4 px-4 py-2 bg-neutral-50/60 border-b border-neutral-200 text-[11px] font-medium text-neutral-500 uppercase tracking-wider">
+        <div className="w-8 shrink-0" />
+        <div className="flex-1">文档</div>
+        <div className="hidden md:block shrink-0">标签</div>
+        <div className="hidden sm:block shrink-0 w-[160px]">作者</div>
+        <div className="hidden lg:block shrink-0 w-[90px] text-right">更新时间</div>
+      </div>
+      {docs.map((doc, i) => (
+        <DocumentListRow key={doc.id} doc={doc} projects={projects} delayMs={i * 30} />
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Project card (for "按项目" view)
 // ---------------------------------------------------------------------------
 
@@ -369,44 +505,195 @@ function ProjectCard({ project, docCount, onOpenWebsite, delayMs = 0 }) {
 }
 
 // ---------------------------------------------------------------------------
-// Project chip
+// Project selector — chips when few, dropdown search when many
 // ---------------------------------------------------------------------------
 
-function ProjectChips({ projects, selected, onSelect, docCounts }) {
-  return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <button
-        type="button"
-        onClick={() => onSelect(null)}
-        className={`tag-neutral cursor-pointer transition ${
-          selected === null
-            ? 'bg-primary-100 !text-primary-700 ring-1 ring-primary-200'
-            : 'hover:bg-neutral-200'
-        }`}
-      >
-        <FolderOpen size={12} />
-        全部
-        <span className="ml-1 text-neutral-400">
-          ({projects.reduce((s, p) => s + (docCounts[p.id] || 0), 0)})
-        </span>
-      </button>
-      {projects.map((p) => (
+function ProjectSelector({ projects, selected, onSelect, docCounts, threshold = 6 }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+
+  const totalCount = projects.reduce((s, p) => s + (docCounts[p.id] || 0), 0)
+  const selectedProject = selected ? projects.find((p) => p.id === selected) : null
+
+  // Few items → show chips inline
+  if (projects.length <= threshold) {
+    return (
+      <div className="flex items-center gap-1.5 flex-wrap">
         <button
-          key={p.id}
           type="button"
-          onClick={() => onSelect(p.id)}
-          className={`tag-neutral cursor-pointer transition ${
-            selected === p.id
-              ? 'bg-primary-100 !text-primary-700 ring-1 ring-primary-200'
-              : 'hover:bg-neutral-200'
+          onClick={() => onSelect(null)}
+          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition border ${
+            selected === null
+              ? 'bg-primary-50 !text-primary-700 border-primary-200'
+              : 'bg-white text-neutral-600 border-neutral-200 hover:border-neutral-300 hover:text-neutral-800'
           }`}
         >
-          {p.name}
-          <span className="ml-1 text-neutral-400">
-            ({docCounts[p.id] || 0})
+          <FolderOpen size={11} />
+          全部
+          <span className={`text-[10px] ${selected === null ? 'text-primary-500' : 'text-neutral-400'}`}>
+            {totalCount}
           </span>
         </button>
-      ))}
+        {projects.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => onSelect(p.id)}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition border ${
+              selected === p.id
+                ? 'bg-primary-50 !text-primary-700 border-primary-200'
+                : 'bg-white text-neutral-600 border-neutral-200 hover:border-neutral-300 hover:text-neutral-800'
+            }`}
+          >
+            {p.name}
+            <span className={`text-[10px] ${selected === p.id ? 'text-primary-500' : 'text-neutral-400'}`}>
+              {docCounts[p.id] || 0}
+            </span>
+          </button>
+        ))}
+      </div>
+    )
+  }
+
+  // Many items → dropdown with search (Portal-mounted to avoid stacking context issues)
+  const filtered = projects.filter((p) =>
+    p.name.toLowerCase().includes(query.toLowerCase())
+  )
+
+  // For Portal positioning
+  const triggerRef = useRef(null)
+  const [panelPos, setPanelPos] = useState(null)
+
+  const openDropdown = () => {
+    setOpen(true)
+    setQuery('')
+    // Calculate absolute position relative to viewport
+    setTimeout(() => {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (rect) {
+        setPanelPos({ top: rect.bottom + 4, left: rect.left })
+      }
+    }, 0)
+  }
+
+  // Close on outside click / ESC / scroll
+  useEffect(() => {
+    if (!open) return
+    const close = () => setOpen(false)
+    const onKey = (e) => { if (e.key === 'Escape') close() }
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('resize', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => (open ? setOpen(false) : openDropdown())}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition border whitespace-nowrap ${
+          selected
+            ? 'bg-primary-50 !text-primary-700 border-primary-200'
+            : 'bg-white text-neutral-600 border-neutral-200 hover:border-neutral-300 hover:text-neutral-800'
+        }`}
+      >
+        {selectedProject ? (
+          <>
+            <FolderOpen size={11} />
+            {selectedProject.name}
+            <span className="text-[10px] text-primary-500">{docCounts[selected] || 0}</span>
+          </>
+        ) : (
+          <>
+            <FolderOpen size={11} />
+            全部项目
+            <span className="text-[10px] text-neutral-400">{totalCount}</span>
+          </>
+        )}
+        <ChevronRight
+          size={12}
+          className={`text-neutral-400 transition-transform ${open ? 'rotate-90' : ''}`}
+        />
+      </button>
+
+      {open && panelPos && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            className="fixed z-50 w-72 bg-white rounded-lg border border-neutral-200 shadow-xl overflow-hidden animate-fade-up"
+            style={{ top: panelPos.top, left: panelPos.left }}
+          >
+            {/* Search */}
+            <div className="p-2 border-b border-neutral-100">
+              <div className="relative">
+                <Search
+                  size={13}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400"
+                />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="搜索项目..."
+                  className="input !pl-7 !h-8 !text-xs"
+                  autoFocus
+                />
+              </div>
+            </div>
+            {/* Options */}
+            <div className="max-h-64 overflow-y-auto scrollbar-thin py-1">
+              <button
+                type="button"
+                onClick={() => { onSelect(null); setOpen(false) }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition ${
+                  selected === null
+                    ? 'bg-primary-50 text-primary-700'
+                    : 'text-neutral-700 hover:bg-neutral-50'
+                }`}
+              >
+                <FolderOpen size={12} className="shrink-0" />
+                <span className="flex-1 text-left">全部项目</span>
+                <span className={`text-[10px] ${selected === null ? 'text-primary-500' : 'text-neutral-400'}`}>
+                  {totalCount}
+                </span>
+              </button>
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => { onSelect(p.id); setOpen(false) }}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition ${
+                    selected === p.id
+                      ? 'bg-primary-50 text-primary-700'
+                      : 'text-neutral-700 hover:bg-neutral-50'
+                  }`}
+                >
+                  <FolderOpen size={12} className="shrink-0" />
+                  <span className="flex-1 text-left truncate">{p.name}</span>
+                  <span className={`text-[10px] ${selected === p.id ? 'text-primary-500' : 'text-neutral-400'}`}>
+                    {docCounts[p.id] || 0}
+                  </span>
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="px-3 py-4 text-center text-xs text-neutral-400">
+                  未找到匹配的项目
+                </div>
+              )}
+            </div>
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
   )
 }
@@ -664,6 +951,38 @@ export default function Library() {
   const [scope, setScope] = useState('mine') // 'mine' | 'explore'
   const [filterOpen, setFilterOpen] = useState(false)
   const [websiteUrl, setWebsiteUrl] = useState(null)
+  const [starterModalOpen, setStarterModalOpen] = useState(false)
+  const [starterPacks, setStarterPacks] = useState([])
+  const [selectedPack, setSelectedPack] = useState(null)
+  const [wizardStep, setWizardStep] = useState(1) // 1: 选模板  2: 预览  3: 完成
+  const [packForm, setPackForm] = useState({
+    name: '',
+    description: '',
+    visibility: 'private',
+    sourceBackend: 'local',       // 'local' | 'git' | 'database'
+    // 通用：选已有 vs 新建
+    sourceMode: 'select',         // 'select' | 'create'
+    sourceId: null,               // 选中的已有数据源 ID
+    localFolderPath: 'C:/Users/poryo/Documents/DocVault/', // 本地存储基础路径
+    // === 内嵌创建新 Git 数据源 ===
+    newGitUrl: '',
+    newGitBranch: 'main',
+    newGitAuth: 'ssh',            // 'ssh' | 'https'
+    newGitUsername: '',
+    newGitToken: '',
+    // === 内嵌创建新数据库数据源 ===
+    newDbType: 'mysql',           // 复用 Sources.jsx DATABASE_TYPES 的 key
+    newDbHost: '',
+    newDbPort: '',
+    newDbDatabase: '',
+    newDbTable: '',
+    newDbUsername: '',
+    newDbPassword: '',
+    newDbShowPassword: false,
+  })
+  const [sources, setSources] = useState([]) // 已配置的数据源列表
+  const [creating, setCreating] = useState(false)
+  const [createdProject, setCreatedProject] = useState(null)
   const [filters, setFilters] = useState({
     status: [],
     template: null,
@@ -675,10 +994,17 @@ export default function Library() {
   useEffect(() => {
     let active = true
     const run = async () => {
-      const [ps, ds] = await Promise.all([fetchProjects(), fetchDocuments()])
+      const [ps, ds, sps, srcs] = await Promise.all([
+        fetchProjects(),
+        fetchDocuments(),
+        fetchStarterPacks(),
+        fetchSources(),
+      ])
       if (!active) return
       setProjects(ps)
       setDocuments(ds)
+      setStarterPacks(sps || [])
+      setSources(srcs || [])
       setTimeout(() => setLoading(false), 400)
     }
     run()
@@ -788,98 +1114,93 @@ export default function Library() {
         <LibrarySkeleton />
       ) : (
         <>
-          {/* 1. Page header */}
-          <header className="animate-fade-up flex items-start justify-between mb-6">
-            <div>
-              <h1 className="text-2xl font-bold text-neutral-900 flex items-center gap-2">
-                <FolderOpen size={24} className="text-primary-600" />
-                文档库
-              </h1>
-              <p className="text-sm text-neutral-500 mt-1">
-                {scope === 'explore'
-                  ? '发现社区公开的文档库和已发布网站'
-                  : '管理所有项目、知识库和代码仓库中的文档'}
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              {/* View-mode pill toggle: flat vs project */}
-              <div className="inline-flex items-center bg-neutral-100 rounded-full p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setBrowseMode('flat')}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-                    browseMode === 'flat'
-                      ? 'bg-white text-neutral-900 shadow-sm'
-                      : 'text-neutral-500 hover:text-neutral-700'
-                  }`}
-                >
-                  <LayoutGrid size={13} />
-                  平铺
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBrowseMode('project')}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-                    browseMode === 'project'
-                      ? 'bg-white text-neutral-900 shadow-sm'
-                      : 'text-neutral-500 hover:text-neutral-700'
-                  }`}
-                >
-                  <FolderKanban size={13} />
-                  按项目
-                </button>
-              </div>
+          {/* 1. Page header — compact single row */}
+          <header className="animate-fade-up flex items-center gap-3 mb-5">
+            <h1 className="text-lg font-bold text-neutral-900 flex items-center gap-2 shrink-0">
+              <FolderOpen size={20} className="text-primary-600" />
+              文档库
+            </h1>
 
-              {scope === 'mine' && (
-                <>
-                  <button type="button" className="btn-secondary" onClick={() => navigate('/sources')}>
-                    <ExternalLink size={16} />
-                    导入源
-                  </button>
-                  <button type="button" className="btn-primary" onClick={() => navigate('/sources')}>
-                    <Plus size={16} />
-                    新建库
-                  </button>
-                </>
-              )}
-            </div>
-          </header>
-
-          {/* 2. Scope tabs: mine vs explore */}
-          <div className="animate-fade-up mb-5" style={{ animationDelay: '40ms' }}>
-            <div className="inline-flex items-center bg-white border border-neutral-200 rounded-lg p-1 shadow-sm">
+            {/* Scope + BrowseMode combined pill group */}
+            <div className="inline-flex items-center bg-neutral-100 rounded-md p-0.5 text-[12px] shrink-0">
               <button
                 type="button"
                 onClick={() => { setScope('mine'); setSelectedProject(null) }}
-                className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition ${
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded transition ${
                   scope === 'mine'
-                    ? 'bg-primary-50 text-primary-700'
+                    ? 'bg-white text-neutral-900 shadow-sm font-medium'
                     : 'text-neutral-500 hover:text-neutral-700'
                 }`}
               >
-                <EyeOff size={14} />
-                我的文档库
-                <span className={`text-xs ${scope === 'mine' ? 'text-primary-500' : 'text-neutral-400'}`}>
+                <EyeOff size={12} />
+                我的
+                <span className={`text-[10px] ${scope === 'mine' ? 'text-neutral-400' : 'text-neutral-400'}`}>
                   {projects.length}
                 </span>
               </button>
               <button
                 type="button"
                 onClick={() => { setScope('explore'); setSelectedProject(null) }}
-                className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition ${
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded transition ${
                   scope === 'explore'
-                    ? 'bg-emerald-50 text-emerald-700'
+                    ? 'bg-white text-emerald-700 shadow-sm font-medium'
                     : 'text-neutral-500 hover:text-neutral-700'
                 }`}
               >
-                <Globe size={14} />
-                公开探索
-                <span className={`text-xs ${scope === 'explore' ? 'text-emerald-500' : 'text-neutral-400'}`}>
+                <Globe size={12} />
+                公开
+                <span className={`text-[10px] ${scope === 'explore' ? 'text-emerald-500' : 'text-neutral-400'}`}>
                   {publishedPublicProjects.length}
                 </span>
               </button>
+              <div className="w-px h-4 bg-neutral-200 mx-0.5" />
+              <button
+                type="button"
+                onClick={() => setBrowseMode('flat')}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded transition ${
+                  browseMode === 'flat'
+                    ? 'bg-white text-neutral-900 shadow-sm font-medium'
+                    : 'text-neutral-500 hover:text-neutral-700'
+                }`}
+              >
+                <LayoutGrid size={12} />
+                平铺
+              </button>
+              <button
+                type="button"
+                onClick={() => setBrowseMode('project')}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded transition ${
+                  browseMode === 'project'
+                    ? 'bg-white text-neutral-900 shadow-sm font-medium'
+                    : 'text-neutral-500 hover:text-neutral-700'
+                }`}
+              >
+                <FolderKanban size={12} />
+                按项目
+              </button>
             </div>
-          </div>
+
+            <div className="flex-1" />
+
+            {scope === 'mine' && (
+              <>
+                <button type="button" className="btn-secondary !h-8 !text-xs" onClick={() => navigate('/sources')}>
+                  <ExternalLink size={14} />
+                  导入源
+                </button>
+                <button type="button" className="btn-primary !h-8 !text-xs" onClick={() => {
+                  setStarterModalOpen(true)
+                  setWizardStep(1)
+                  setSelectedPack(null)
+                  setPackForm({ name: '', description: '', visibility: 'private' })
+                  setCreatedProject(null)
+                }}>
+                  <Wand2 size={14} />
+                  新建库
+                </button>
+              </>
+            )}
+          </header>
 
           {/* Explore banner */}
           {scope === 'explore' && publishedPublicProjects.length > 0 && (
@@ -915,14 +1236,14 @@ export default function Library() {
             </div>
           )}
 
-          {/* 3. Search + toolbar */}
+          {/* 2. Search + toolbar */}
           <div
-            className="animate-fade-up flex flex-wrap items-center gap-3 mb-5"
-            style={{ animationDelay: '80ms' }}
+            className="animate-fade-up flex flex-wrap items-center gap-2.5 mb-4"
+            style={{ animationDelay: '40ms' }}
           >
-            <div className="relative flex-1 min-w-[220px] max-w-[360px]">
+            <div className="relative min-w-[220px] w-[300px]">
               <Search
-                size={16}
+                size={15}
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400"
               />
               <input
@@ -934,15 +1255,15 @@ export default function Library() {
                     ? '搜索公开文档库、博客、官网...'
                     : '按标题、路径或标签搜索...'
                 }
-                className="input !pl-9 !h-9"
+                className="input !pl-9 !h-8 !text-xs"
               />
             </div>
 
-            {/* Filter chips — quick toggles */}
+            {/* Quick filter chips */}
             {scope === 'mine' && (
               <>
                 <FilterChip
-                  label="有冲突"
+                  label="冲突"
                   count={documents.filter((d) => d.status === 'conflict').length}
                   active={filters.status.includes('conflict')}
                   onClick={() => {
@@ -984,9 +1305,9 @@ export default function Library() {
               />
             )}
 
-            <div className="flex items-center ml-auto">
+            <div className="flex items-center gap-1.5 ml-auto">
               {browseMode === 'flat' && scope === 'mine' && (
-                <ProjectChips
+                <ProjectSelector
                   projects={scopeProjects}
                   selected={selectedProject}
                   onSelect={setSelectedProject}
@@ -994,7 +1315,7 @@ export default function Library() {
                 />
               )}
 
-              <div className="inline-flex items-center bg-neutral-100 rounded-md p-0.5 ml-2">
+              <div className="inline-flex items-center bg-neutral-100 rounded-md p-0.5 ml-1">
                 <button
                   type="button"
                   onClick={() => setViewMode('grid')}
@@ -1005,7 +1326,7 @@ export default function Library() {
                   }`}
                   aria-label="网格视图"
                 >
-                  <Grid3X3 size={16} />
+                  <Grid3X3 size={15} />
                 </button>
                 <button
                   type="button"
@@ -1017,22 +1338,23 @@ export default function Library() {
                   }`}
                   aria-label="列表视图"
                 >
-                  <List size={16} />
+                  <List size={15} />
                 </button>
               </div>
               <button
                 type="button"
                 onClick={() => setFilterOpen(true)}
-                className={`relative inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition ml-1 ${
+                className={`relative p-1.5 rounded-md border transition ml-1 ${
                   activeFilterCount > 0
                     ? 'bg-neutral-900 text-white border-neutral-900'
                     : 'bg-white text-neutral-600 border-neutral-200 hover:border-neutral-300'
                 }`}
+                aria-label="筛选"
+                title="筛选"
               >
-                <Filter size={14} />
-                筛选
+                <Filter size={15} />
                 {activeFilterCount > 0 && (
-                  <span className="text-[10px] bg-white/20 px-1 rounded">
+                  <span className="absolute -top-1 -right-1 text-[9px] bg-primary-500 text-white rounded-full w-4 h-4 flex items-center justify-center font-medium leading-none">
                     {activeFilterCount}
                   </span>
                 )}
@@ -1040,7 +1362,7 @@ export default function Library() {
             </div>
           </div>
 
-          {/* 4. Content area */}
+          {/* 3. Content area */}
           {browseMode === 'flat' ? (
             filteredDocs.length === 0 ? (
               <div
@@ -1057,6 +1379,10 @@ export default function Library() {
                     : '尝试切换项目筛选条件或清空搜索关键词'}
                 </div>
               </div>
+            ) : viewMode === 'list' ? (
+              <div className="animate-fade-up" style={{ animationDelay: '60ms' }}>
+                <DocumentListView docs={filteredDocs} projects={projects} />
+              </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
                 {filteredDocs.map((doc, i) => (
@@ -1064,7 +1390,7 @@ export default function Library() {
                     key={doc.id}
                     doc={doc}
                     projects={projects}
-                    delayMs={120 + i * 60}
+                    delayMs={60 + i * 50}
                   />
                 ))}
               </div>
@@ -1164,6 +1490,785 @@ export default function Library() {
           </div>
         </div>
       )}
+
+      {/* ===== Starter Pack 初始化向导 Modal ===== */}
+      {starterModalOpen && (
+        <StarterPackWizardModal
+          packs={starterPacks}
+          sources={sources}
+          step={wizardStep}
+          setStep={setWizardStep}
+          selected={selectedPack}
+          setSelected={setSelectedPack}
+          form={packForm}
+          setForm={setPackForm}
+          open={starterModalOpen}
+          onClose={() => {
+            setStarterModalOpen(false)
+            setCreatedProject(null)
+          }}
+          creating={creating}
+          createdProject={createdProject}
+          onCreate={async () => {
+            if (!selectedPack || !packForm.name.trim()) return
+            setCreating(true)
+
+            // Step 1: 如果需要先新建数据源
+            let finalSourceId = packForm.sourceId
+            if (packForm.sourceBackend !== 'local' && packForm.sourceMode === 'create') {
+              const newSource = await createSourceFromPackForm(packForm, selectedPack.name)
+              finalSourceId = newSource.id
+              setSources((prev) => [...prev, newSource])
+            }
+
+            // Step 2: 创建知识库项目
+            const proj = await initProjectFromStarter({
+              name: packForm.name.trim(),
+              description: packForm.description.trim(),
+              starterPackId: selectedPack.id,
+              visibility: packForm.visibility,
+              sourceBackend: packForm.sourceBackend,
+              sourceId: finalSourceId,
+              localFolderPath: packForm.localFolderPath,
+            })
+            setCreatedProject(proj)
+            setCreating(false)
+            setWizardStep(3)
+          }}
+          onGoProject={(proj) => {
+            setStarterModalOpen(false)
+            navigate(`/project/${proj.id}`)
+          }}
+          onGoSources={() => {
+            setStarterModalOpen(false)
+            navigate('/sources')
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ========================================================================
+// Starter Pack 初始化向导
+// ========================================================================
+
+function StarterPackWizardModal({
+  packs, sources, step, setStep, selected, setSelected,
+  form, setForm, onClose, creating, createdProject, onCreate, onGoProject, onGoSources,
+}) {
+  const handleBackdropClick = (e) => {
+    if (e.target === e.currentTarget) onClose()
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-900/40 backdrop-blur-sm animate-fade-up p-4"
+      onClick={handleBackdropClick}
+    >
+      <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto bg-white rounded-xl shadow-xl border border-neutral-200">
+        {/* Step header */}
+        <div className="sticky top-0 flex items-center justify-between px-6 py-4 border-b border-neutral-200 bg-white z-10">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-lg bg-gradient-to-br from-primary-100 to-violet-100 flex items-center justify-center">
+              <Sparkles size={18} className="text-primary-600" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-neutral-900">从模板初始化知识库</h3>
+              <div className="text-[11px] text-neutral-500 mt-0.5">
+                Step {step} / 3 · {step === 1 ? '选择模板包' : step === 2 ? '预览并配置' : '创建完成'}
+              </div>
+            </div>
+          </div>
+          <button className="btn-ghost !p-2" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-6">
+          {/* Step 1: Pick pack */}
+          {step === 1 && (
+            <div>
+              <div className="text-xs text-neutral-500 mb-4">
+                选择一个最匹配你使用场景的种子包，它会帮你生成一套开箱即用的目录结构与示例文档
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {packs.map((p) => {
+                  const active = selected?.id === p.id
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setSelected(p)}
+                      className={`text-left card p-4 hover:shadow-md transition-all ${
+                        active ? 'ring-2 ring-primary-400 border-primary-200' : ''
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className={`h-10 w-10 rounded-lg ${p.color} flex items-center justify-center text-xl flex-shrink-0`}>
+                          {p.previewEmoji}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-neutral-900 truncate">{p.name}</div>
+                          <div className="text-[11px] text-neutral-500 mt-0.5 line-clamp-2">{p.description}</div>
+                          <div className="flex items-center gap-2 mt-2 text-[11px] text-neutral-400">
+                            <FileText size={10} /> {p.docCount} 篇示例
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Preview + Config */}
+          {step === 2 && selected && (
+            <div className="grid grid-cols-[1fr_320px] gap-6">
+              {/* 目录树预览 */}
+              <div>
+                <div className="text-xs font-semibold text-neutral-700 mb-2 flex items-center gap-1.5">
+                  <FolderKanban size={12} />
+                  目录结构预览
+                </div>
+                <div className="card p-4 font-mono text-xs space-y-0.5 max-h-[380px] overflow-y-auto scrollbar-thin">
+                  <div className="flex items-center gap-1 text-primary-600 font-semibold">
+                    📁 {form.name || selected.name}/
+                  </div>
+                  {selected.tree.map((line, i) => {
+                    const indent = (line.match(/^  /g) || []).length
+                    const isFolder = line.endsWith('/')
+                    const clean = line.trim()
+                    return (
+                      <div
+                        key={i}
+                        className={`flex items-center gap-1 text-neutral-600 ${
+                          isFolder ? 'font-medium text-neutral-700' : ''
+                        }`}
+                        style={{ paddingLeft: `${indent * 14 + 14}px` }}
+                      >
+                        {isFolder ? '📁' : '📄'} {clean}
+                      </div>
+                    )
+                  })}
+                </div>
+                {selected.sampleTags?.length > 0 && (
+                  <div className="mt-3">
+                    <div className="text-[11px] text-neutral-500 mb-1.5">示例标签</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {selected.sampleTags.map((t) => (
+                        <span key={t} className="tag-neutral !text-[10px]">#{t}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 右侧表单 */}
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                    知识库名称 <span className="text-danger">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="例如：EdgeAgent 架构笔记"
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                    描述 <span className="text-neutral-400 font-normal">(可选)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    className="input resize-none"
+                    placeholder="一句话介绍这个知识库的用途"
+                    value={form.description}
+                    onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-2">可见性</label>
+                  <div className="space-y-2">
+                    {[
+                      { v: 'private', t: '私有', d: '仅自己可见', icon: Lock },
+                      { v: 'team',    t: '团队', d: '团队内成员可见', icon: Users },
+                      { v: 'public',  t: '公开', d: '互联网可访问', icon: Globe },
+                    ].map((o) => {
+                      const Icon = o.icon
+                      const active = form.visibility === o.v
+                      return (
+                        <button
+                          key={o.v}
+                          type="button"
+                          onClick={() => setForm({ ...form, visibility: o.v })}
+                          className={`w-full text-left flex items-center gap-3 px-3 py-2 rounded-lg border transition ${
+                            active
+                              ? 'border-primary-400 bg-primary-50/60 ring-1 ring-primary-100'
+                              : 'border-neutral-200 hover:border-neutral-300'
+                          }`}
+                        >
+                          <Icon size={14} className={active ? 'text-primary-600' : 'text-neutral-400'} />
+                          <div>
+                            <div className="text-sm font-medium text-neutral-800">{o.t}</div>
+                            <div className="text-[11px] text-neutral-500">{o.d}</div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* ===== 存储后端选择 ===== */}
+                <div className="pt-3 border-t border-neutral-100">
+                  <label className="block text-sm font-medium text-neutral-700 mb-2">
+                    存储后端 <span className="text-neutral-400 font-normal">(默认本地)</span>
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {STORAGE_BACKEND_TYPES.map((bt) => {
+                      const BtIcon = bt.icon
+                      const active = form.sourceBackend === bt.key
+                      return (
+                        <button
+                          key={bt.key}
+                          type="button"
+                          onClick={() => setForm({
+                            ...form,
+                            sourceBackend: bt.key,
+                            sourceId: null,
+                            // 切换后端时默认回到「选择已有」
+                            sourceMode: 'select',
+                          })}
+                          className={`p-2.5 rounded-lg border text-center transition-all ${
+                            active
+                              ? `${bt.color} ring-2 ring-primary-100`
+                              : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <BtIcon size={18} className="mx-auto" />
+                          <div className={`text-[11px] mt-1 font-medium ${active ? '' : 'text-neutral-600'}`}>{bt.label}</div>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {/* ========== 本地：可编辑文件夹路径 ========== */}
+                  {form.sourceBackend === 'local' && (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <label className="text-[11px] text-neutral-500 shrink-0">存储路径</label>
+                        <div className="relative flex-1">
+                          <input
+                            type="text"
+                            className="input font-mono pr-8"
+                            value={form.localFolderPath}
+                            onChange={(e) => setForm({ ...form, localFolderPath: e.target.value })}
+                            placeholder="C:/Users/poryo/Documents/DocVault/"
+                          />
+                          <button
+                            type="button"
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-600"
+                            title="浏览文件夹"
+                          >
+                            <FolderOpen size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2">
+                        <div className="text-[10px] text-neutral-500 mb-0.5">最终路径预览</div>
+                        <div className="text-[11px] font-mono text-neutral-700 truncate">
+                          {form.localFolderPath.replace(/[\\/]+$/, '')}/{form.name || '知识库名称'}
+                        </div>
+                      </div>
+                      <div className="text-[10px] text-neutral-400">
+                        本地存储适合个人笔记和离线使用
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ========== Git / 数据库：Tab 切换 ========== */}
+                  {(form.sourceBackend === 'git' || form.sourceBackend === 'database') && (() => {
+                    const backendType = form.sourceBackend
+                    const matching = sources.filter((s) => s.type === backendType)
+                    const label = backendType === 'git' ? 'Git 仓库' : '数据库'
+
+                    return (
+                      <div className="mt-3 space-y-2">
+                        {/* Tab */}
+                        <div className="inline-flex bg-neutral-100 rounded-md p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setForm({ ...form, sourceMode: 'select', sourceId: null })}
+                            className={`px-2.5 py-1 text-[11px] font-medium rounded transition ${
+                              form.sourceMode === 'select'
+                                ? 'bg-white text-neutral-800 shadow-sm'
+                                : 'text-neutral-500 hover:text-neutral-700'
+                            }`}
+                          >
+                            选择已有数据源
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setForm({ ...form, sourceMode: 'create', sourceId: null })}
+                            className={`px-2.5 py-1 text-[11px] font-medium rounded transition inline-flex items-center gap-1 ${
+                              form.sourceMode === 'create'
+                                ? 'bg-white text-neutral-800 shadow-sm'
+                                : 'text-neutral-500 hover:text-neutral-700'
+                            }`}
+                          >
+                            <Plus size={11} />
+                            新建数据源
+                          </button>
+                        </div>
+
+                        {/* --- Tab A: 选择已有 --- */}
+                        {form.sourceMode === 'select' && (
+                          matching.length > 0 ? (
+                            <div className="space-y-1.5 max-h-[180px] overflow-y-auto scrollbar-thin">
+                              {matching.map((s) => {
+                                const isSelected = form.sourceId === s.id
+                                return (
+                                  <button
+                                    key={s.id}
+                                    type="button"
+                                    onClick={() => setForm({
+                                      ...form,
+                                      sourceId: isSelected ? null : s.id,
+                                    })}
+                                    className={`w-full text-left px-2.5 py-2 rounded-md border transition flex items-center gap-2 ${
+                                      isSelected
+                                        ? 'border-primary-400 bg-primary-50'
+                                        : 'border-neutral-200 hover:border-neutral-300'
+                                    }`}
+                                  >
+                                    {s.type === 'database' ? (
+                                      <Database size={14} className={isSelected ? 'text-emerald-600' : 'text-neutral-400'} />
+                                    ) : (
+                                      <GitBranch size={14} className={isSelected ? 'text-sky-600' : 'text-neutral-400'} />
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                      <div className={`text-xs font-medium truncate ${isSelected ? 'text-neutral-800' : 'text-neutral-700'}`}>
+                                        {s.name}
+                                      </div>
+                                      <div className="text-[10px] text-neutral-400 font-mono truncate">
+                                        {s.dbType ? `${s.dbType}://` : ''}
+                                        {s.url || `${s.host}${s.port ? ':' + s.port : ''}`}
+                                      </div>
+                                    </div>
+                                    {isSelected && (
+                                      <CheckCircle2 size={14} className="text-primary-600 shrink-0" />
+                                    )}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <div className="rounded-lg border border-dashed border-neutral-200 p-3 text-center">
+                              <div className="text-[11px] text-neutral-500 mb-2">
+                                暂无可绑定的 {label} 数据源
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setForm({ ...form, sourceMode: 'create' })}
+                                className="btn-ghost !py-1 !px-2 !text-[11px] inline-flex items-center gap-1 text-primary-600 hover:bg-primary-50 border border-primary-100"
+                              >
+                                <Plus size={12} />
+                                直接新建一个 {label}
+                              </button>
+                            </div>
+                          )
+                        )}
+
+                        {/* --- Tab B: 内嵌创建新 Git 数据源 --- */}
+                        {form.sourceMode === 'create' && form.sourceBackend === 'git' && (
+                          <div className="rounded-lg border border-neutral-200 p-3 space-y-2.5 bg-sky-50/40">
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-700">
+                              <GitBranch size={12} />
+                              新建 Git 仓库数据源
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                仓库地址 <span className="text-danger">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className="input font-mono !py-1.5 !text-xs"
+                                placeholder="https://github.com/org/repo.git 或 git@github.com:org/repo.git"
+                                value={form.newGitUrl}
+                                onChange={(e) => setForm({ ...form, newGitUrl: e.target.value })}
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[11px] font-medium text-neutral-600 mb-1">分支</label>
+                                <input
+                                  type="text"
+                                  className="input font-mono !py-1.5 !text-xs"
+                                  placeholder="main"
+                                  value={form.newGitBranch}
+                                  onChange={(e) => setForm({ ...form, newGitBranch: e.target.value })}
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[11px] font-medium text-neutral-600 mb-1">认证方式</label>
+                                <select
+                                  className="input !py-1.5 !text-xs"
+                                  value={form.newGitAuth}
+                                  onChange={(e) => setForm({ ...form, newGitAuth: e.target.value })}
+                                >
+                                  <option value="ssh">SSH Key</option>
+                                  <option value="https">HTTPS + Token</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            {form.newGitAuth === 'https' && (
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">用户名</label>
+                                  <input
+                                    type="text"
+                                    className="input !py-1.5 !text-xs"
+                                    placeholder="git-user"
+                                    value={form.newGitUsername}
+                                    onChange={(e) => setForm({ ...form, newGitUsername: e.target.value })}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">Personal Access Token</label>
+                                  <input
+                                    type="password"
+                                    className="input !py-1.5 !text-xs font-mono"
+                                    placeholder="ghp_xxx..."
+                                    value={form.newGitToken}
+                                    onChange={(e) => setForm({ ...form, newGitToken: e.target.value })}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="text-[10px] text-neutral-400">
+                              创建后数据源会自动保存，知识库将绑定到它
+                            </div>
+                          </div>
+                        )}
+
+                        {/* --- Tab B: 内嵌创建新数据库数据源 --- */}
+                        {form.sourceMode === 'create' && form.sourceBackend === 'database' && (
+                          <div className="rounded-lg border border-neutral-200 p-3 space-y-2.5 bg-emerald-50/40">
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700">
+                              <Database size={12} />
+                              新建数据库连接
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                数据库类型 <span className="text-danger">*</span>
+                              </label>
+                              <select
+                                className="input !py-1.5 !text-xs"
+                                value={form.newDbType}
+                                onChange={(e) => setForm({ ...form, newDbType: e.target.value })}
+                              >
+                                {/* 关系型 */}
+                                <optgroup label="— 关系型 —">
+                                  <option value="mysql">🐬 MySQL</option>
+                                  <option value="postgresql">🐘 PostgreSQL</option>
+                                  <option value="sqlite">🗄️ SQLite（文件）</option>
+                                  <option value="mariadb">MariaDB</option>
+                                </optgroup>
+                                {/* 对象型 */}
+                                <optgroup label="— 文档 / 对象型 —">
+                                  <option value="mongodb">🍃 MongoDB</option>
+                                  <option value="couchdb">🛋️ CouchDB</option>
+                                  <option value="cosmosdb">🌌 Cosmos DB</option>
+                                  <option value="ravendb">🦅 RavenDB</option>
+                                  <option value="elasticsearch">🔎 Elasticsearch</option>
+                                </optgroup>
+                              </select>
+                            </div>
+
+                            {/* SQLite 只显示文件路径 */}
+                            {form.newDbType === 'sqlite' ? (
+                              <div>
+                                <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                  SQLite 文件路径 <span className="text-danger">*</span>
+                                </label>
+                                <input
+                                  type="text"
+                                  className="input font-mono !py-1.5 !text-xs"
+                                  placeholder="/path/to/docs.db"
+                                  value={form.newDbHost}
+                                  onChange={(e) => setForm({ ...form, newDbHost: e.target.value })}
+                                />
+                              </div>
+                            ) : form.newDbType === 'cosmosdb' ? (
+                              /* Cosmos DB: Endpoint + Primary Key */
+                              <>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                    Endpoint <span className="text-danger">*</span>
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="input font-mono !py-1.5 !text-xs"
+                                    placeholder="https://your-cosmos-account.documents.azure.com"
+                                    value={form.newDbHost}
+                                    onChange={(e) => setForm({ ...form, newDbHost: e.target.value })}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                    Primary Key <span className="text-danger">*</span>
+                                  </label>
+                                  <input
+                                    type="password"
+                                    className="input font-mono !py-1.5 !text-xs"
+                                    placeholder="xxxxxxxxxxxxxxxxxxxxxx=="
+                                    value={form.newDbPassword}
+                                    onChange={(e) => setForm({ ...form, newDbPassword: e.target.value })}
+                                  />
+                                </div>
+                              </>
+                            ) : (
+                              /* 通用：Host + Port */
+                              <div className="grid grid-cols-[1fr_90px] gap-2">
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                    主机 <span className="text-danger">*</span>
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="input !py-1.5 !text-xs"
+                                    placeholder="db.example.com"
+                                    value={form.newDbHost}
+                                    onChange={(e) => setForm({ ...form, newDbHost: e.target.value })}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">端口</label>
+                                  <input
+                                    type="number"
+                                    className="input !py-1.5 !text-xs"
+                                    placeholder="3306"
+                                    value={form.newDbPort}
+                                    onChange={(e) => setForm({ ...form, newDbPort: e.target.value })}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {/* 数据库名 */}
+                            {form.newDbType !== 'sqlite' && (
+                              <div>
+                                <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                  数据库名 <span className="text-danger">*</span>
+                                </label>
+                                <input
+                                  type="text"
+                                  className="input font-mono !py-1.5 !text-xs"
+                                  placeholder="knowledge_db"
+                                  value={form.newDbDatabase}
+                                  onChange={(e) => setForm({ ...form, newDbDatabase: e.target.value })}
+                                />
+                              </div>
+                            )}
+
+                            {/* 用户名 + 密码（sqlite / cosmosdb 不显示） */}
+                            {form.newDbType !== 'sqlite' && form.newDbType !== 'cosmosdb' && (
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">用户名</label>
+                                  <input
+                                    type="text"
+                                    className="input !py-1.5 !text-xs"
+                                    placeholder="db_user"
+                                    value={form.newDbUsername}
+                                    onChange={(e) => setForm({ ...form, newDbUsername: e.target.value })}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-neutral-600 mb-1">密码</label>
+                                  <input
+                                    type="password"
+                                    className="input !py-1.5 !text-xs"
+                                    placeholder="••••••"
+                                    value={form.newDbPassword}
+                                    onChange={(e) => setForm({ ...form, newDbPassword: e.target.value })}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {/* 数据表 / Collection（关系型 + MongoDB） */}
+                            {(form.newDbType === 'mysql' || form.newDbType === 'postgresql' || form.newDbType === 'mariadb' || form.newDbType === 'sqlserver' || form.newDbType === 'mongodb') && (
+                              <div>
+                                <label className="block text-[11px] font-medium text-neutral-600 mb-1">
+                                  {form.newDbType === 'mongodb' ? 'Collection（可选）' : '数据表（可选）'}
+                                </label>
+                                <input
+                                  type="text"
+                                  className="input font-mono !py-1.5 !text-xs"
+                                  placeholder="documents（留空自动检测）"
+                                  value={form.newDbTable}
+                                  onChange={(e) => setForm({ ...form, newDbTable: e.target.value })}
+                                />
+                              </div>
+                            )}
+
+                            <div className="text-[10px] text-neutral-400">
+                              创建后数据源会自动保存，知识库将绑定到它
+                            </div>
+                          </div>
+                        )}
+
+                        {form.sourceMode === 'select' && (
+                          <div className="text-[10px] text-neutral-400">
+                            绑定后知识库会自动从此数据源同步内容
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
+                </div>
+
+                <div className="rounded-lg border border-neutral-200 p-3 bg-neutral-50 text-[11px] text-neutral-500 leading-relaxed">
+                  💡 模板只负责初始化目录结构和示例文档，之后你可以随时修改、新增或删除文件，也可以切换到其他模板。
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: Done */}
+          {step === 3 && createdProject && (
+            <div className="py-8 text-center">
+              <div className="w-16 h-16 rounded-full bg-emerald-500 text-white flex items-center justify-center mx-auto mb-4">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              </div>
+              <div className="text-lg font-semibold text-neutral-900">知识库已创建！</div>
+              <div className="text-sm text-neutral-500 mt-1">
+                「<span className="text-neutral-800 font-medium">{createdProject.name}</span>」
+                已按 <span className="text-primary-600">{selected?.name}</span> 模板初始化，共 {selected?.docCount} 篇示例文档。
+              </div>
+
+              {/* 存储后端信息 */}
+              {(() => {
+                const backendMeta = STORAGE_BACKEND_TYPES.find((b) => b.key === form.sourceBackend)
+                if (!backendMeta) return null
+                return (
+                  <div className="mt-4 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-100 text-xs text-neutral-700">
+                    {(() => {
+                      const BI = backendMeta.icon
+                      return <BI size={13} className="text-primary-600" />
+                    })()}
+                    存储后端：<span className="font-medium">{backendMeta.label}</span>
+                    {form.sourceId && (
+                      <span className="text-neutral-400">
+                        · 绑定「{sources.find((s) => s.id === form.sourceId)?.name || '数据源'}」
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
+
+              <div className="mt-5 flex items-center justify-center gap-3">
+                <button type="button" className="btn-secondary" onClick={onClose}>
+                  留在文档库
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary inline-flex items-center gap-1.5"
+                  onClick={() => onGoProject(createdProject)}
+                >
+                  进入知识库
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer buttons */}
+        {step < 3 && (
+          <div className="flex items-center justify-between px-6 py-4 border-t border-neutral-200 bg-neutral-50/50">
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => (step > 1 ? setStep(step - 1) : onClose())}
+              disabled={creating}
+            >
+              {step > 1 && <ArrowLeft size={14} />}
+              {step > 1 ? '上一步' : '取消'}
+            </button>
+            <div className="flex items-center gap-2">
+              {step === 1 && (
+                <button
+                  type="button"
+                  className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!selected}
+                  onClick={() => setStep(2)}
+                >
+                  下一步
+                  <ArrowRight size={14} />
+                </button>
+              )}
+              {step === 2 && (() => {
+                // 校验逻辑
+                let sourceValid = true
+                if (form.sourceBackend === 'git') {
+                  if (form.sourceMode === 'create') {
+                    sourceValid = !!form.newGitUrl.trim()
+                  } else {
+                    sourceValid = !!form.sourceId
+                  }
+                } else if (form.sourceBackend === 'database') {
+                  if (form.sourceMode === 'create') {
+                    // 数据库：sqlite 需要路径，cosmosdb 需要 endpoint+key，其他需要 host+database
+                    if (form.newDbType === 'sqlite') {
+                      sourceValid = !!form.newDbHost.trim()
+                    } else if (form.newDbType === 'cosmosdb') {
+                      sourceValid = !!form.newDbHost.trim() && !!form.newDbPassword.trim()
+                    } else {
+                      sourceValid = !!form.newDbHost.trim() && !!form.newDbDatabase.trim()
+                    }
+                  } else {
+                    sourceValid = !!form.sourceId
+                  }
+                }
+                return (
+                  <button
+                    type="button"
+                    className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={creating || !form.name.trim() || !sourceValid}
+                    onClick={onCreate}
+                  >
+                    {creating ? (
+                      <>
+                        <RefreshCw size={14} className="animate-spin" />
+                        初始化中…
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 size={14} />
+                        创建知识库
+                      </>
+                    )}
+                  </button>
+                )
+              })()}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

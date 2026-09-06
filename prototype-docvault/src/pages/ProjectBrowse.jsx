@@ -47,6 +47,11 @@ import {
   Activity,
   Layers,
   GitFork,
+  CheckCircle2,
+  Palette,
+  Sun,
+  Moon,
+  BookOpen,
 } from 'lucide-react'
 import {
   fetchDocuments,
@@ -797,7 +802,18 @@ const MOCK_CURSORS = [
   { name: '苏筱', color: '#ec4899', top: '55%', left: '62%' },
 ]
 
-function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave, saving, team }) {
+// 文档渲染主题（prose-doc CSS 变体）
+const RENDER_THEMES = [
+  { key: 'plain',            label: '经典',     desc: '默认无衬线 · 紧凑', Icon: FileText },
+  { key: 'book',             label: '书籍',     desc: '衬线体 · 宽松行距', Icon: BookOpen },
+  { key: 'journal',          label: '期刊',     desc: '窄栏双端对齐',     Icon: FileText },
+  { key: 'compact',          label: '工程风',   desc: '等宽字体 · 大密度', Icon: Code },
+  { key: 'tech',             label: '科技蓝',   desc: '冷色调高亮',       Icon: Layers },
+  { key: 'solarized-light',  label: 'Solarized Light', desc: '经典米黄',    Icon: Sun },
+  { key: 'solarized-dark',   label: 'Solarized Dark',  desc: '经典深蓝',    Icon: Moon },
+]
+
+function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave, saving, team, renderTheme, setRenderTheme }) {
   if (!doc) return null
 
   const status = STATUS_MAP[doc.status] || STATUS_MAP.synced
@@ -860,7 +876,7 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
   const activeEditors = team?.slice(0, 2) || []
 
   return (
-    <section className="flex-1 flex flex-col min-w-0 bg-white">
+    <section className="h-full min-h-0 flex flex-col min-w-0 bg-white overflow-hidden">
       {/* Doc context bar — slimmer in preview mode for immersion */}
       <div
         className={`shrink-0 border-b border-neutral-200 transition-all duration-200 ${
@@ -887,6 +903,61 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
           <h1 className="text-xl font-bold text-neutral-900 truncate">{doc.title}</h1>
 
           <div className="flex items-center gap-2 shrink-0">
+            {/* ===== 渲染主题下拉（仅预览模式显示） ===== */}
+            {view === 'preview' && (
+              <div className="relative group">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 h-7 px-2 rounded text-xs font-medium text-neutral-600 border border-neutral-200 hover:bg-neutral-50 transition"
+                  title="切换文档渲染主题"
+                >
+                  <Palette size={12} />
+                  <span>
+                    {RENDER_THEMES.find((t) => t.key === renderTheme)?.label || '经典'}
+                  </span>
+                  <ChevronDown size={12} />
+                </button>
+
+                {/* 下拉面板 */}
+                <div className="absolute right-0 top-full mt-1 w-64 rounded-lg bg-white border border-neutral-200 shadow-xl z-30 hidden group-hover:block animate-fade-up">
+                  <div className="px-3 py-2 border-b border-neutral-100 text-[11px] font-semibold text-neutral-500 uppercase tracking-wide">
+                    渲染主题
+                  </div>
+                  <div className="py-1 max-h-72 overflow-y-auto scrollbar-thin">
+                    {RENDER_THEMES.map((t) => {
+                      const ThemeIcon = t.Icon
+                      const active = renderTheme === t.key
+                      return (
+                        <button
+                          type="button"
+                          key={t.key}
+                          onClick={() => setRenderTheme(t.key)}
+                          className={`w-full flex items-center gap-2 px-3 py-2 text-left transition ${
+                            active ? 'bg-primary-50' : 'hover:bg-neutral-50'
+                          }`}
+                        >
+                          <ThemeIcon
+                            size={14}
+                            className={active ? 'text-primary-600' : 'text-neutral-400'}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className={`text-xs font-medium ${active ? 'text-primary-700' : 'text-neutral-700'}`}>
+                              {t.label}
+                            </div>
+                            <div className="text-[10px] text-neutral-400 truncate">{t.desc}</div>
+                          </div>
+                          {active && <CheckCircle2 size={14} className="text-primary-600 shrink-0" />}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="px-3 py-2 border-t border-neutral-100 text-[10px] text-neutral-400">
+                    原 Markdown 内容不会被修改
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* View mode pill — click preview to hint at WYSIWYG */}
             <div className="bg-neutral-100 rounded-md p-0.5 inline-flex">
               <button
@@ -984,12 +1055,12 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
           <div className="flex-1 relative min-h-0">
             <div
               ref={previewScrollRef}
-              className="flex-1 h-full overflow-y-auto scrollbar-thin cursor-text"
+              className="h-full overflow-y-auto scrollbar-thin cursor-text"
               onClick={handlePreviewClick}
               onDoubleClick={handlePreviewDoubleClick}
             >
               <div
-                className="max-w-3xl mx-auto px-10 py-10 prose-doc relative group"
+                className={`max-w-3xl mx-auto px-10 py-10 prose-doc prose-${renderTheme || 'plain'} relative group`}
                 dangerouslySetInnerHTML={{ __html: markdownToHtml(doc.content) }}
               />
             </div>
@@ -1037,10 +1108,10 @@ function DocumentEditor({ doc, editContent, onEditChange, view, setView, onSave,
           </div>
         ) : (
           /* ===== EDIT mode — markdown editor + remote cursors ===== */
-          <div className="flex-1 flex min-h-0 relative">
+          <div className="flex-1 flex flex-col min-h-0 relative">
             {/* The textarea */}
             <textarea
-              className="flex-1 w-full p-6 font-mono text-sm leading-7 outline-none resize-none text-neutral-800 placeholder:text-neutral-400 bg-neutral-50/30"
+              className="flex-1 w-full p-6 font-mono text-sm leading-7 outline-none resize-none text-neutral-800 placeholder:text-neutral-400 bg-neutral-50/30 min-h-0 overflow-y-auto scrollbar-thin"
               value={editContent}
               onChange={(e) => onEditChange(e.target.value)}
               onDoubleClick={() => setView('preview')}
@@ -1379,6 +1450,7 @@ export default function ProjectBrowse() {
   // Grid-mode local UI state
   const [keyword, setKeyword] = useState('')
   const [gridView, setGridView] = useState('grid') // visual toggle only
+  const [renderTheme, setRenderTheme] = useState('plain') // prose-doc 渲染主题
 
   // ---- Mount: fetch project + documents + team ----
   useEffect(() => {
@@ -1590,7 +1662,7 @@ export default function ProjectBrowse() {
   // FOCUSED MODE — full-height resizable three-column layout
   // =======================================================================
   return (
-    <PanelGroup direction="horizontal" className="h-full">
+    <PanelGroup direction="horizontal" className="h-full overflow-hidden">
       <Panel
         ref={leftPanelRef}
         id="left-sidebar"
@@ -1622,6 +1694,8 @@ export default function ProjectBrowse() {
           onSave={handleSave}
           saving={focusedSaving}
           team={team}
+          renderTheme={renderTheme}
+          setRenderTheme={setRenderTheme}
         />
       </Panel>
       <PanelResizeHandle className="resize-handle" />

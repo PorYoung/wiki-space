@@ -15,6 +15,7 @@ import ProjectActivity from './pages/ProjectActivity.jsx'
 import ProjectPublish from './pages/ProjectPublish.jsx'
 import ProjectMembers from './pages/ProjectMembers.jsx'
 import ProjectSettings from './pages/ProjectSettings.jsx'
+import ProjectGraph from './pages/ProjectGraph.jsx'
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
       <Route path="/project/:id" element={<ProjectLayout />}>
         <Route index element={<Navigate to="browse" replace />} />
         <Route path="browse"   element={<ProjectBrowse />} />
+        <Route path="graph"    element={<ProjectGraph />} />
         <Route path="activity" element={<ProjectActivity />} />
         <Route path="publish"  element={<ProjectPublish />} />
         <Route path="members"  element={<ProjectMembers />} />

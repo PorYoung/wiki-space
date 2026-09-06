@@ -18,41 +18,16 @@ import {
   Grid3X3,
 } from 'lucide-react'
 import { fetchTemplates, fetchProjects, renderPreview } from '../api/stubs.js'
+import { useTheme } from '../context/ThemeContext.jsx'
 
 // ---------------------------------------------------------------------------
-// UI Themes — 管理视图主题（本地固定选项）
+// UI Themes are now sourced from ThemeContext (includes both modern & Chinese-traditional)
 // ---------------------------------------------------------------------------
 
-const UI_THEMES = [
-  {
-    id: 'fresh-emerald',
-    name: '清新翠绿',
-    accent: '#10b981',
-    description: '低饱和翠绿为主色，适合长时间阅读不疲劳，侧边栏清爽。',
-    bodyFont: 'font-sans',
-  },
-  {
-    id: 'deep-indigo',
-    name: '深邃靛蓝',
-    accent: '#4f46e5',
-    description: '沉稳靛蓝搭配冷灰，科技感强，适合工程团队。',
-    bodyFont: 'font-sans',
-  },
-  {
-    id: 'warm-amber',
-    name: '暖阳琥珀',
-    accent: '#f59e0b',
-    description: '暖色调主色，卡片密度舒适，适合内容创作场景。',
-    bodyFont: 'font-serif',
-  },
-  {
-    id: 'minimal-rose',
-    name: '极简玫瑰',
-    accent: '#f43f5e',
-    description: '低饱和玫红点缀，紧凑卡片密度，适合追求简约的团队。',
-    bodyFont: 'font-sans',
-  },
-]
+const STYLE_CATEGORY_LABELS = {
+  modern: '现代风格',
+  'cn-traditional': '中国传统色',
+}
 
 // ---------------------------------------------------------------------------
 // Publishing Theme Meta（从旧 Templates.jsx 复制）
@@ -118,13 +93,14 @@ const CATEGORY_TABS = [
 // ---------------------------------------------------------------------------
 
 function UiThemeCard({ theme, isActive, onApply, delayMs = 0 }) {
+  const isCnStyle = theme.styleCategory === 'cn-traditional'
   return (
     <div
       className="card-hover animate-fade-up relative group"
       style={{ animationDelay: `${delayMs}ms` }}
     >
       <div className="p-5 space-y-4">
-        {/* Accent swatch + active check */}
+        {/* Accent swatch + style category tag + active check */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <div
@@ -134,33 +110,53 @@ function UiThemeCard({ theme, isActive, onApply, delayMs = 0 }) {
               <Sparkles size={18} className="text-white" />
             </div>
             {isActive && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[11px] font-semibold">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[11px] font-semibold ring-1 ring-primary-200">
                 <Check size={11} />
                 已应用
               </span>
             )}
           </div>
+          {isCnStyle && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-medium bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+              传统色
+            </span>
+          )}
         </div>
 
         {/* Name + description */}
         <div className="space-y-1">
-          <h3 className="text-base font-semibold text-neutral-900 leading-tight">
+          <h3 className="text-base font-semibold text-neutral-900 leading-tight flex items-center gap-2">
             {theme.name}
+            {isCnStyle && <span className="text-amber-500 text-xs font-normal">◆</span>}
           </h3>
           <p className="text-xs text-neutral-500 leading-relaxed line-clamp-2">
             {theme.description}
           </p>
         </div>
 
-        {/* Accent bar */}
-        <div className="flex items-center gap-1.5">
+        {/* Accent bar with gradient preview */}
+        <div className="space-y-1.5">
           <div
-            className="h-1.5 flex-1 rounded-full"
-            style={{ backgroundColor: theme.accent }}
+            className="h-1.5 w-full rounded-full"
+            style={{
+              background: `linear-gradient(90deg,
+                ${theme.palette[50]} 0%,
+                ${theme.palette[200]} 15%,
+                ${theme.palette[400]} 35%,
+                ${theme.palette[500]} 50%,
+                ${theme.palette[600]} 65%,
+                ${theme.palette[800]} 90%,
+                ${theme.palette[900]} 100%)`,
+            }}
           />
-          <span className="text-[10px] font-mono text-neutral-400 uppercase">
-            {theme.accent}
-          </span>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-mono text-neutral-400 uppercase">
+              {theme.accent}
+            </span>
+            <span className="text-[10px] text-neutral-400">
+              {theme.bodyFont === 'font-serif' ? '衬线体' : '无衬线体'}
+            </span>
+          </div>
         </div>
 
         {/* Apply button */}
@@ -826,7 +822,7 @@ export default function Themes() {
   const [templates, setTemplates] = useState([])
   const [projects, setProjects] = useState([])
 
-  const [activeUiTheme, setActiveUiTheme] = useState('fresh-emerald')
+  const { themes: UI_THEMES, activeTheme, applyTheme } = useTheme()
   const [favorites, setFavorites] = useState(['t-docs'])
   const [categoryTab, setCategoryTab] = useState('all')
 
@@ -849,11 +845,11 @@ export default function Themes() {
     setTimeout(() => setToast({ show: false, msg: '' }), 1800)
   }
 
-  // UI theme apply
+  // UI theme apply (now delegates to ThemeContext which handles CSS vars + localStorage)
   const handleApplyUiTheme = (id) => {
-    if (id === activeUiTheme) return
-    setActiveUiTheme(id)
-    showToast('主题已应用')
+    if (id === activeTheme.id) return
+    applyTheme(id)
+    showToast('主题已应用 ✨')
   }
 
   // Publishing template filter
@@ -965,20 +961,59 @@ export default function Themes() {
                 管理视图主题
               </span>
               <span className="text-xs text-neutral-400">· 控制 DocVault 界面本身的配色与密度</span>
+              <span className="text-xs text-neutral-300">· 选择即时生效，全局同步</span>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {UI_THEMES.map((t, i) => (
-              <UiThemeCard
-                key={t.id}
-                theme={t}
-                isActive={activeUiTheme === t.id}
-                onApply={handleApplyUiTheme}
-                delayMs={i * 60}
-              />
-            ))}
-          </div>
+          {/* Grouped theme grid */}
+          {(() => {
+            // Group themes by styleCategory
+            const grouped = UI_THEMES.reduce((acc, t) => {
+              const key = t.styleCategory || 'modern'
+              if (!acc[key]) acc[key] = []
+              acc[key].push(t)
+              return acc
+            }, {})
+
+            let delayOffset = 0
+            return Object.entries(grouped).map(([catKey, catThemes]) => {
+              const startDelay = delayOffset * 60
+              delayOffset += catThemes.length
+              return (
+                <div key={catKey} className="mb-6">
+                  {/* Section header */}
+                  <div className="flex items-center gap-2 mb-3">
+                    <span
+                      className={`text-xs font-semibold uppercase tracking-wider ${
+                        catKey === 'cn-traditional'
+                          ? 'text-amber-700'
+                          : 'text-neutral-500'
+                      }`}
+                    >
+                      {catKey === 'cn-traditional' && '◆ '}
+                      {STYLE_CATEGORY_LABELS[catKey] || catKey}
+                    </span>
+                    <span className="h-px flex-1 bg-neutral-100" />
+                    <span className="text-[10px] text-neutral-400">
+                      {catThemes.length} 个主题
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {catThemes.map((t, i) => (
+                      <UiThemeCard
+                        key={t.id}
+                        theme={t}
+                        isActive={activeTheme.id === t.id}
+                        onApply={handleApplyUiTheme}
+                        delayMs={startDelay + i * 60}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )
+            })
+          })()}
         </section>
       ) : (
         /* =============== PUBLISHING THEMES =============== */

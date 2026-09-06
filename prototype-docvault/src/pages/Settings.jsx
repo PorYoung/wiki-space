@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useTheme } from '../context/ThemeContext.jsx'
 import {
   Settings as SettingsIcon, User, Bell, Palette, Database, Shield, Keyboard, HelpCircle,
   ChevronRight, Check, Moon, Sun, Monitor, Globe, Mail, FolderOpen,
@@ -135,7 +136,7 @@ function ProfileSection({ onSaved }) {
                 <Shield className="w-4 h-4 text-primary-500" />
                 {role}
               </span>
-              <span className="text-xs text-neutral-400">由工作区管理员分配</span>
+              <span className="text-xs text-neutral-400">由 Owner 分配</span>
             </div>
           </Field>
           <Field label="个人主页">
@@ -158,17 +159,17 @@ function ProfileSection({ onSaved }) {
 }
 
 function AppearanceSection() {
-  const [theme, setTheme] = useState('system')
+  const { appearance, applyAppearance, activeTheme, applyTheme, themes } = useTheme()
   const [accent, setAccent] = useState('teal')
   const [fontSize, setFontSize] = useState(2) // 1 small, 2 default, 3 large
   const [lineHeight, setLineHeight] = useState(true)
 
   const accentColors = [
-    { key: 'teal',   cls: 'bg-teal-500' },
-    { key: 'coral',  cls: 'bg-rose-500' },
-    { key: 'indigo', cls: 'bg-indigo-500' },
-    { key: 'sage',   cls: 'bg-emerald-500' },
-    { key: 'amber',  cls: 'bg-amber-500' },
+    { key: 'teal',   cls: 'bg-teal-500',   themeId: 'fresh-emerald' },
+    { key: 'coral',  cls: 'bg-rose-500',   themeId: 'minimal-rose' },
+    { key: 'indigo', cls: 'bg-indigo-500', themeId: 'deep-indigo' },
+    { key: 'sage',   cls: 'bg-emerald-500', themeId: 'fresh-emerald' },
+    { key: 'amber',  cls: 'bg-amber-500',  themeId: 'warm-amber' },
   ]
 
   return (
@@ -181,22 +182,22 @@ function AppearanceSection() {
         <p className="text-xs text-neutral-500 mb-4">选择一个主题，或让 DocVault 自动跟随系统。</p>
         <div className="grid grid-cols-3 gap-3">
           <RadioCard
-            active={theme === 'light'}
-            onClick={() => setTheme('light')}
+            active={appearance === 'light'}
+            onClick={() => applyAppearance('light')}
             icon={<Sun className="w-4 h-4" />}
             title="浅色"
             sub="干净明亮"
           />
           <RadioCard
-            active={theme === 'dark'}
-            onClick={() => setTheme('dark')}
+            active={appearance === 'dark'}
+            onClick={() => applyAppearance('dark')}
             icon={<Moon className="w-4 h-4" />}
             title="深色"
             sub="护眼低疲劳"
           />
           <RadioCard
-            active={theme === 'system'}
-            onClick={() => setTheme('system')}
+            active={appearance === 'system'}
+            onClick={() => applyAppearance('system')}
             icon={<Monitor className="w-4 h-4" />}
             title="跟随系统"
             sub="自动切换"
@@ -513,7 +514,7 @@ function ShortcutsSection() {
   )
 }
 
-function AboutSection({ onDeleteRequest }) {
+function AboutSection() {
   return (
     <div className="animate-fade-up">
       <SectionHeader title="关于 / 帮助" desc="版本信息、数据导出与危险操作。" />
@@ -572,21 +573,13 @@ function AboutSection({ onDeleteRequest }) {
           <div>
             <h3 className="text-sm font-semibold text-red-800">危险操作</h3>
             <p className="text-xs text-red-700/80 mt-1">
-              删除工作区将永久移除所有文档、数据源配置、团队成员与版本历史。此操作不可撤销。
+              注销账号将移除你的个人数据，但已发布的网站与公开文档不受影响。此操作不可撤销。
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            className="btn-danger border-red-300 text-red-700 hover:bg-red-100 hover:border-red-400"
-            onClick={onDeleteRequest}
-          >
-            <Trash2 className="w-4 h-4" /> 删除工作区
-          </button>
-          <button className="btn-danger border-red-300 text-red-700 hover:bg-red-100 hover:border-red-400">
-            <LogOut className="w-4 h-4" /> 注销账号
-          </button>
-        </div>
+        <button className="btn-danger border-red-300 text-red-700 hover:bg-red-100 hover:border-red-400">
+          <LogOut className="w-4 h-4" /> 注销账号
+        </button>
       </div>
     </div>
   )
@@ -639,7 +632,6 @@ const SECTIONS = [
 export default function Settings() {
   const [active, setActive] = useState('profile')
   const [toast, setToast] = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const handleSaved = () => {
     setToast(true)
@@ -680,8 +672,8 @@ export default function Settings() {
 
         <div className="mt-8 p-3 rounded-md bg-neutral-50 border border-neutral-200">
           <div className="flex items-center gap-2 text-xs text-neutral-600">
-            <Lock className="w-3.5 h-3.5" />
-            工作区：<span className="font-semibold text-neutral-800">产品设计部</span>
+            <Shield className="w-3.5 h-3.5" />
+            DocVault v1.2.0 · Pro 会员
           </div>
         </div>
       </aside>
@@ -693,7 +685,7 @@ export default function Settings() {
         {active === 'notifications' && <NotificationsSection />}
         {active === 'sources' && <SourcesSection />}
         {active === 'shortcuts' && <ShortcutsSection />}
-        {active === 'about' && <AboutSection onDeleteRequest={() => setConfirmOpen(true)} />}
+        {active === 'about' && <AboutSection />}
       </main>
 
       {/* Toast */}
@@ -703,16 +695,6 @@ export default function Settings() {
           已保存更改
         </div>
       )}
-
-      {/* Delete confirm */}
-      <ConfirmModal
-        open={confirmOpen}
-        title="确认删除工作区？"
-        desc="此操作将永久删除「产品设计部」工作区下的全部文档、数据源、成员与历史记录。删除后无法恢复。请输入工作区名称以继续。"
-        confirmText="我已了解风险，立即删除"
-        onCancel={() => setConfirmOpen(false)}
-        onConfirm={() => setConfirmOpen(false)}
-      />
     </div>
   )
 }

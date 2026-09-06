@@ -16,8 +16,12 @@ import {
   Users,
   Database,
   FileText,
+  Sun,
+  Moon,
+  Monitor,
 } from 'lucide-react'
 import { fetchActivities, fetchDocuments } from '../api/stubs.js'
+import { useTheme } from '../context/ThemeContext.jsx'
 
 const routeLabels = {
   '/dashboard': '仪表盘',
@@ -244,12 +248,48 @@ function QuickCreateDropdown({ onClose }) {
 }
 
 // ---------------------------------------------------------------------------
+// AppearanceToggle — 精简版单图标按钮
+// 点击循环切换：light → dark → system → light
+// 图标跟随当前状态：亮=☀️Sun / 暗=🌙Moon / 系统=🖥️Monitor
+// ---------------------------------------------------------------------------
+function AppearanceToggle({ compact = false }) {
+  const { appearance, toggleAppearance } = useTheme()
+
+  const meta = {
+    light:  { Icon: Sun,    label: '亮色模式',   next: '暗色' },
+    dark:   { Icon: Moon,   label: '暗色模式',   next: '跟随系统' },
+    system: { Icon: Monitor,label: '跟随系统',   next: '亮色' },
+  }[appearance] || { Icon: Sun, label: '亮色模式', next: '暗色' }
+
+  const Icon = meta.Icon
+
+  return (
+    <button
+      type="button"
+      onClick={toggleAppearance}
+      title={`${meta.label} · 点击切换到${meta.next}`}
+      aria-label={`切换外观模式（当前：${meta.label}）`}
+      className={
+        'inline-flex items-center justify-center rounded-md transition-all duration-200 ' +
+        'border border-transparent ' +
+        compact
+          ? 'h-8 w-8 hover:bg-neutral-100 text-neutral-500 hover:text-neutral-800'
+          : 'h-8 w-8 hover:bg-neutral-100 text-neutral-500 hover:text-neutral-800'
+      }
+    >
+      <Icon size={16} className="transition-transform duration-300" />
+    </button>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main TopBar
 // ---------------------------------------------------------------------------
 
 export default function TopBar() {
   const location = useLocation()
   const navigate = useNavigate()
+  const { appearance, toggleAppearance } = useTheme()
   const [notifOpen, setNotifOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [activities, setActivities] = useState([])
@@ -290,6 +330,12 @@ export default function TopBar() {
 
       {/* Right: Icon buttons */}
       <div className="flex items-center gap-1">
+        {/* ===== Appearance toggle (single icon, click to cycle: light → dark → system → light) ===== */}
+        <AppearanceToggle />
+
+
+        <div className="w-px h-6 bg-neutral-200 mx-1" />
+
         <div ref={notifRef} className="relative">
           <IconButton
             icon={Bell}

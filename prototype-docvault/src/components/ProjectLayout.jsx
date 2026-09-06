@@ -3,8 +3,38 @@ import { Outlet, useParams, NavLink, Link, useLocation, useNavigate } from 'reac
 import {
   FolderKanban, Activity, Rocket, Share2, MoreHorizontal, ChevronDown,
   FolderOpen, Settings, Pencil, Trash2, ExternalLink, Users, UserCog,
+  Network, Sun, Monitor, Moon,
 } from 'lucide-react'
 import { fetchProject, fetchTeam, fetchProjects } from '../api/stubs.js'
+import { useTheme } from '../context/ThemeContext.jsx'
+
+// ---------------------------------------------------------------------------
+// AppearanceToggle — 精简版单图标按钮（与 TopBar 共享设计）
+// 点击循环切换：light → dark → system → light
+// ---------------------------------------------------------------------------
+function AppearanceToggle({ compact = true }) {
+  const { appearance, toggleAppearance } = useTheme()
+
+  const meta = {
+    light:  { Icon: Sun,    label: '亮色模式',   next: '暗色' },
+    dark:   { Icon: Moon,   label: '暗色模式',   next: '跟随系统' },
+    system: { Icon: Monitor,label: '跟随系统',   next: '亮色' },
+  }[appearance] || { Icon: Sun, label: '亮色模式', next: '暗色' }
+
+  const Icon = meta.Icon
+
+  return (
+    <button
+      type="button"
+      onClick={toggleAppearance}
+      title={`${meta.label} · 点击切换到${meta.next}`}
+      aria-label={`切换外观模式（当前：${meta.label}）`}
+      className="inline-flex items-center justify-center h-8 w-8 rounded-md border border-transparent text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 transition-all duration-200"
+    >
+      <Icon size={16} className="transition-transform duration-300" />
+    </button>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // 来源类型 → 颜色标签映射
@@ -137,6 +167,7 @@ export default function ProjectLayout() {
 
   const tabs = [
     { to: 'browse',   label: '文档',    icon: FolderKanban },
+    { to: 'graph',    label: '图谱',    icon: Network },
     { to: 'activity', label: '项目动态', icon: Activity },
     { to: 'publish',  label: '发布配置', icon: Rocket },
     { to: 'members',  label: '成员',    icon: Users },
@@ -262,6 +293,11 @@ export default function ProjectLayout() {
 
         {/* ③ Spacer */}
         <div className="flex-1" />
+
+        {/* ③.5 Appearance quick toggle — 项目空间独立的主题切换入口（精简单图标） */}
+        <div className="mr-1">
+          <AppearanceToggle />
+        </div>
 
         {/* ④ 全局操作：团队头像 + 文档数 + 分享 + 更多 */}
         <div className="flex items-center gap-3">

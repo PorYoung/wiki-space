@@ -55,7 +55,7 @@ const SOURCE_TYPE_META = {
 // 类型分类卡片（添加源时选择）
 const SOURCE_TYPE_CATEGORIES = [
   { type: 'git', icon: GitBranch, label: 'Git 仓库', desc: 'GitHub / GitLab / Gitee 等' },
-  { type: 'database', icon: Database, label: '数据库', desc: 'MySQL / PostgreSQL / MongoDB' },
+  { type: 'database', icon: Database, label: '数据库', desc: '关系型 + 对象型（MySQL / PostgreSQL / MongoDB / CouchDB / Cosmos DB 等）' },
   { type: 'local-folder', icon: FolderOpen, label: '本地文件夹', desc: '本地磁盘目录' },
   { type: 'web-link', icon: Globe, label: '网页链接', desc: '抓取在线文档页面' },
 ]
@@ -68,12 +68,27 @@ const GIT_AUTH_METHODS = [
 ]
 
 // 数据库类型选项
+// 分为两类：relational（关系型）、document（文档/对象型）、kv（键值型）
 const DATABASE_TYPES = [
-  { key: 'mysql',      label: 'MySQL',     defaultPort: 3306 },
-  { key: 'postgresql', label: 'PostgreSQL', defaultPort: 5432 },
-  { key: 'mongodb',    label: 'MongoDB',    defaultPort: 27017 },
-  { key: 'sqlite',     label: 'SQLite',     defaultPort: null },
+  // === 关系型 ===
+  { key: 'mysql',      label: 'MySQL',     defaultPort: 3306,   category: 'relational', icon: '🐬' },
+  { key: 'postgresql', label: 'PostgreSQL', defaultPort: 5432,   category: 'relational', icon: '🐘' },
+  { key: 'sqlite',     label: 'SQLite',     defaultPort: null,   category: 'relational', icon: '🗄️' },
+  { key: 'mariadb',    label: 'MariaDB',    defaultPort: 3306,   category: 'relational', icon: '🐬' },
+  { key: 'sqlserver',  label: 'SQL Server', defaultPort: 1433,   category: 'relational', icon: '🟦' },
+  // === 文档 / 对象型 ===
+  { key: 'mongodb',    label: 'MongoDB',    defaultPort: 27017,  category: 'document',   icon: '🍃' },
+  { key: 'couchdb',    label: 'CouchDB',    defaultPort: 5984,   category: 'document',   icon: '🛋️' },
+  { key: 'cosmosdb',   label: 'Cosmos DB',  defaultPort: null,    category: 'document',   icon: '🌌' },
+  { key: 'ravendb',    label: 'RavenDB',    defaultPort: 8080,   category: 'document',   icon: '🦅' },
+  { key: 'elasticsearch', label: 'Elasticsearch', defaultPort: 9200, category: 'document', icon: '🔎' },
 ]
+
+// 数据库类型分类显示
+const DB_CATEGORY_LABEL = {
+  relational: { label: '关系型数据库', desc: '传统 SQL 数据库，通过查询语句读取文档内容', icon: '🗃️' },
+  document:   { label: '文档 / 对象数据库', desc: '直接以文档形式存储，天然契合 Markdown / JSON 结构', icon: '📄' },
+}
 
 // ---- main page --------------------------------------------------------
 
@@ -437,6 +452,338 @@ function EmptyState({ onAdd }) {
 }
 
 // ========================================================================
+// ========================================================================
+// DatabaseFormFields — 按类别分组的数据库连接表单
+// ========================================================================
+
+function DatabaseFormFields({
+  dbType, setDbType,
+  port, setPort,
+  host, setHost,
+  database, setDatabase,
+  table, setTable,
+  username, setUsername,
+  password, setPassword,
+  showPassword, setShowPassword,
+}) {
+  const currentDB = DATABASE_TYPES.find((d) => d.key === dbType)
+  const isRelational = currentDB?.category === 'relational'
+  const isDocument = currentDB?.category === 'document'
+  const isSqlite = dbType === 'sqlite'
+  const isCosmos = dbType === 'cosmosdb'
+  const isES = dbType === 'elasticsearch'
+
+  // 按 category 分组
+  const grouped = DATABASE_TYPES.reduce((acc, db) => {
+    const cat = db.category || 'document'
+    if (!acc[cat]) acc[cat] = []
+    acc[cat].push(db)
+    return acc
+  }, {})
+
+  return (
+    <div className="space-y-4 pt-2 border-t border-neutral-100">
+      <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wide flex items-center gap-1.5">
+        <Database size={12} />
+        数据库连接配置
+      </div>
+
+      {/* DB Type — 按类别分组 */}
+      <div>
+        <label className="block text-sm font-medium text-neutral-700 mb-2">
+          数据库类型 <span className="text-danger">*</span>
+          {currentDB && (
+            <span className="ml-2 text-xs font-normal text-neutral-400">
+              当前：<span className="text-emerald-600 font-medium">{DB_CATEGORY_LABEL[currentDB.category]?.label || currentDB.category}</span>
+            </span>
+          )}
+        </label>
+
+        <div className="space-y-3">
+          {Object.entries(grouped).map(([cat, dbs]) => {
+            const catMeta = DB_CATEGORY_LABEL[cat] || { label: cat, desc: '' }
+            return (
+              <div key={cat}>
+                <div className="flex items-center gap-1.5 mb-2">
+                  <span className="text-xs">{catMeta.icon}</span>
+                  <span className="text-[11px] font-semibold text-neutral-600">{catMeta.label}</span>
+                  <span className="text-[10px] text-neutral-400">— {catMeta.desc}</span>
+                </div>
+                <div className="grid grid-cols-3 md:grid-cols-5 gap-1.5">
+                  {dbs.map((db) => {
+                    const active = dbType === db.key
+                    return (
+                      <button
+                        type="button"
+                        key={db.key}
+                        onClick={() => { setDbType(db.key); setPort(db.defaultPort || '') }}
+                        className={`py-2 px-1.5 rounded-lg border text-center transition-all text-xs font-medium ${
+                          active
+                            ? 'border-success bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+                            : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                        }`}
+                      >
+                        <div>{db.icon}</div>
+                        <div className="text-[10px] mt-0.5">{db.label}</div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Cosmos DB 特有：Endpoint + Primary Key 替代 Host/Password */}
+      {isCosmos ? (
+        <>
+          {/* Endpoint */}
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+              Endpoint <span className="text-danger">*</span>
+            </label>
+            <input
+              type="text"
+              className="input font-mono"
+              placeholder="https://your-cosmos-account.documents.azure.com"
+              value={host}
+              onChange={(e) => setHost(e.target.value)}
+              required
+            />
+          </div>
+          {/* Primary Key */}
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+              Primary Key <span className="text-danger">*</span>
+            </label>
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                className="input pr-10 font-mono"
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=="
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-600"
+              >
+                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+            <div className="text-[11px] text-neutral-400 mt-1">
+              推荐使用只读权限的 Secondary Key
+            </div>
+          </div>
+          {/* Database + Container */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">数据库名 <span className="text-danger">*</span></label>
+              <input
+                type="text"
+                className="input font-mono"
+                placeholder="TeamWiki"
+                value={database}
+                onChange={(e) => setDatabase(e.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">Container</label>
+              <input
+                type="text"
+                className="input font-mono"
+                placeholder="documents"
+                value={table}
+                onChange={(e) => setTable(e.target.value)}
+              />
+            </div>
+          </div>
+        </>
+      ) : isES ? (
+        <>
+          {/* Elasticsearch: Host + API Key */}
+          <div className="grid grid-cols-[1fr_120px] gap-3">
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                Host / URL <span className="text-danger">*</span>
+              </label>
+              <input
+                type="text"
+                className="input font-mono"
+                placeholder="https://elastic.example.com"
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">端口</label>
+              <input
+                type="number"
+                className="input"
+                placeholder={DATABASE_TYPES.find((d) => d.key === dbType)?.defaultPort}
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+              />
+            </div>
+          </div>
+          {/* API Key */}
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1.5">API Key</label>
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                className="input pr-10 font-mono"
+                placeholder="Base64 编码的 API Key"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-600"
+              >
+                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+          </div>
+          {/* Index name */}
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1.5">索引名</label>
+            <input
+              type="text"
+              className="input font-mono"
+              placeholder="docvault-docs"
+              value={table}
+              onChange={(e) => setTable(e.target.value)}
+            />
+          </div>
+        </>
+      ) : (
+        /* ---- 通用表单（关系型 + MongoDB/CouchDB/RavenDB 等标准对象数据库）---- */
+        <>
+          {/* Host + Port (not sqlite) */}
+          {!isSqlite && (
+            <div className="grid grid-cols-[1fr_120px] gap-3">
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                  主机 <span className="text-danger">*</span>
+                </label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="db.example.com 或 127.0.0.1"
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1.5">端口</label>
+                <input
+                  type="number"
+                  className="input"
+                  placeholder={DATABASE_TYPES.find((d) => d.key === dbType)?.defaultPort}
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Database name */}
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+              {isSqlite ? '文件路径' : isDocument ? '数据库 / DB 名' : '数据库名'} <span className="text-danger">*</span>
+            </label>
+            <input
+              type="text"
+              className="input font-mono"
+              placeholder={isSqlite ? '/path/to/docs.db' : 'knowledge_db'}
+              value={database}
+              onChange={(e) => setDatabase(e.target.value)}
+              required
+            />
+          </div>
+
+          {/* Username + Password (not sqlite) */}
+          {!isSqlite && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1.5">用户名</label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="db_user"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1.5">密码</label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    className="input pr-10"
+                    placeholder="••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-600"
+                  >
+                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Table / Collection / Document Scope */}
+          {(isRelational || dbType === 'mongodb') && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">
+                {dbType === 'mongodb' ? 'Collection' : '数据表'}
+              </label>
+              <input
+                type="text"
+                className="input"
+                placeholder={dbType === 'mongodb'
+                  ? "documents（留空自动检测含 markdown 字段的 Collection）"
+                  : "documents（留空自动检测含 markdown 字段的表）"}
+                value={table}
+                onChange={(e) => setTable(e.target.value)}
+              />
+            </div>
+          )}
+          {dbType === 'couchdb' && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1.5">文档过滤（可选）</label>
+              <input
+                type="text"
+                className="input font-mono"
+                placeholder="_design/docfilter/_view/by-tag"
+                value={table}
+                onChange={(e) => setTable(e.target.value)}
+              />
+              <div className="text-[11px] text-neutral-400 mt-1">
+                可选：指定 CouchDB design view 来限定索引范围
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ========================================================================
 // Add Source Modal
 // ========================================================================
 
@@ -706,131 +1053,16 @@ function AddSourceModal({ initialType, onClose, onSubmit }) {
 
           {/* ===== 数据库专属字段 ===== */}
           {isDB && (
-            <div className="space-y-4 pt-2 border-t border-neutral-100">
-              <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wide flex items-center gap-1.5">
-                <Database size={12} />
-                数据库连接配置
-              </div>
-
-              {/* DB Type */}
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-2">
-                  数据库类型 <span className="text-danger">*</span>
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {DATABASE_TYPES.map((db) => {
-                    const active = dbType === db.key
-                    return (
-                      <button
-                        type="button"
-                        key={db.key}
-                        onClick={() => { setDbType(db.key); setPort(db.defaultPort || '') }}
-                        className={`p-2.5 rounded-lg border text-center transition-all text-xs font-medium ${
-                          active
-                            ? 'border-success bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-                            : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
-                        }`}
-                      >
-                        {db.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              {/* Host + Port (not sqlite) */}
-              {dbType !== 'sqlite' && (
-                <div className="grid grid-cols-[1fr_120px] gap-3">
-                  <div>
-                    <label className="block text-sm font-medium text-neutral-700 mb-1.5">
-                      主机 <span className="text-danger">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      className="input"
-                      placeholder="db.example.com 或 127.0.0.1"
-                      value={host}
-                      onChange={(e) => setHost(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-neutral-700 mb-1.5">端口</label>
-                    <input
-                      type="number"
-                      className="input"
-                      placeholder={DATABASE_TYPES.find((d) => d.key === dbType)?.defaultPort}
-                      value={port}
-                      onChange={(e) => setPort(e.target.value)}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Database name */}
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-1.5">
-                  {dbType === 'sqlite' ? '文件路径' : '数据库名'} <span className="text-danger">*</span>
-                </label>
-                <input
-                  type="text"
-                  className="input font-mono"
-                  placeholder={dbType === 'sqlite' ? '/path/to/docs.db' : 'knowledge_db'}
-                  value={database}
-                  onChange={(e) => setDatabase(e.target.value)}
-                  required
-                />
-              </div>
-
-              {/* Username + Password (not sqlite) */}
-              {dbType !== 'sqlite' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-sm font-medium text-neutral-700 mb-1.5">用户名</label>
-                    <input
-                      type="text"
-                      className="input"
-                      placeholder="db_user"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-neutral-700 mb-1.5">密码</label>
-                    <div className="relative">
-                      <input
-                        type={showPassword ? 'text' : 'password'}
-                        className="input pr-10"
-                        placeholder="••••••"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword((v) => !v)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-600"
-                      >
-                        {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Table / Collection */}
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-1.5">
-                  {dbType === 'mongodb' ? 'Collection' : '数据表'}
-                </label>
-                <input
-                  type="text"
-                  className="input"
-                  placeholder="documents（留空自动检测包含 markdown 字段的表）"
-                  value={table}
-                  onChange={(e) => setTable(e.target.value)}
-                />
-              </div>
-            </div>
+            <DatabaseFormFields
+              dbType={dbType} setDbType={setDbType}
+              port={port} setPort={setPort}
+              host={host} setHost={setHost}
+              database={database} setDatabase={setDatabase}
+              table={table} setTable={setTable}
+              username={username} setUsername={setUsername}
+              password={password} setPassword={setPassword}
+              showPassword={showPassword} setShowPassword={setShowPassword}
+            />
           )}
 
           {/* ===== Local folder ===== */}
@@ -1098,24 +1330,38 @@ function SourceSettingsModal({ source, onClose, onSave }) {
 
               <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-2">数据库类型</label>
-                <div className="grid grid-cols-4 gap-2">
-                  {DATABASE_TYPES.map((db) => {
-                    const active = form.dbType === db.key
-                    return (
-                      <button
-                        type="button"
-                        key={db.key}
-                        onClick={() => setForm({ ...form, dbType: db.key })}
-                        className={`p-2.5 rounded-lg border text-center transition-all text-xs font-medium ${
-                          active
-                            ? 'border-success bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-                            : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
-                        }`}
-                      >
-                        {db.label}
-                      </button>
-                    )
-                  })}
+                <div className="space-y-2">
+                  {Object.entries(DATABASE_TYPES.reduce((acc, db) => {
+                    const cat = db.category || 'document'
+                    if (!acc[cat]) acc[cat] = []
+                    acc[cat].push(db)
+                    return acc
+                  }, {})).map(([cat, dbs]) => (
+                    <div key={cat}>
+                      <div className="text-[10px] text-neutral-500 mb-1">
+                        {DB_CATEGORY_LABEL[cat]?.label || cat}
+                      </div>
+                      <div className="grid grid-cols-4 md:grid-cols-5 gap-1.5">
+                        {dbs.map((db) => {
+                          const active = form.dbType === db.key
+                          return (
+                            <button
+                              type="button"
+                              key={db.key}
+                              onClick={() => setForm({ ...form, dbType: db.key })}
+                              className={`py-1.5 px-1 rounded-md border text-center transition-all text-[11px] font-medium ${
+                                active
+                                  ? 'border-success bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+                                  : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                              }`}
+                            >
+                              <span>{db.icon}</span> {db.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
 
@@ -1166,7 +1412,7 @@ function SourceSettingsModal({ source, onClose, onSave }) {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-neutral-700 mb-1.5">密码</label>
+                    <label className="block text-sm font-medium text-neutral-700 mb-1.5">密码 / API Key</label>
                     <div className="relative">
                       <input
                         type={form.showPassword ? 'text' : 'password'}
@@ -1189,7 +1435,7 @@ function SourceSettingsModal({ source, onClose, onSave }) {
 
               <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-1.5">
-                  {form.dbType === 'mongodb' ? 'Collection' : '数据表'}
+                  {form.dbType === 'mongodb' ? 'Collection' : form.dbType === 'elasticsearch' ? '索引名' : '数据表 / 集合'}
                 </label>
                 <input
                   type="text"
