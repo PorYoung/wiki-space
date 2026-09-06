@@ -1428,20 +1428,12 @@ export default function ProjectBrowse() {
 
   // Panel refs for programmatic collapse/expand
   const leftPanelRef = useRef(null)
-  const rightPanelRef = useRef(null)
 
   // Panel collapse state (driven by Panel events + toggles from child buttons)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightCollapsed, setRightCollapsed] = useState(false)
 
   const toggleLeftPanel = () => {
     const p = leftPanelRef.current
-    if (!p) return
-    if (p.isCollapsed()) p.expand()
-    else p.collapse()
-  }
-  const toggleRightPanel = () => {
-    const p = rightPanelRef.current
     if (!p) return
     if (p.isCollapsed()) p.expand()
     else p.collapse()
@@ -1696,25 +1688,6 @@ export default function ProjectBrowse() {
           team={team}
           renderTheme={renderTheme}
           setRenderTheme={setRenderTheme}
-        />
-      </Panel>
-      <PanelResizeHandle className="resize-handle" />
-      <Panel
-        ref={rightPanelRef}
-        id="right-panel"
-        defaultSize={22}
-        minSize={14}
-        collapsible
-        collapsedSize={4}
-        onCollapse={() => setRightCollapsed(true)}
-        onExpand={() => setRightCollapsed(false)}
-      >
-        <CollaborativePanel
-          doc={activeDoc}
-          team={team}
-          versions={versions}
-          collapsed={rightCollapsed}
-          onToggleCollapse={toggleRightPanel}
         />
       </Panel>
     </PanelGroup>
