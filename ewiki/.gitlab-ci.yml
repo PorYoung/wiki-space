@@ -1,0 +1,49 @@
+# ewiki CI/CD —— ENGINEERING.md 第 6 章
+stages: [verify, build, migrate, deploy]
+
+variables:
+  TAG: $CI_COMMIT_SHORT_SHA
+
+verify:
+  stage: verify
+  image: node:22-slim
+  script:
+    - corepack enable
+    - pnpm install --frozen-lockfile
+    - pnpm lint
+    - pnpm typecheck
+    - pnpm test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+build:
+  stage: build
+  image: docker:24
+  services: [docker:24-dind]
+  script:
+    - docker build -f deploy/Dockerfile -t $REG/ewiki/app:$TAG .
+    - docker push $REG/ewiki/app:$TAG
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+migrate:
+  stage: migrate
+  image: node:22-slim
+  script:
+    - corepack enable
+    - pnpm install --frozen-lockfile
+    - pnpm db:migrate
+  environment: staging
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  script:
+    - apk add --no-cache openssh-client
+    - ssh $DEPLOY_HOST "cd /srv/ewiki && TAG=$TAG docker compose pull && TAG=$TAG docker compose up -d"
+  environment: staging
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

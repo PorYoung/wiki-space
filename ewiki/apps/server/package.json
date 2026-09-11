@@ -1,0 +1,38 @@
+{
+  "name": "@ewiki/server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/index.ts --format esm --out-dir dist --clean",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo ok",
+    "test": "vitest run",
+    "db:generate": "tsx node_modules/drizzle-kit/bin.cjs generate",
+    "db:migrate": "tsx node_modules/drizzle-kit/bin.cjs migrate",
+    "db:seed": "tsx src/seed.ts"
+  },
+  "dependencies": {
+    "@ewiki/db": "workspace:*",
+    "@ewiki/render": "workspace:*",
+    "@ewiki/shared": "workspace:*",
+    "@hono/node-server": "^1.13.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.38.0",
+    "hono": "^4.6.0",
+    "jose": "^5.9.0",
+    "pg-boss": "^10.1.0",
+    "pino": "^9.5.0",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.0",
+    "@ewiki/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.30.6",
+    "tsup": "^8.3.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.6.0"
+  }
+}

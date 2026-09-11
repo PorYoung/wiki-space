@@ -1,0 +1,1856 @@
+import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import { SourceType } from '@ewiki/shared';
+import { encryptJson } from '@ewiki/db';
+import { renderDocPage } from '@ewiki/render';
+import type { AppDeps } from './app.js';
+import {
+  generateRefreshToken,
+  hashPassword,
+  hashToken,
+  signAccessToken,
+  verifyAccessToken,
+  verifyPassword,
+} from '../auth/utils.js';
+import { and, desc, eq, isNull, lt, ne, sql } from 'drizzle-orm';
+import {
+  activities,
+  aiClassifyRuns,
+  auditLogs,
+  documentLinks,
+  documentVersions,
+  documents,
+  importJobs,
+  notifications,
+  projectMembers,
+  projects,
+  publishJobs,
+  publishSites,
+  refreshTokens,
+  sources,
+  userPrefs,
+  users,
+} from '../db/schema.js';
+import { registerStarterRoutes } from './routes-starter.js';
+import { docStorageEffects, registerPlatformRoutes } from './routes-platform.js';
+import { denyIfNot, projectAccess } from '../lib/permissions.js';
+
+// ---- 发布模板元数据（PLAN 3.5 / 5.2.1：服务端权威源，ThemesPage / PublishPage 从此拉取） ----
+// 与原型 Themes.jsx TEMPLATE_META / mock data.js:853-897 对齐
+const PUBLISH_TEMPLATES = [
+  {
+    id: 't-docs',
+    name: '标准文档 Docs',
+    zhLabel: '文档站',
+    desc: '左侧导航 + 右侧内容，技术文档的经典形态。',
+    layout: 'sidebar-wide',
+    accent: '#0ea5e9',
+    target: '文档',
+    emoji: '📚',
+    stars: 1284,
+  },
+  {
+    id: 't-blog',
+    name: '博客 Blog',
+    zhLabel: '博客',
+    desc: '杂志风卡片 + 精选推荐位，适合发布产品故事。',
+    layout: 'sidebar',
+    accent: '#f43f5e',
+    target: '博客',
+    emoji: '✍️',
+    stars: 932,
+  },
+  {
+    id: 't-product',
+    name: '产品官网 Product Site',
+    zhLabel: '产品首页',
+    desc: 'Hero + 特性三栏 + 定价 CTA，营销导向的单页模板。',
+    layout: 'hero',
+    accent: '#14b8a6',
+    target: '官网',
+    emoji: '🌐',
+    stars: 756,
+  },
+  {
+    id: 't-wiki',
+    name: '团队 Wiki',
+    zhLabel: '知识库',
+    desc: '树形目录 + 知识图谱视图，沉淀组织的第二大脑。',
+    layout: 'grid',
+    accent: '#8b5cf6',
+    target: '知识库',
+    emoji: '🧠',
+    stars: 1120,
+  },
+  {
+    id: 't-api',
+    name: 'API 参考 API Ref',
+    zhLabel: 'API 参考',
+    desc: '端点分组 + Try-it 面板，代码优先的 API 文档模板。',
+    layout: 'split',
+    accent: '#f59e0b',
+    target: 'API',
+    emoji: '🔗',
+    stars: 640,
+  },
+] as const;
+
+/**
+ * 文档内容摘要（PLAN 3.4 残留：DocumentCard 内容摘要）。
+ * 列表接口不下发全文，读取时从 content 派生 ~140 字符纯文本摘要：
+ * 剥代码块/图片/链接语法/标题井号/行内强调符，压平为单行后截断。
+ */
+function documentSummary(content: string | null): string {
+  if (!content) return '';
+  const text = content
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .split('\n')
+    .map((l) => l.replace(/^#+\s*/, '').replace(/[`*_>-]/g, '').trim())
+    .filter(Boolean)
+    .join(' ');
+  return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+}
+
+/** 路由注册（SDD 4.2 清单的骨架实现；未列出的端点随层 4 迭代补充） */
+export function registerRoutes(app: Hono, deps: AppDeps): void {
+  const { config, db, boss } = deps;
+
+  // ---- 健康（SYS） ----
+  app.get('/healthz', (c) => c.json({ ok: true }));
+  app.get('/readyz', async (c) => {
+    await db.execute('select 1');
+    return c.json({ ok: true, db: true });
+  });
+
+  // ---- 认证（A1–A3） ----
+  const auth = new Hono();
+  auth.post('/login', async (c) => {
+    const body = (await c.req.json()) as { email?: string; password?: string };
+    if (!body.email || !body.password) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+
+    // 邮箱归一化与注册一致（register 为 trim().toLowerCase()），否则大小写/首尾空格差异导致查无此人
+    const email = body.email.trim().toLowerCase();
+    const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!user || !verifyPassword(body.password, user.passwordHash)) {
+      throw new HTTPException(401, { message: 'UNAUTHENTICATED: 邮箱或密码不正确' });
+    }
+    if (user.status === 'disabled') {
+      throw new HTTPException(403, { message: 'ACCOUNT_DISABLED: 账号已被禁用，请联系管理员' });
+    }
+
+    const accessToken = await signAccessToken(config.JWT_SECRET, {
+      sub: user.id,
+      globalRole: user.globalRole,
+    });
+    const refreshToken = generateRefreshToken();
+    await db.insert(refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashToken(refreshToken),
+      expiresAt: new Date(Date.now() + config.REFRESH_TTL_DAYS * 86_400_000),
+    });
+
+    await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
+    await db.insert(auditLogs).values({
+      actorId: user.id,
+      action: 'user.login',
+      resourceType: 'user',
+      resourceId: user.id,
+      meta: { email: user.email },
+    });
+
+    return c.json({
+      accessToken,
+      refreshToken,
+      user: { id: user.id, email: user.email, name: user.name, globalRole: user.globalRole },
+    });
+  });
+
+  auth.post('/refresh', async (c) => {
+    const body = (await c.req.json()) as { refreshToken?: string };
+    if (!body.refreshToken) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+    const hash = hashToken(body.refreshToken);
+    const [row] = await db
+      .select()
+      .from(refreshTokens)
+      .where(and(eq(refreshTokens.tokenHash, hash), isNull(refreshTokens.revokedAt)))
+      .limit(1);
+    if (!row || row.expiresAt < new Date()) throw new HTTPException(401, { message: 'TOKEN_EXPIRED' });
+
+    await db.update(refreshTokens).set({ revokedAt: new Date() }).where(eq(refreshTokens.id, row.id));
+    const [user] = await db.select().from(users).where(eq(users.id, row.userId)).limit(1);
+    if (!user) throw new HTTPException(401, { message: 'UNAUTHENTICATED' });
+
+    const accessToken = await signAccessToken(config.JWT_SECRET, {
+      sub: user.id,
+      globalRole: user.globalRole,
+    });
+    const newRefresh = generateRefreshToken();
+    await db.insert(refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashToken(newRefresh),
+      expiresAt: new Date(Date.now() + config.REFRESH_TTL_DAYS * 86_400_000),
+    });
+    return c.json({ accessToken, refreshToken: newRefresh });
+  });
+
+  auth.post('/logout', async (c) => {
+    const body = (await c.req.json()) as { refreshToken?: string };
+    if (body.refreshToken) {
+      await db
+        .update(refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+    }
+    return c.json({ ok: true });
+  });
+
+  app.route('/api/v1/auth', auth);
+
+  // ---- Bearer 认证守卫（auth/open 之外全部生效） ----
+  app.use('/api/v1/*', async (c, next) => {
+    const path = c.req.path;
+    if (path.startsWith('/api/v1/auth') || path.startsWith('/api/v1/open/')) return next();
+
+    const header = c.req.header('Authorization') ?? '';
+    if (!header.startsWith('Bearer ')) throw new HTTPException(401, { message: 'UNAUTHENTICATED' });
+    try {
+      const payload = await verifyAccessToken(config.JWT_SECRET, header.slice(7));
+      c.set('userId', payload.sub);
+      c.set('globalRole', payload.globalRole);
+    } catch {
+      throw new HTTPException(401, { message: 'TOKEN_EXPIRED' });
+    }
+    // 禁用账号即时生效（禁用后已签发的访问令牌也被拦截）
+    const [meStatus] = await db
+      .select({ status: users.status })
+      .from(users)
+      .where(eq(users.id, c.get('userId') as string))
+      .limit(1);
+    if (meStatus && meStatus.status === 'disabled') {
+      throw new HTTPException(403, { message: 'ACCOUNT_DISABLED' });
+    }
+    await next();
+  });
+
+  // ---- 项目（P1–P4） ----
+  const projectsRoute = new Hono();
+  projectsRoute.get('/', async (c) => {
+    // 可见性过滤：private 仅成员/管理员可见；team/public 任何已登录用户可见
+    // （与 GET /:id 的 projectAccess、sources 列表的 scoped 过滤保持同一规则）
+    const uid = c.get('userId') as string;
+    const isAdmin = c.get('globalRole') === 'admin';
+    const rows = await db
+      .select()
+      .from(projects)
+      .where(
+        isAdmin
+          ? isNull(projects.deletedAt)
+          : and(
+              isNull(projects.deletedAt),
+              sql`${projects.visibility} <> 'private' or exists (select 1 from project_members pm where pm.project_id = ${projects.id} and pm.user_id = ${uid})`,
+            ),
+      )
+      .orderBy(desc(projects.updatedAt))
+      .limit(100);
+    return c.json({ items: rows, page: 1, pageSize: 100, total: rows.length });
+  });
+
+  projectsRoute.post('/', async (c) => {
+    const userId = c.get('userId') as string;
+    const body = (await c.req.json()) as {
+      name?: string;
+      description?: string;
+      visibility?: 'private' | 'team' | 'public';
+      template?: string;
+    };
+    if (!body.name) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+
+    const [project] = await db
+      .insert(projects)
+      .values({
+        name: body.name,
+        description: body.description ?? null,
+        visibility: body.visibility ?? 'private',
+        template: body.template ?? null,
+        ownerId: userId,
+      })
+      .returning();
+    await db.insert(projectMembers).values({ projectId: project.id, userId, role: 'owner' });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.create',
+      resourceType: 'project',
+      resourceId: project.id,
+    });
+    return c.json(project, 201);
+  });
+
+  projectsRoute.get('/:id', async (c) => {
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, c.req.param('id')), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(project.id, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    return c.json(project);
+  });
+
+  app.route('/api/v1/projects', projectsRoute);
+
+  // ---- 数据源（S1 创建 / S2 列表 / S3 手动同步 / 更新 / 删除） ----
+  const sourcesRoute = new Hono();
+  sourcesRoute.get('/', async (c) => {
+    // 数据源列表按项目可见性过滤：私有项目仅成员/管理员可见
+    const uid0 = c.get('userId') as string;
+    const scoped = c.get('globalRole') === 'admin'
+      ? undefined
+      : sql`${sources.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${uid0})))`;
+    const rows = await db
+      .select({
+        id: sources.id,
+        projectId: sources.projectId,
+        type: sources.type,
+        name: sources.name,
+        configPublic: sources.configPublic,
+        defaultBranch: sources.defaultBranch,
+        autoSync: sources.autoSync,
+        intervalSeconds: sources.intervalSeconds,
+        status: sources.status,
+        lastSyncedAt: sources.lastSyncedAt,
+        lastError: sources.lastError,
+        projectName: projects.name,
+      })
+      .from(sources)
+      .leftJoin(projects, eq(sources.projectId, projects.id))
+      .where(scoped ? and(isNull(sources.deletedAt), scoped) : isNull(sources.deletedAt))
+      .orderBy(desc(sources.createdAt))
+      .limit(200);
+    return c.json({ items: rows, page: 1, pageSize: 200, total: rows.length });
+  });
+
+  sourcesRoute.post('/', async (c) => {
+    const userId = c.get('userId') as string;
+    const body = (await c.req.json()) as {
+      projectId?: string;
+      type?: string;
+      name?: string;
+      configPublic?: Record<string, unknown>;
+      configSecret?: Record<string, unknown>;
+      defaultBranch?: string | null;
+    };
+    if (!body.projectId || !body.name) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+    const parsed = SourceType.safeParse(body.type);
+    if (!parsed.success) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+    {
+      const access = await projectAccess(body.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    const [source] = await db
+      .insert(sources)
+      .values({
+        projectId: body.projectId,
+        type: parsed.data,
+        name: body.name,
+        configPublic: body.configPublic ?? {},
+        configEncrypted:
+          body.configSecret && Object.keys(body.configSecret).length > 0
+            ? encryptJson(body.configSecret)
+            : null,
+        defaultBranch: body.defaultBranch ?? null,
+      })
+      .returning();
+    await db.insert(activities).values({
+      projectId: body.projectId,
+      actorId: userId,
+      verb: 'create',
+      targetType: 'source',
+      targetId: source.id,
+      targetTitle: source.name,
+    });
+    return c.json(source, 201);
+  });
+
+  sourcesRoute.post('/:id/sync', async (c) => {
+    const id = c.req.param('id');
+    const [source] = await db
+      .select()
+      .from(sources)
+      .where(and(eq(sources.id, id), isNull(sources.deletedAt)))
+      .limit(1);
+    if (!source) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(source.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    // 手动同步幂等：同分钟去重（pg-boss v10 id 必须 UUID，幂等用 singletonKey）
+    const key = `sync:${id}:manual`;
+    await boss.send('sync', { sourceId: id, trigger: 'manual' }, { singletonKey: key, singletonMinutes: 1 });
+    await db.update(sources).set({ status: 'syncing', lastError: null }).where(eq(sources.id, id));
+    return c.json({ ok: true, sourceId: id, status: 'syncing' });
+  });
+
+  sourcesRoute.patch('/:id', async (c) => {
+    const body = (await c.req.json()) as {
+      name?: string;
+      autoSync?: boolean;
+      intervalSeconds?: number;
+      defaultBranch?: string | null;
+      configSecret?: Record<string, unknown>;
+    };
+    const [existing] = await db.select().from(sources).where(and(eq(sources.id, c.req.param('id')!), isNull(sources.deletedAt))).limit(1);
+    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(existing.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改数据源');
+    }
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+    if (body.name !== undefined) set.name = body.name;
+    if (body.autoSync !== undefined) set.autoSync = body.autoSync;
+    if (body.intervalSeconds !== undefined) set.intervalSeconds = body.intervalSeconds;
+    if (body.defaultBranch !== undefined) set.defaultBranch = body.defaultBranch;
+    if (body.configSecret && Object.keys(body.configSecret).length > 0)
+      set.configEncrypted = encryptJson(body.configSecret);
+
+    const [updated] = await db.update(sources).set(set).where(eq(sources.id, c.req.param('id'))).returning();
+    return c.json(updated);
+  });
+
+  sourcesRoute.delete('/:id', async (c) => {
+    const [existing] = await db.select().from(sources).where(and(eq(sources.id, c.req.param('id')!), isNull(sources.deletedAt))).limit(1);
+    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(existing.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可删除数据源');
+    }
+    const [deleted] = await db
+      .update(sources)
+      .set({ deletedAt: new Date() })
+      .where(eq(sources.id, c.req.param('id')))
+      .returning();
+    void deleted;
+    return c.json({ ok: true });
+  });
+
+  app.route('/api/v1/sources', sourcesRoute);
+
+  // ---- 动态（N1 骨架） ----
+  // 支持 ?projectId= 过滤：项目动态页只应显示本项目动态（前端 ActivityPage 已在传参，PLAN 5.4.1）
+  app.get('/api/v1/activities', async (c) => {
+    const projectId = c.req.query('projectId');
+    const userId = c.get('userId') as string;
+    let whereClause: ReturnType<typeof eq> | undefined;
+    if (projectId) {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+      whereClause = eq(activities.projectId, projectId);
+    } else if (c.get('globalRole') !== 'admin') {
+      // 全局动态流仅展示当前用户可读项目（私有项目活动不泄露）
+      whereClause = sql`${activities.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${userId})))` as never;
+    }
+    // select 显式列 + leftJoin users 补 actorName：Dashboard/ActivityPage 均按 actorName 渲染操作人
+    const rows = await db
+      .select({
+        id: activities.id,
+        projectId: activities.projectId,
+        actorId: activities.actorId,
+        actorName: users.name,
+        verb: activities.verb,
+        targetType: activities.targetType,
+        targetId: activities.targetId,
+        targetTitle: activities.targetTitle,
+        createdAt: activities.createdAt,
+      })
+      .from(activities)
+      .leftJoin(users, eq(activities.actorId, users.id))
+      .where(whereClause)
+      .orderBy(desc(activities.createdAt))
+      .limit(20);
+    return c.json({ items: rows, page: 1, pageSize: 20, total: rows.length });
+  });
+
+  // ---- 当前用户（A4 骨架） ----
+  app.get('/api/v1/me', async (c) => {
+    const userId = c.get('userId') as string;
+    const [user] = await db
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.name,
+        globalRole: users.globalRole,
+        avatarUrl: users.avatarUrl,
+      })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!user) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    return c.json(user);
+  });
+
+  // ---- 用户偏好（U1 SettingsPage） ----
+  app.get('/api/v1/me/prefs', async (c) => {
+    const userId = c.get('userId') as string;
+    const [prefs] = await db.select().from(userPrefs).where(eq(userPrefs.userId, userId)).limit(1);
+    if (!prefs) {
+      // 首次访问 → 创建默认行（避免前端每次 GET 都返回 null）
+      await db.insert(userPrefs).values({ userId });
+      return c.json({ theme: 'fresh-emerald', appearance: 'system', accent: 'emerald', fontSize: 2, prefs: {} });
+    }
+    return c.json(prefs);
+  });
+
+  app.put('/api/v1/me/prefs', async (c) => {
+    const userId = c.get('userId') as string;
+    const body = (await c.req.json()) as {
+      theme?: string;
+      appearance?: string;
+      accent?: string;
+      fontSize?: number;
+      prefs?: Record<string, unknown>;
+    };
+
+    const set: Record<string, unknown> = {};
+    if (body.theme !== undefined) set.theme = body.theme;
+    if (body.appearance !== undefined) set.appearance = body.appearance;
+    if (body.accent !== undefined) set.accent = body.accent;
+    if (body.fontSize !== undefined) set.fontSize = body.fontSize;
+    if (body.prefs !== undefined) set.prefs = body.prefs;
+
+    const [existing] = await db.select().from(userPrefs).where(eq(userPrefs.userId, userId)).limit(1);
+    if (existing) {
+      const [updated] = await db.update(userPrefs).set(set).where(eq(userPrefs.userId, userId)).returning();
+      return c.json(updated);
+    }
+    const [inserted] = await db.insert(userPrefs).values({ userId, ...set }).returning();
+    return c.json(inserted, 201);
+  });
+
+  // ---- 团队（M1：TeamPage 成员列表；PLAN 5.2.1 改造） ----
+  // 契约对齐前端 TeamResponse：{ members: [{ id, name, email, role, online, lastActive }] }。
+  // role 为展示层 TeamRole（admin→Owner，其余→Editor）；online/lastActive 由该用户最近
+  // activity 时间推导（真实行为数据，5 分钟内有活动视为在线），非 mock。
+  app.get('/api/v1/team', async (c) => {
+    const rows = await db
+      .select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        globalRole: users.globalRole,
+        avatarUrl: users.avatarUrl,
+        status: users.status,
+        lastActiveAt: sql<string | null>`(
+          select max(${activities.createdAt}) from ${activities} where ${activities.actorId} = ${users.id}
+        )`,
+      })
+      .from(users)
+      .limit(200);
+    const members = rows.map((u) => {
+      const lastActive = u.lastActiveAt ? new Date(u.lastActiveAt).toISOString() : null;
+      const online = !!lastActive && Date.now() - new Date(lastActive).getTime() < 5 * 60_000;
+      return {
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: (u.globalRole === 'admin' ? 'Owner' : 'Editor') as 'Owner' | 'Maintainer' | 'Editor' | 'Guest',
+        online,
+        lastActive,
+        avatarUrl: u.avatarUrl,
+        status: u.status,
+      };
+    });
+    return c.json({ members });
+  });
+
+  // ---- 邀请全局团队成员（PLAN 5.2.1：TeamPage 邀请弹窗，原 404 降级转真实） ----
+  // 环境无邮件服务（SDD P18）：直接创建 invited 账号 + 随机临时密码（仅存哈希），
+  // 激活/改密流程待做；Owner 为全局管理员不可邀请，Maintainer 及以下为展示层角色（落库均为 user）。
+  app.post('/api/v1/team/invite', async (c) => {
+    const userId = c.get('userId') as string;
+    const body = (await c.req.json()) as { email?: string; role?: string; message?: string };
+    if (!body.email?.trim()) throw new HTTPException(400, { message: 'VALIDATION_FAILED: email required' });
+    const role = body.role ?? 'Editor';
+    if (!['Owner', 'Maintainer', 'Editor', 'Guest'].includes(role)) {
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: invalid role' });
+    }
+    if (role === 'Owner') throw new HTTPException(400, { message: 'CANNOT_INVITE_OWNER' });
+    const email = body.email.trim().toLowerCase();
+    const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+    if (existing) throw new HTTPException(409, { message: 'ALREADY_MEMBER' });
+
+    const crypto = await import('crypto');
+    const [created] = await db
+      .insert(users)
+      .values({
+        email,
+        name: email.split('@')[0]!,
+        passwordHash: hashPassword(crypto.randomBytes(16).toString('hex')),
+        globalRole: 'user',
+        status: 'invited',
+      })
+      .returning();
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'team.invite',
+      resourceType: 'user',
+      resourceId: created.id,
+      meta: { role, message: body.message ?? null },
+    });
+    // 通知被邀请人（EXT-PLATFORM ADR-P3：server 侧站内渠道；激活登录后收件箱可见）
+    await db.insert(notifications).values({
+      userId: created.id,
+      type: 'team.invite',
+      payload: {
+        title: '团队邀请',
+        message: `你的账号已被加入团队（角色：${role}）。请使用邀请邮件中的临时密码登录。`,
+      },
+    });
+    return c.json({ id: created.id, email: created.email, role, status: created.status }, 201);
+  });
+
+  // ---- 修改全局成员角色（PLAN 5.2.1：TeamPage 角色菜单，原 404 降级转真实） ----
+  // TeamRole→globalRole 映射：仅 Owner=admin；移除某用户 Owner 时自动降为 user。
+  app.patch('/api/v1/team/:id/role', async (c) => {
+    const userId = c.get('userId') as string;
+    const targetId = c.req.param('id')!;
+    const body = (await c.req.json()) as { role?: string };
+    const role = body.role;
+    if (!role || !['Owner', 'Maintainer', 'Editor', 'Guest'].includes(role)) {
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: invalid role' });
+    }
+    const [target] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
+    if (!target) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    if (targetId === userId && role !== 'Owner') {
+      throw new HTTPException(400, { message: 'CANNOT_DEMOTE_SELF' });
+    }
+    const [updated] = await db
+      .update(users)
+      .set({ globalRole: role === 'Owner' ? 'admin' : 'user', updatedAt: new Date() })
+      .where(eq(users.id, targetId))
+      .returning();
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'team.role_change',
+      resourceType: 'user',
+      resourceId: targetId,
+      meta: { from: target.globalRole, to: updated.globalRole },
+    });
+    return c.json({ id: updated.id, role });
+  });
+
+  // ---- 文档全局列表（D1 + F04 预警数据源） ----
+  app.get('/api/v1/documents', async (c) => {
+    const projectId = c.req.query('projectId');
+    const status = c.req.query('status');
+    const conditions = [isNull(documents.deletedAt)];
+    if (projectId) {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+      conditions.push(eq(documents.projectId, projectId));
+    } else if (c.get('globalRole') !== 'admin') {
+      // 全局文档列表仅返回当前用户可读项目的文档
+      const uid = c.get('userId') as string;
+      conditions.push(sql`${documents.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${uid})))`);
+    }
+    if (status) conditions.push(eq(documents.status, status));
+    const rows = await db
+      .select({
+        id: documents.id,
+        projectId: documents.projectId,
+        sourceId: documents.sourceId,
+        path: documents.path,
+        title: documents.title,
+        status: documents.status,
+        tags: documents.tags,
+        wordCount: documents.wordCount,
+        contentHash: documents.contentHash,
+        updatedBy: documents.updatedBy,
+        updatedAt: documents.updatedAt,
+        createdAt: documents.createdAt,
+        // content 仅用于派生 summary，不随响应下发
+        content: documents.content,
+      })
+      .from(documents)
+      .where(and(...conditions))
+      .orderBy(desc(documents.updatedAt))
+      .limit(500);
+    const items = rows.map(({ content, ...row }) => ({ ...row, summary: documentSummary(content) }));
+    return c.json({ items, page: 1, pageSize: 500, total: items.length });
+  });
+
+  // ---- 项目详情增强（P3 扩展：附带统计） ----
+  // 覆盖已有 GET /api/v1/projects/:id — 通过 docs_count 子查询补充统计
+  // 注：已有 routes 中 projectsRoute.get('/:id') 是轻量版；这里不覆盖，保持独立查询
+  app.get('/api/v1/projects/:id/overview', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    const [docCountRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
+    const [sourceCountRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(sources)
+      .where(and(eq(sources.projectId, projectId), isNull(sources.deletedAt)));
+    const [memberCountRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectMembers)
+      .where(eq(projectMembers.projectId, projectId));
+
+    // sourceType 动态推导（问题 1 修复）：projects 表无 source_type 字段，
+    // 旧实现把 project 行原样下发导致前端恒显示「未知」。
+    // 取该项目第一个未删除数据源的 type（git | local | web | database），无数据源时为 null。
+    const [firstSource] = await db
+      .select({ type: sources.type })
+      .from(sources)
+      .where(and(eq(sources.projectId, projectId), isNull(sources.deletedAt)))
+      .limit(1);
+
+    return c.json({
+      ...project,
+      sourceType: firstSource?.type ?? null,
+      docCount: Number(docCountRow?.count ?? 0),
+      sourceCount: Number(sourceCountRow?.count ?? 0),
+      memberCount: Number(memberCountRow?.count ?? 0),
+    });
+  });
+
+  // ---- 项目文档列表（D2 BrowsePage 必需） ----
+  app.get('/api/v1/projects/:id/documents', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const status = c.req.query('status');
+    const q = c.req.query('q');
+    const conditions = [eq(documents.projectId, projectId), isNull(documents.deletedAt)];
+    if (status) conditions.push(eq(documents.status, status));
+    if (q) conditions.push(sql`(${documents.path} ILIKE ${"%" + q + "%"} OR ${documents.title} ILIKE ${"%" + q + "%"})`);
+
+    const rows = await db
+      .select({
+        id: documents.id,
+        projectId: documents.projectId,
+        sourceId: documents.sourceId,
+        path: documents.path,
+        title: documents.title,
+        status: documents.status,
+        tags: documents.tags,
+        wordCount: documents.wordCount,
+        contentHash: documents.contentHash,
+        updatedBy: documents.updatedBy,
+        updatedAt: documents.updatedAt,
+        createdAt: documents.createdAt,
+        // content 仅用于派生 summary，不随响应下发（PLAN 3.4 残留）
+        content: documents.content,
+      })
+      .from(documents)
+      .where(and(...conditions))
+      .orderBy(documents.path);
+    const items = rows.map(({ content, ...row }) => ({ ...row, summary: documentSummary(content) }));
+    return c.json({ items, page: 1, pageSize: items.length, total: items.length });
+  });
+
+  // ---- 文档详情（D3 BrowsePage 必需：含 content） ----
+  app.get('/api/v1/documents/:id', async (c) => {
+    const [doc] = await db
+      .select({
+        id: documents.id,
+        projectId: documents.projectId,
+        sourceId: documents.sourceId,
+        path: documents.path,
+        title: documents.title,
+        content: documents.content,
+        status: documents.status,
+        tags: documents.tags,
+        wordCount: documents.wordCount,
+        contentHash: documents.contentHash,
+        updatedBy: documents.updatedBy,
+        updatedAt: documents.updatedAt,
+        createdAt: documents.createdAt,
+      })
+      .from(documents)
+      .where(and(eq(documents.id, c.req.param('id')!), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!doc) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(doc.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    return c.json(doc);
+  });
+
+  // ---- 保存文档（D4 BrowsePage 保存：新版本 + 更新 + activity） ----
+  // PLAN 5.2.1：版本写入链路落 changedSummary（行级简化 diff，ActivityPage diff 块数据源）
+  app.put('/api/v1/documents/:id', async (c) => {
+    const userId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const body = (await c.req.json()) as {
+      content?: string;
+      title?: string;
+      message?: string;
+      tags?: string[];
+      baseVersionNo?: number;
+    };
+
+    const [existing] = await db
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    {
+      const access = await projectAccess(existing.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    // 乐观并发保护（多人协作不互相覆盖）：请求携带 baseVersionNo 且与最新版本不符 → 409
+    if (typeof body.baseVersionNo === 'number') {
+      const [latest] = await db
+        .select({ v: sql<number>`coalesce(max(${documentVersions.versionNo}), 0)` })
+        .from(documentVersions)
+        .where(eq(documentVersions.documentId, id));
+      if (Number(latest?.v ?? 0) !== body.baseVersionNo) {
+        throw new HTTPException(409, { message: 'DOCUMENT_VERSION_CONFLICT' });
+      }
+    }
+
+    const newContent = body.content ?? existing.content;
+    const wordCount = newContent ? [...newContent.matchAll(/[\p{L}\p{N}]/gu)].length : 0;
+    const crypto = await import('crypto');
+    const newHash = crypto.createHash('sha256').update(newContent ?? '').digest('hex');
+
+    // 标签清洗：trim 去空、去重、上限 8 个（PLAN 3.4 标签三维）
+    const newTags =
+      body.tags === undefined
+        ? existing.tags
+        : [...new Set(body.tags.map((t) => t.trim()).filter(Boolean))].slice(0, 8);
+
+    // 行级简化 diff：共同前缀/后缀之间的行视为删+改，各取前 4 行防超长
+    function buildChangedSummary(): { lines: string[] } | null {
+      if ((existing.content ?? '') === (newContent ?? '')) return null;
+      const a = (existing.content ?? '').split('\n');
+      const b = (newContent ?? '').split('\n');
+      let start = 0;
+      while (start < a.length && start < b.length && a[start] === b[start]) start++;
+      let endA = a.length;
+      let endB = b.length;
+      while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+        endA--;
+        endB--;
+      }
+      const removed = a.slice(start, endA);
+      const added = b.slice(start, endB);
+      const lines = [
+        ...removed.slice(0, 4).map((l) => `- ${l}`),
+        ...(removed.length > 4 ? [`- …（另有 ${removed.length - 4} 行删除）`] : []),
+        ...added.slice(0, 4).map((l) => `+ ${l}`),
+        ...(added.length > 4 ? [`+ …（另有 ${added.length - 4} 行新增）`] : []),
+      ];
+      return { lines };
+    }
+
+    // 创建版本快照
+    const [maxVersion] = await db
+      .select({ max: sql<number>`coalesce(max(${documentVersions.versionNo}), 0)` })
+      .from(documentVersions)
+      .where(eq(documentVersions.documentId, id));
+    const nextVersion = Number(maxVersion?.max ?? 0) + 1;
+
+    await db.insert(documentVersions).values({
+      documentId: id,
+      versionNo: nextVersion,
+      authorId: userId,
+      message: body.message ?? null,
+      content: newContent ?? '',
+      changedSummary: buildChangedSummary(),
+    });
+
+    // 更新文档
+    const [updated] = await db
+      .update(documents)
+      .set({
+        content: newContent,
+        title: body.title ?? existing.title,
+        tags: newTags,
+        wordCount,
+        contentHash: newHash,
+        status: 'modified',
+        updatedBy: userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(documents.id, id))
+      .returning();
+
+    await db.insert(activities).values({
+      projectId: existing.projectId,
+      actorId: userId,
+      verb: 'edit',
+      targetType: 'document',
+      targetId: existing.id,
+      targetTitle: updated?.title ?? existing.path,
+    });
+
+    // NAS 镜像 + Git 自动提交（平台化扩展）；再向项目房间广播变更（实时互见）
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, existing.projectId)).limit(1);
+    const effects = await docStorageEffects(
+      deps,
+      { id: existing.projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+      existing.path,
+      newContent ?? '',
+      { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+    );
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${existing.projectId}`,
+        event: 'document.updated',
+        payload: { documentId: existing.id, path: existing.path, versionNo: nextVersion, by: meUser?.name ?? '' },
+      },
+    })})`);
+
+    return c.json({ ok: true, document: updated, version: nextVersion, effects });
+  });
+
+  // ---- 文档版本历史（D5 BrowsePage 历史面板） ----
+  app.get('/api/v1/documents/:id/versions', async (c) => {
+    const id = c.req.param('id')!;
+    const [docRow] = await db
+      .select({ projectId: documents.projectId })
+      .from(documents)
+      .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!docRow) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(docRow.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const rows = await db
+      .select({
+        id: documentVersions.id,
+        documentId: documentVersions.documentId,
+        versionNo: documentVersions.versionNo,
+        commitHash: documentVersions.commitHash,
+        authorId: documentVersions.authorId,
+        message: documentVersions.message,
+        changedSummary: documentVersions.changedSummary,
+        createdAt: documentVersions.createdAt,
+        authorName: users.name,
+      })
+      .from(documentVersions)
+      .leftJoin(users, eq(documentVersions.authorId, users.id))
+      .where(eq(documentVersions.documentId, id))
+      .orderBy(desc(documentVersions.versionNo))
+      .limit(50);
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // ---- 新建文档（D6 BrowsePage 新建按钮） ----
+  app.post('/api/v1/projects/:id/documents', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json()) as { path?: string; title?: string; content?: string };
+
+    if (!body.path || !body.path.endsWith('.md'))
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: path must end with .md' });
+
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    const [existing] = await db
+      .select({ id: documents.id })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), eq(documents.path, body.path), isNull(documents.deletedAt)))
+      .limit(1);
+    if (existing) throw new HTTPException(409, { message: 'DOCUMENT_EXISTS' });
+
+    const content = body.content ?? '';
+    const title = body.title ?? content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? body.path.replace(/\.md$/, '');
+    const crypto = await import('crypto');
+    const contentHash = content ? crypto.createHash('sha256').update(content).digest('hex') : null;
+    const wordCount = content ? [...content.matchAll(/[\p{L}\p{N}]/gu)].length : 0;
+
+    const [doc] = await db
+      .insert(documents)
+      .values({
+        projectId,
+        sourceId: null,
+        path: body.path,
+        title,
+        content: content || null,
+        contentHash,
+        status: content ? 'modified' : 'untracked',
+        wordCount,
+        updatedBy: userId,
+      })
+      .returning();
+
+    await db.insert(activities).values({
+      projectId,
+      actorId: userId,
+      verb: 'create',
+      targetType: 'document',
+      targetId: doc!.id,
+      targetTitle: title,
+    });
+
+    // NAS 镜像 + Git 自动提交 + 项目房间广播
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, projectId)).limit(1);
+    const effects = await docStorageEffects(
+      deps,
+      { id: projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+      body.path!,
+      content,
+      { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+    );
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${projectId}`,
+        event: 'document.updated',
+        payload: { documentId: doc!.id, path: body.path, by: meUser?.name ?? '' },
+      },
+    })})`);
+
+    return c.json({ ...doc, effects }, 201);
+  });
+
+  // ---- 删除文档（D7 软删除） ----
+  app.delete('/api/v1/documents/:id', async (c) => {
+    const userId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const [existing] = await db
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(existing.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, id));
+
+    await db.insert(activities).values({
+      projectId: existing.projectId,
+      actorId: userId,
+      verb: 'delete',
+      targetType: 'document',
+      targetId: existing.id,
+      targetTitle: existing.title ?? existing.path,
+    });
+
+    // NAS 镜像删除 + Git 自动提交删除 + 项目房间广播
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, existing.projectId)).limit(1);
+    const effects = await docStorageEffects(
+      deps,
+      { id: existing.projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+      existing.path,
+      null,
+      { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+    );
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${existing.projectId}`,
+        event: 'document.updated',
+        payload: { documentId: existing.id, path: existing.path, deleted: true, by: meUser?.name ?? '' },
+      },
+    })})`);
+
+    return c.json({ ok: true, effects });
+  });
+
+  // ---- PATCH projects/:id（P5 ProjectSettingsPage） ----
+  // 注意：必须直接注册在 app 上 —— Hono 的 app.route() 只合并挂载时刻 projectsRoute
+  // 已有的路由，写在挂载（:181）之后的 projectsRoute.patch 永远不会生效（曾导致 404）。
+  // 项目成员等后补路由同理均直接挂 app（见下）。
+  app.patch('/api/v1/projects/:id', async (c) => {
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json()) as Partial<{
+      name: string;
+      description: string | null;
+      visibility: 'private' | 'team' | 'public';
+      color: string | null;
+    }>;
+
+    // 越权修复：此前 PATCH 无任何校验，任何登录用户（含 team 可见性的隐式读者）可改任意项目
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改项目');
+    }
+
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+    if (body.name !== undefined && body.name.trim()) set.name = body.name.trim();
+    if (body.description !== undefined) set.description = body.description;
+    if (body.visibility !== undefined) set.visibility = body.visibility;
+    if (body.color !== undefined) set.color = body.color;
+
+    if (Object.keys(set).length === 1) {
+      const [current] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+      if (!current) throw new HTTPException(404, { message: 'NOT_FOUND' });
+      return c.json(current);
+    }
+
+    const [updated] = await db
+      .update(projects)
+      .set(set)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .returning();
+    if (!updated) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    const userId = c.get('userId') as string;
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.update',
+      resourceType: 'project',
+      resourceId: projectId,
+    });
+
+    return c.json(updated);
+  });
+
+  // ---- DELETE projects/:id（PLAN 5.2.1：ProjectLayout 更多菜单 / 设置危险区删除项目） ----
+  // 软删（projects.deletedAt）：与 sources/documents 一致，列表与详情查询均带 isNull(deletedAt)
+  // 过滤，删除后项目自然从全站消失；关联文档/数据源不级联物理删除，保留恢复可能。
+  // 同样必须直接注册在 app 上（app.route() 挂载时序陷阱，见上方 PATCH 注释）。
+  app.delete('/api/v1/projects/:id', async (c) => {
+    const projectId = c.req.param('id')!;
+
+    // 越权修复：此前 DELETE 无任何校验，任何登录用户可软删任意项目（比 PATCH 更危险）
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可删除项目');
+    }
+
+    const [project] = await db
+      .select({ id: projects.id, name: projects.name })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    await db
+      .update(projects)
+      .set({ deletedAt: new Date(), updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
+
+    const userId = c.get('userId') as string;
+    await db.insert(activities).values({
+      projectId,
+      actorId: userId,
+      verb: 'delete',
+      targetType: 'project',
+      targetId: projectId,
+      targetTitle: project.name,
+    });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.delete',
+      resourceType: 'project',
+      resourceId: projectId,
+    });
+
+    return c.json({ ok: true });
+  });
+
+  // ---- 项目成员（M2 BrowsePage 协作者展示 + MembersPage） ----
+  // PLAN 5.2.1：补 online/lastActive（由该用户最近 activity 推导，5 分钟内视为在线）
+  app.get('/api/v1/projects/:id/members', async (c) => {
+    const projectId = c.req.param('id')!;
+    // access 复用给响应：myRole 为当前用户在项目内的实际角色（null = 非成员的隐式读者，
+    // 经 team/public 可见性只读访问；全局 admin 兜底为 maintainer），前端据此收起管理控件
+    const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+    denyIfNot(access.canRead);
+    const rows = await db
+      .select({
+        id: projectMembers.id,
+        projectId: projectMembers.projectId,
+        role: projectMembers.role,
+        status: projectMembers.status,
+        joinedAt: projectMembers.createdAt,
+        userId: users.id,
+        name: users.name,
+        email: users.email,
+        avatarUrl: users.avatarUrl,
+        lastActiveAt: sql<string | null>`(
+          select max(${activities.createdAt}) from ${activities} where ${activities.actorId} = ${users.id}
+        )`,
+      })
+      .from(projectMembers)
+      .leftJoin(users, eq(projectMembers.userId, users.id))
+      .where(eq(projectMembers.projectId, projectId))
+      .orderBy(desc(projectMembers.createdAt));
+    const items = rows.map((m) => {
+      const lastActive = m.lastActiveAt ? new Date(m.lastActiveAt).toISOString() : null;
+      return {
+        ...m,
+        lastActive,
+        online: !!lastActive && Date.now() - new Date(lastActive).getTime() < 5 * 60_000,
+      };
+    });
+    return c.json({ items, total: items.length, myRole: access.role, visibility: access.project.visibility });
+  });
+
+  // ---- 邀请成员（M3 MembersPage） ----
+  app.post('/api/v1/projects/:id/members', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json()) as { email?: string; role?: 'owner' | 'maintainer' | 'editor' | 'guest' };
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可管理成员');
+    }
+    if (!body.email) throw new HTTPException(400, { message: 'VALIDATION_FAILED: email required' });
+    const role = body.role ?? 'guest';
+    if (!['owner', 'maintainer', 'editor', 'guest'].includes(role))
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: invalid role' });
+
+    // 检查项目存在
+    const [project] = await db.select().from(projects).where(and(eq(projects.id, projectId), isNull(projects.deletedAt))).limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    // 被邀请用户必须存在（种子场景下只有 admin）
+    const [targetUser] = await db.select().from(users).where(eq(users.email, body.email)).limit(1);
+    if (!targetUser) throw new HTTPException(404, { message: 'USER_NOT_FOUND' });
+
+    // 不能邀请自己
+    if (targetUser.id === userId) throw new HTTPException(400, { message: 'CANNOT_ADD_SELF' });
+
+    // 检查是否已是成员
+    const [existing] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, targetUser.id)))
+      .limit(1);
+    if (existing) throw new HTTPException(409, { message: 'ALREADY_MEMBER' });
+
+    const [member] = await db
+      .insert(projectMembers)
+      .values({ projectId, userId: targetUser.id, role, invitedBy: userId })
+      .returning();
+
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.share_grant',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { target: targetUser.email, role },
+    });
+
+    await db.insert(activities).values({
+      projectId,
+      actorId: userId,
+      verb: 'invite',
+      targetType: 'user',
+      targetId: targetUser.id,
+      targetTitle: targetUser.name,
+      meta: { role },
+    });
+
+    return c.json(member, 201);
+  });
+
+  // ---- 角色变更 / 移除成员（M4 MembersPage） ----
+  app.put('/api/v1/projects/:id/members/:uid', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const targetUid = c.req.param('uid')!;
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可管理成员');
+    }
+    const body = (await c.req.json()) as { role?: 'owner' | 'maintainer' | 'editor' | 'guest'; remove?: boolean };
+
+    const [member] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, targetUid)))
+      .limit(1);
+    if (!member) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    if (body.remove) {
+      // 防止移除 owner
+      if (member.role === 'owner') throw new HTTPException(400, { message: 'CANNOT_REMOVE_OWNER' });
+      await db.delete(projectMembers).where(eq(projectMembers.id, member.id));
+      await db.insert(activities).values({
+        projectId,
+        actorId: userId,
+        verb: 'remove',
+        targetType: 'user',
+        targetId: targetUid,
+      });
+      return c.json({ ok: true });
+    }
+
+    if (body.role) {
+      if (!['owner', 'maintainer', 'editor', 'guest'].includes(body.role))
+        throw new HTTPException(400, { message: 'VALIDATION_FAILED: invalid role' });
+      const [updated] = await db
+        .update(projectMembers)
+        .set({ role: body.role })
+        .where(eq(projectMembers.id, member.id))
+        .returning();
+      return c.json(updated);
+    }
+
+    throw new HTTPException(400, { message: 'VALIDATION_FAILED: role or remove required' });
+  });
+
+  // ---- 知识图谱（G1 GraphPage） ----
+  app.get('/api/v1/projects/:id/graph', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    // 节点 = 项目下所有文档
+    const docs = await db
+      .select({ id: documents.id, path: documents.path, title: documents.title })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
+
+    const docIds = docs.map((d) => d.id);
+
+    // 边：fromDocumentId 在本项目内（toDocumentId 可以在外部）
+    let links: Array<{ id: string; fromDocumentId: string; toDocumentId: string | null; externalUrl: string | null; broken: boolean }> = [];
+    if (docIds.length > 0) {
+      const { inArray } = await import('drizzle-orm');
+      links = await db
+        .select({
+          id: documentLinks.id,
+          fromDocumentId: documentLinks.fromDocumentId,
+          toDocumentId: documentLinks.toDocumentId,
+          externalUrl: documentLinks.externalUrl,
+          broken: documentLinks.broken,
+        })
+        .from(documentLinks)
+        .where(inArray(documentLinks.fromDocumentId, docIds));
+    }
+
+    return c.json({ nodes: docs, edges: links });
+  });
+
+  // ---- 发布站点（PUB1 PublishPage） ----
+  app.get('/api/v1/projects/:id/publish-sites', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const rows = await db
+      .select()
+      .from(publishSites)
+      .where(eq(publishSites.projectId, projectId));
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // ---- 发布历史（PUB2 PublishPage） ----
+  app.get('/api/v1/publish-sites/:id/jobs', async (c) => {
+    const siteId = c.req.param('id')!;
+    const [siteRow] = await db
+      .select({ projectId: publishSites.projectId })
+      .from(publishSites)
+      .where(eq(publishSites.id, siteId))
+      .limit(1);
+    if (!siteRow) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(siteRow.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const rows = await db
+      .select({
+        id: publishJobs.id,
+        versionNo: publishJobs.versionNo,
+        status: publishJobs.status,
+        commitHash: publishJobs.commitHash,
+        error: publishJobs.error,
+        createdAt: publishJobs.createdAt,
+        finishedAt: publishJobs.finishedAt,
+      })
+      .from(publishJobs)
+      .where(eq(publishJobs.siteId, siteId))
+      .orderBy(desc(publishJobs.createdAt))
+      .limit(30);
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // ---- 发布模板列表（PLAN 3.5/5.2.1：PublishPage 模板网格 + Themes「在发布中使用」） ----
+  app.get('/api/v1/publish-templates', (c) => c.json({ items: PUBLISH_TEMPLATES }));
+
+  // ---- 创建发布站点（PUB0 PublishPage 空态按钮） ----
+  app.post('/api/v1/projects/:id/publish-sites', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json()) as {
+      slug?: string;
+      addressMode?: 'subdomain' | 'subpath';
+      schedule?: 'manual' | 'daily' | 'git-push';
+      autoSync?: boolean;
+      templateId?: string;
+    };
+
+    const [project] = await db
+      .select({ id: projects.id, name: projects.name })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可配置发布');
+    }
+
+    // 模板 id 校验：必须存在于服务端权威列表（PLAN 3.5 templateId 接线）；参数校验先于冲突检查
+    if (body.templateId && !PUBLISH_TEMPLATES.some((t) => t.id === body.templateId)) {
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: unknown templateId' });
+    }
+
+    const [dup] = await db
+      .select({ id: publishSites.id })
+      .from(publishSites)
+      .where(eq(publishSites.projectId, projectId))
+      .limit(1);
+    if (dup) throw new HTTPException(409, { message: 'SITE_EXISTS' });
+
+    const slugify = (s: string): string =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40) || 'site';
+    let slug = body.slug?.trim() ? slugify(body.slug) : slugify(project.name);
+    const [clash] = await db
+      .select({ id: publishSites.id })
+      .from(publishSites)
+      .where(eq(publishSites.slug, slug))
+      .limit(1);
+    if (clash) slug = `${slug}-${Date.now().toString(36).slice(-4)}`;
+
+    const [site] = await db
+      .insert(publishSites)
+      .values({
+        projectId,
+        mode: 'hosted',
+        slug,
+        addressMode: body.addressMode ?? 'subpath',
+        schedule: body.schedule ?? 'manual',
+        autoSync: body.autoSync ?? false,
+        templateId: body.templateId ?? null,
+      })
+      .returning();
+
+    await db.insert(activities).values({
+      projectId,
+      actorId: userId,
+      verb: 'create',
+      targetType: 'publish_site',
+      targetId: site.id,
+      targetTitle: slug,
+    });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'publish_site.create',
+      resourceType: 'publish_site',
+      resourceId: site.id,
+    });
+    return c.json(site, 201);
+  });
+
+  // ---- PATCH publish-sites/:id（PLAN 5.2.1：PublishPage 站点设置编辑） ----
+  // 可改字段：slug（访问路径，全局唯一，冲突 409）、addressMode（subdomain/subpath）、
+  // schedule（manual/daily/git-push）、autoSync（布尔）。customDomain 涉及 TLS 签发流程，
+  // 暂不在此端点开放。直接挂 app（挂载时序陷阱同上）。
+  app.patch('/api/v1/publish-sites/:id', async (c) => {
+    const userId = c.get('userId') as string;
+    const siteId = c.req.param('id')!;
+    const body = (await c.req.json()) as Partial<{
+      slug: string;
+      addressMode: 'subdomain' | 'subpath';
+      schedule: 'manual' | 'daily' | 'git-push';
+      autoSync: boolean;
+      templateId: string | null;
+    }>;
+
+    const [site] = await db
+      .select()
+      .from(publishSites)
+      .where(eq(publishSites.id, siteId))
+      .limit(1);
+    if (!site) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(site.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改发布配置');
+    }
+
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+
+    if (body.slug !== undefined) {
+      const slugify = (s: string): string =>
+        s
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 40) || 'site';
+      const slug = slugify(body.slug);
+      if (slug !== site.slug) {
+        const [clash] = await db
+          .select({ id: publishSites.id })
+          .from(publishSites)
+          .where(and(eq(publishSites.slug, slug), ne(publishSites.id, siteId)))
+          .limit(1);
+        if (clash) throw new HTTPException(409, { message: 'SLUG_EXISTS' });
+        set.slug = slug;
+      }
+    }
+    if (body.addressMode !== undefined) {
+      if (body.addressMode !== 'subdomain' && body.addressMode !== 'subpath') {
+        throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+      }
+      set.addressMode = body.addressMode;
+    }
+    if (body.schedule !== undefined) {
+      if (body.schedule !== 'manual' && body.schedule !== 'daily' && body.schedule !== 'git-push') {
+        throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+      }
+      set.schedule = body.schedule;
+    }
+    if (body.autoSync !== undefined) set.autoSync = !!body.autoSync;
+    if (body.templateId !== undefined) {
+      // 模板 id 校验：null 允许（清除模板），非 null 必须在权威列表内
+      if (body.templateId !== null && !PUBLISH_TEMPLATES.some((t) => t.id === body.templateId)) {
+        throw new HTTPException(400, { message: 'VALIDATION_FAILED: unknown templateId' });
+      }
+      set.templateId = body.templateId;
+    }
+
+    // 空更新：直接回读当前行（与 PATCH projects 行为一致）
+    if (Object.keys(set).length === 1) return c.json(site);
+
+    const [updated] = await db
+      .update(publishSites)
+      .set(set)
+      .where(eq(publishSites.id, siteId))
+      .returning();
+
+    await db.insert(activities).values({
+      projectId: site.projectId,
+      actorId: userId,
+      verb: 'update',
+      targetType: 'publish_site',
+      targetId: siteId,
+      targetTitle: updated.slug ?? siteId,
+    });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'publish_site.update',
+      resourceType: 'publish_site',
+      resourceId: siteId,
+    });
+
+    return c.json(updated);
+  });
+
+  // ---- 触发发布构建（PUB3 PublishPage 立即发布） ----
+  app.post('/api/v1/publish-sites/:id/jobs', async (c) => {
+    const userId = c.get('userId') as string;
+    const siteId = c.req.param('id')!;
+    const [site] = await db.select().from(publishSites).where(eq(publishSites.id, siteId)).limit(1);
+    if (!site) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(site.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可触发发布');
+    }
+
+    // 同分钟重复触发去重（pg-boss v10 id 必须 UUID，幂等用 singletonKey）
+    const key = `publish:${siteId}:manual`;
+    await boss.send('publish', { siteId, trigger: 'manual' }, { singletonKey: key, singletonMinutes: 1 });
+    await db.insert(activities).values({
+      projectId: site.projectId,
+      actorId: userId,
+      verb: 'publish',
+      targetType: 'publish_site',
+      targetId: siteId,
+      targetTitle: site.slug ?? siteId,
+    });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'publish_site.trigger',
+      resourceType: 'publish_site',
+      resourceId: siteId,
+      meta: { slug: site.slug, trigger: 'manual' },
+    });
+    return c.json({ ok: true, siteId, queued: true }, 202);
+  });
+
+  registerStarterRoutes(app, deps);
+
+  // ---- 发布预览（EXT-PLATFORM Step1 / ADR-P2）：与 worker 发布共用 @ewiki/render ----
+  // 同步渲染、不落盘、无缓存（原型级文档量可接受）。docId 缺省渲染项目索引页。
+  app.get('/api/v1/projects/:id/publish-preview', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const docId = c.req.query('docId');
+    const templateId = c.req.query('templateId');
+    const accent = c.req.query('accent');
+    const sidebarSide = c.req.query('sidebarSide') === 'right' ? 'right' : 'left';
+
+    const [project] = await db
+      .select({ name: projects.name })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    if (docId) {
+      const [doc] = await db
+        .select({ path: documents.path, title: documents.title, content: documents.content })
+        .from(documents)
+        .where(and(eq(documents.id, docId), eq(documents.projectId, projectId), isNull(documents.deletedAt)))
+        .limit(1);
+      if (!doc) throw new HTTPException(404, { message: 'NOT_FOUND' });
+      const html = renderDocPage(
+        { siteTitle: project.name, docPath: doc.path, docTitle: doc.title ?? doc.path, content: doc.content },
+        { templateId, accent, sidebarSide },
+      );
+      return c.json({ html, scope: 'document' });
+    }
+
+    // 索引页预览：文档清单 + 模板 chrome
+    const rows = await db
+      .select({ path: documents.path, title: documents.title, content: documents.content })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)))
+      .orderBy(documents.path)
+      .limit(50);
+    const first = rows[0];
+    const html = renderDocPage(
+      {
+        siteTitle: project.name,
+        docPath: first?.path ?? 'index',
+        docTitle: first?.title ?? `${project.name} · 文档索引`,
+        content:
+          first?.content ?? (rows.map((r, i) => `${i + 1}. ${r.title ?? r.path}`).join('\n') || '暂无文档'),
+      },
+      { templateId, accent, sidebarSide },
+    );
+    return c.json({ html, scope: 'index' });
+  });
+
+  // ---- AI 分类（EXT-PLATFORM Step2 / ADR-P1）：入队 + 建议读取 ----
+  // 同分钟重复触发去重（pg-boss v10 id 必须 UUID，幂等用 singletonKey）
+  app.post('/api/v1/projects/:id/ai-classify', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+    const [project] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    // 同分钟重复触发去重（pg-boss v10 id 必须 UUID，幂等用 singletonKey，与 sync/publish 同款）
+    const key = `${projectId}:${Math.floor(Date.now() / 60_000)}`;
+    const jobId = await boss.send('ai-classify', { projectId, startedBy: userId }, { singletonKey: key, singletonMinutes: 1 });
+    await db.insert(auditLogs).values({ actorId: userId, action: 'ai_classify.start', resourceType: 'project', resourceId: projectId });
+    return c.json({ jobId: jobId ?? '', deduped: jobId === null }, jobId === null ? 200 : 202);
+  });
+
+  app.get('/api/v1/projects/:id/ai-classify-runs', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const rows = await db
+      .select()
+      .from(aiClassifyRuns)
+      .where(eq(aiClassifyRuns.projectId, projectId))
+      .orderBy(desc(aiClassifyRuns.createdAt))
+      .limit(50);
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // ---- 外部导入（EXT-PLATFORM Step2 / ADR-P1）：建任务 + 入队 + 进度查询 ----
+  // importer 白名单 = worker 注册表当前支持集合；notion/obsidian 深度连接器后期同接口适配器接入。
+  const SUPPORTED_IMPORTERS = ['folder', 'web-crawler'] as const;
+
+  app.post('/api/v1/projects/:id/import-jobs', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json()) as { importer?: string; params?: Record<string, unknown> };
+    const importer = body.importer ?? '';
+    if (!SUPPORTED_IMPORTERS.includes(importer as (typeof SUPPORTED_IMPORTERS)[number])) {
+      throw new HTTPException(400, { message: 'NOT_IMPLEMENTED: importer 仅支持 folder / web-crawler' });
+    }
+    const params = body.params ?? {};
+    if (importer === 'folder' && !params.path) throw new HTTPException(400, { message: 'VALIDATION_FAILED: params.path required' });
+    if (importer === 'web-crawler' && !params.url) throw new HTTPException(400, { message: 'VALIDATION_FAILED: params.url required' });
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    const [project] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    const [job] = await db
+      .insert(importJobs)
+      .values({ projectId, importer, params })
+      .returning();
+    await boss.send('import', {
+      projectId,
+      importJobId: job.id,
+      importer,
+      startedBy: userId,
+      params,
+    });
+    await db.insert(auditLogs).values({ actorId: userId, action: 'import.start', resourceType: 'project', resourceId: projectId, meta: { importer } });
+    return c.json(job, 201);
+  });
+
+  app.get('/api/v1/projects/:id/import-jobs', async (c) => {
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const rows = await db
+      .select()
+      .from(importJobs)
+      .where(eq(importJobs.projectId, projectId))
+      .orderBy(desc(importJobs.createdAt))
+      .limit(20);
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  app.get('/api/v1/import-jobs/:id', async (c) => {
+    const [job] = await db
+      .select()
+      .from(importJobs)
+      .where(eq(importJobs.id, c.req.param('id')!))
+      .limit(1);
+    if (!job) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(job.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    return c.json(job);
+  });
+
+  // ---- 通知中心（EXT-PLATFORM Step3 / ADR-P3）：个人收件箱读侧 ----
+  // 游标分页（createdAt）+ 未读计数；写侧由 worker/server 事件点负责（ADR-P3 事件准入）。
+  app.get('/api/v1/notifications', async (c) => {
+    const userId = c.get('userId') as string;
+    const limit = Math.min(Number(c.req.query('limit') ?? 20) || 20, 50);
+    const before = c.req.query('before'); // ISO createdAt 游标
+    const unreadOnly = c.req.query('unread') === 'true';
+
+    const conditions = [eq(notifications.userId, userId)];
+    if (unreadOnly) conditions.push(isNull(notifications.readAt));
+    if (before) conditions.push(lt(notifications.createdAt, new Date(before)));
+
+    const items = await db
+      .select()
+      .from(notifications)
+      .where(and(...conditions))
+      .orderBy(desc(notifications.createdAt))
+      .limit(limit);
+    const [unreadRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(notifications)
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+
+    return c.json({
+      items,
+      unread: Number(unreadRow?.count ?? 0),
+      nextCursor: items.length === limit ? items[items.length - 1]!.createdAt : null,
+    });
+  });
+
+  // read-all 注册在 :id/read 之前，避免参数路由吞噬字面量路径
+  app.post('/api/v1/notifications/read-all', async (c) => {
+    const userId = c.get('userId') as string;
+    const updated = await db
+      .update(notifications)
+      .set({ readAt: new Date() })
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)))
+      .returning({ id: notifications.id });
+    return c.json({ updated: updated.length });
+  });
+
+  app.post('/api/v1/notifications/:id/read', async (c) => {
+    const userId = c.get('userId') as string;
+    const [updated] = await db
+      .update(notifications)
+      .set({ readAt: new Date() })
+      .where(and(eq(notifications.id, c.req.param('id')!), eq(notifications.userId, userId))) // 只允许操作本人行
+      .returning();
+    if (!updated) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    return c.json({ ok: true });
+  });
+
+  // ---- 开放接口：Caddy on_demand TLS 站点校验（SDD 5.3 / O1 前置） ----
+  app.get('/api/v1/open/site-check', async (c) => {
+    const domain = c.req.query('domain') ?? '';
+    if (!domain) return c.text('', 404);
+
+    const suffix = `.${config.EWIKI_BASE_DOMAIN}`;
+    const slug = domain.endsWith(suffix) ? domain.slice(0, -suffix.length) : null;
+
+    const byCustom = await db
+      .select({ id: publishSites.id })
+      .from(publishSites)
+      .where(eq(publishSites.customDomain, domain))
+      .limit(1);
+    if (byCustom.length > 0) return c.text('ok', 200);
+
+    if (slug) {
+      const bySlug = await db
+        .select({ id: publishSites.id })
+        .from(publishSites)
+        .where(eq(publishSites.slug, slug))
+        .limit(1);
+      if (bySlug.length > 0) return c.text('ok', 200);
+    }
+    return c.text('', 404);
+  });
+
+  // ---- 平台化扩展路由（需求 1-10）：注册/系统管理/存储配置/建库向导/站点公开访问 ----
+  registerPlatformRoutes(app, deps);
+}

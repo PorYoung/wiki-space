@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1788794140424,
+      "tag": "0000_flippant_deadpool",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788884026647,
+      "tag": "0001_wooden_red_shift",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788961965800,
+      "tag": "0002_lumpy_joystick",
+      "breakpoints": true
+    }
+  ]
+}

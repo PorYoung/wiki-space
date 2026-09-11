@@ -1,0 +1,315 @@
+{
+  "startedAt": "2026-09-09T14:18:57.990Z",
+  "durationMs": 18884,
+  "total": 51,
+  "passed": 51,
+  "failed": 0,
+  "results": [
+    {
+      "id": "P0",
+      "name": "健康检查 /healthz",
+      "pass": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "id": "P0b",
+      "name": "LDAP 预留接口（enabled=false）",
+      "pass": true,
+      "detail": "{\"enabled\":false,\"mode\":\"reserved\",\"message\":\"企业 LDAP 自动登录注册为预留接口，本期开放邮箱注册；字段 sso_subject 已预留外部主体映射。\"}"
+    },
+    {
+      "id": "P1a",
+      "name": "注册成功并可登录",
+      "pass": true,
+      "detail": "registered=false"
+    },
+    {
+      "id": "P1b",
+      "name": "注册即得个人示例知识库",
+      "pass": true,
+      "detail": "id=e6a46320-8241-4945-9217-31ded086c446 name=Alice的示例知识库"
+    },
+    {
+      "id": "P1c",
+      "name": "示例知识库含示例文档",
+      "pass": true,
+      "detail": "4 篇"
+    },
+    {
+      "id": "P1d",
+      "name": "示例文档已落盘 NAS（模拟盘）",
+      "pass": true,
+      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\Alice的示例知识库-e6a46320"
+    },
+    {
+      "id": "P1e",
+      "name": "重复注册被拒（409）",
+      "pass": true,
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"EMAIL_EXISTS: 该邮箱已注册\",\"requestId\":\"ecdfca19-142d-4e95-bec4-334f3a0aa631\"}"
+    },
+    {
+      "id": "P1f",
+      "name": "弱密码注册被拒（400）",
+      "pass": true,
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"VALIDATION_FAILED: 密码至少 8 位\",\"requestId\":\"fa7cb7d0-0b18-4f79-8245-12f72efc0cd5\"}"
+    },
+    {
+      "id": "P2",
+      "name": "多用户注册（bob/carol）",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P3",
+      "name": "越权读取被拦截（403 且不泄露数据）",
+      "pass": true,
+      "detail": "status=403 body={\"code\":\"HTTP_ERROR\",\"message\":\"FORBIDDEN\",\"requestId\":\"2cac21ec-d0a4-46eb-bbcf-d698e268eb3a\"}"
+    },
+    {
+      "id": "P4a",
+      "name": "新建云文档库（模板 project-space）",
+      "pass": true,
+      "detail": "{\"project\":{\"id\":\"9bd6467a-820a-4351-aa99-e70a2e69a679\",\"name\":\"产品蓝图-mtu6p8pg\",\"description\":\"e2e 云文档库\",\"color\":null,\"visibility\":\"private\",\"template\":\"project-"
+    },
+    {
+      "id": "P4b",
+      "name": "模板文档落盘 NAS 且目录结构一致",
+      "pass": true,
+      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\产品蓝图-mtu6p8pg-9bd6467a"
+    },
+    {
+      "id": "P4c",
+      "name": "新建文档（POST documents）",
+      "pass": true,
+      "detail": "id=f9e291a2-7f2e-4ab1-88ff-ca8479fdcb5e"
+    },
+    {
+      "id": "P4d",
+      "name": "新建文档同步落盘 NAS",
+      "pass": true,
+      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\产品蓝图-mtu6p8pg-9bd6467a"
+    },
+    {
+      "id": "P4e",
+      "name": "版本冲突保护（409）",
+      "pass": true,
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"DOCUMENT_VERSION_CONFLICT\",\"requestId\":\"a9260bfd-cf22-4a07-b0c9-0edce33d58b0\"}"
+    },
+    {
+      "id": "P4f",
+      "name": "文档更新成功（版本 v2）",
+      "pass": true,
+      "detail": "version=1"
+    },
+    {
+      "id": "P4g",
+      "name": "更新内容与 NAS 落盘一致（三方一致）",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P5a",
+      "name": "添加连接配置并验证成功",
+      "pass": true,
+      "detail": "连接成功：wikibot（@wikibot）"
+    },
+    {
+      "id": "P5b",
+      "name": "错误令牌验证失败且给出明确原因",
+      "pass": true,
+      "detail": "连接已保存但验证失败：访问令牌无效或权限不足（401/403），请检查 Token"
+    },
+    {
+      "id": "P5c",
+      "name": "非 Git 类型连接被拒（仅支持 GitLab/Gitea）",
+      "pass": true,
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"VALIDATION_FAILED: 目前仅支持 GitLab（及兼容演示 Gitea）连接\",\"requestId\":\"0261f06f-1303-46d3-b185-934"
+    },
+    {
+      "id": "P6a",
+      "name": "Git 仓库自动初始化/关联",
+      "pass": true,
+      "detail": "wikibot/ewiki-e2e-wiki-mtu6p8pg created=true 仓库不存在，已自动初始化并完成首次提交"
+    },
+    {
+      "id": "P6b",
+      "name": "Git 服务端已存在该仓库",
+      "pass": true,
+      "detail": "wikibot/ewiki-e2e-wiki-mtu6p8pg"
+    },
+    {
+      "id": "P6c",
+      "name": "平台已克隆工作副本",
+      "pass": true,
+      "detail": "repos/bdb17aaa-2b51-42ba-a296-2248ad4449a7"
+    },
+    {
+      "id": "P6d",
+      "name": "平台内新建文档自动提交并推送",
+      "pass": true,
+      "detail": "commit=cd4615c13d err=-"
+    },
+    {
+      "id": "P6e",
+      "name": "Git 服务端可查到提交历史",
+      "pass": true,
+      "detail": "commits=2"
+    },
+    {
+      "id": "P6f",
+      "name": "更新文档自动提交推送",
+      "pass": true,
+      "detail": "commit=bbeb035bb7"
+    },
+    {
+      "id": "P6g",
+      "name": "Git 服务端文件内容与平台一致",
+      "pass": true,
+      "detail": "status=200"
+    },
+    {
+      "id": "P6h",
+      "name": "关闭自动初始化且仓库不存在 → 明确 404",
+      "pass": true,
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"仓库不存在（自动初始化未开启）：请先在 Git 服务端创建仓库，或开启自动初始化\",\"requestId\":\"ddfde89e-60ef-4488-861c-05d0cea173fa\"}"
+    },
+    {
+      "id": "P7a",
+      "name": "分享项目空间给 bob（可编辑）",
+      "pass": true,
+      "detail": "{\"id\":\"c57cd3f0-e820-4d77-978b-1719c4982862\",\"projectId\":\"9bd6467a-820a-4351-aa99-e70a2e69a679\",\"userId\":\"dcede4ac-d617-"
+    },
+    {
+      "id": "P7b",
+      "name": "被分享者可读取",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P7c",
+      "name": "被分享者可编辑（多人协作写入成功）",
+      "pass": true,
+      "detail": "version=2"
+    },
+    {
+      "id": "P7d",
+      "name": "编辑者无权管理成员（403）",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "id": "P7e",
+      "name": "分享给 carol（只读 guest）",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P7f",
+      "name": "guest 可读",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P7g",
+      "name": "guest 编辑被拦截（403 只读）",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "id": "P8a",
+      "name": "创建发布站点（subpath + t-docs）",
+      "pass": true,
+      "detail": "{\"id\":\"f6ca9d08-b69f-4992-b024-bff282b41c69\",\"projectId\":\"9bd6467a-820a-4351-aa99-e70a2e69a679\",\"mode\":\"hosted\",\"slug\":\"ewiki-e2e-site-pl36\""
+    },
+    {
+      "id": "P8b",
+      "name": "触发发布任务（入队）",
+      "pass": true,
+      "detail": "{\"ok\":true,\"siteId\":\"f6ca9d08-b69f-4992-b024-bff282b41c69\",\"queued\":true}"
+    },
+    {
+      "id": "P8c",
+      "name": "worker 渲染并发布成功",
+      "pass": true,
+      "detail": "{\"id\":\"da28f6d9-708d-4a01-8ab9-1e9dda99d9a1\",\"versionNo\":1,\"status\":\"published\",\"commitHash\":null,\"error\":null,\"createdAt\":\"2026-09-09T14:19:16.464Z\",\"finishedA"
+    },
+    {
+      "id": "P8d",
+      "name": "平台子路径匿名可访问且排版正常",
+      "pass": true,
+      "detail": "status=200 bytes=1136"
+    },
+    {
+      "id": "P8e",
+      "name": "站点资源写入用户分配存储目录",
+      "pass": true,
+      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\sites\\ewiki-e2e-site"
+    },
+    {
+      "id": "P9a",
+      "name": "管理员登录",
+      "pass": "eyJhbGciOiJIUzI1NiJ9.eyJnbG9iYWxSb2xlIjoiYWRtaW4iLCJzdWIiOiI1ZDQ4ODQzNC0xZDk1LTQ1YjUtODhhMS1lNmZjYjZmNmZhMWIiLCJpYXQiOjE3ODg5NjM1NTYsImV4cCI6MTc4ODk2NDQ1Nn0.WbQ6NEMf7XKaZR0lAE195pVzwqe9QunTlLcmvPvPAIA",
+      "detail": "admin"
+    },
+    {
+      "id": "P9b",
+      "name": "用户管理列表",
+      "pass": true,
+      "detail": "4 个用户"
+    },
+    {
+      "id": "P9c",
+      "name": "非管理员访问系统管理被拒（403）",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "id": "P9d",
+      "name": "禁用用户即时生效（403）",
+      "pass": true,
+      "detail": "after disable: 403"
+    },
+    {
+      "id": "P9e",
+      "name": "启用用户恢复访问",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P9f",
+      "name": "管理员重置密码后可登录",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "P9g",
+      "name": "数据库状态查看（版本/体积/表行数）",
+      "pass": true,
+      "detail": "PostgreSQL 16.15 (Debian 16.15-1.pgdg13+2) · 12 tables"
+    },
+    {
+      "id": "P9h",
+      "name": "存储基础设施查看（NAS 根目录可写 + 用户占用）",
+      "pass": true,
+      "detail": "{\"user\":\"Alice\",\"bytes\":42408,\"files\":80}"
+    },
+    {
+      "id": "P9i",
+      "name": "存储根目录运行时切换并落盘验证",
+      "pass": true,
+      "detail": "D:/works/wiki-space/ewiki/data-nas2"
+    },
+    {
+      "id": "P9j",
+      "name": "切回原存储目录",
+      "pass": true,
+      "detail": "D:/works/wiki-space/ewiki/data-nas"
+    },
+    {
+      "id": "P9k",
+      "name": "关键操作审计台账（注册/建库/连接/自动提交/分享/发布/禁用）",
+      "pass": true,
+      "detail": "110 条台账齐全"
+    }
+  ]
+}

@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ewiki 企业知识管理平台 · 首期验收记录</title>
+<style>
+  :root{
+    --paper:#f7f5ef; --paper-2:#f1eee5; --ink:#26241f; --ink-2:#5c584d; --ink-3:#8b8577;
+    --line:#e2ddd0; --line-strong:#c9c3b2; --accent:#2f6b5e; --accent-ink:#24544a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--paper);color:var(--ink);font:15px/1.65 -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif}
+  ::selection{background:var(--accent);color:#fff}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 32px}
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--line-strong)}
+  a:hover{border-bottom-color:var(--accent)}
+  /* ---------- 封面 ---------- */
+  header.cover{padding:72px 0 40px;border-bottom:3px double var(--line-strong)}
+  .kicker{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);margin-bottom:18px}
+  h1{font-family:Georgia,"Songti SC","STSong","SimSun",serif;font-weight:400;font-size:44px;line-height:1.15;letter-spacing:-0.01em;max-width:20em}
+  .cover-meta{margin-top:26px;display:flex;flex-wrap:wrap;gap:28px;font-size:13px;color:var(--ink-2)}
+  .cover-meta b{display:block;font-size:11px;letter-spacing:.1em;color:var(--ink-3);font-weight:400;margin-bottom:2px;text-transform:uppercase}
+  .verdict{margin-top:30px;display:flex;align-items:baseline;gap:14px}
+  .verdict .n{font-family:Georgia,serif;font-size:56px;color:var(--accent-ink);line-height:1}
+  .verdict .t{font-size:14px;color:var(--ink-2);max-width:34em}
+  /* ---------- 布局 ---------- */
+  .layout{display:grid;grid-template-columns:200px 1fr;gap:48px;padding:40px 0 80px}
+  nav.toc{position:sticky;top:36px;align-self:start;font-size:13px}
+  nav.toc .h{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:12px}
+  nav.toc a{display:block;padding:5px 0;border:0;color:var(--ink-2)}
+  nav.toc a:hover{color:var(--accent-ink)}
+  nav.toc a .no{color:var(--ink-3);font-family:Georgia,serif;margin-right:8px}
+  section{margin-bottom:64px}
+  h2{font-family:Georgia,"Songti SC","STSong","SimSun",serif;font-weight:400;font-size:27px;letter-spacing:-0.005em;margin-bottom:6px}
+  h2 .no{color:var(--accent-ink);font-size:17px;margin-right:10px;font-variant-numeric:tabular-nums}
+  .lede{color:var(--ink-2);font-size:14px;max-width:52em;margin-bottom:22px}
+  h3{font-size:14px;font-weight:600;margin:22px 0 10px;letter-spacing:.02em}
+  p{max-width:46em}
+  p+p{margin-top:10px}
+  .rule{height:1px;background:var(--line);margin:26px 0;max-width:46em}
+  /* ---------- 表格 ---------- */
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:14px 0 8px}
+  th{font-weight:600;text-align:left;font-size:12px;color:var(--ink-2);border-bottom:1px solid var(--line-strong);padding:8px 10px 8px 0}
+  td{border-bottom:1px solid var(--line);padding:9px 10px 9px 0;vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  td.code, .code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:12px}
+  .ok{color:var(--accent-ink);font-weight:600}
+  .muted{color:var(--ink-3)}
+  /* ---------- 卡片化信息条（hairline，非 dashboard） ---------- */
+  .ledger{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid var(--line-strong);margin:18px 0 6px}
+  .ledger div{padding:14px 16px;border-right:1px solid var(--line)}
+  .ledger div:last-child{border-right:0}
+  .ledger .v{font-family:Georgia,serif;font-size:24px}
+  .ledger .k{font-size:11px;color:var(--ink-3);letter-spacing:.08em;margin-top:2px}
+  /* ---------- 引用块 ---------- */
+  blockquote{border-left:2px solid var(--line-strong);padding:2px 0 2px 16px;color:var(--ink-2);margin:16px 0;max-width:46em;font-size:14px}
+  .foot{border-top:1px solid var(--line);margin-top:24px;padding:18px 0 60px;display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px}
+  ul.tight{margin:8px 0 0 18px}
+  ul.tight li{margin:5px 0}
+  @media (max-width:860px){.layout{grid-template-columns:1fr}nav.toc{position:static;display:none}h1{font-size:34px}.ledger{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="cover">
+  <div class="kicker">ewiki · Enterprise Knowledge Platform · Acceptance Record</div>
+  <h1>企业知识管理平台<br>首期基础需求验收记录</h1>
+  <div class="verdict">
+    <span class="n">51<span style="font-size:26px;color:var(--ink-3)">/51</span></span>
+    <span class="t">端到端自动化断言全部通过（连续 3 轮全绿，含幂等重跑与异常路径）。十项基础需求全部落地并与真实存储、真实 Git 服务端完成闭环验证。</span>
+  </div>
+  <div class="cover-meta">
+    <div><b>验收日期</b>2026-09-09 · Asia/Shanghai</div>
+    <div><b>环境</b>server / worker / realtime · PostgreSQL 16.15 · Gitea 1.27.3 · git 2.55</div>
+    <div><b>脚本</b>ewiki/scripts/e2e-platform.mjs → e2e-report.json</div>
+    <div><b>形态</b>平台服务（Web），本地客户端不在本期范围</div>
+  </div>
+</header>
+
+<div class="layout">
+
+<nav class="toc">
+  <div class="h">目录</div>
+  <a href="#s1"><span class="no">01</span>需求覆盖映射</a>
+  <a href="#s2"><span class="no">02</span>机制与数据流</a>
+  <a href="#s3"><span class="no">03</span>验收标准自检</a>
+  <a href="#s4"><span class="no">04</span>验证数据快照</a>
+  <a href="#s5"><span class="no">05</span>部署与运行</a>
+  <a href="#s6"><span class="no">06</span>备份与回滚演练</a>
+  <a href="#s7"><span class="no">07</span>边界与遗留</a>
+</nav>
+
+<main>
+
+<section id="s1">
+  <h2><span class="no">01</span>需求覆盖映射</h2>
+  <p class="lede">十项基础需求 → 实现落点 → 自动化验收证据。断言编号对应 <span class="code">scripts/e2e-report.json</span>。</p>
+  <table>
+    <tr><th style="width:26%">需求</th><th style="width:42%">实现落点</th><th>验收证据</th></tr>
+    <tr><td>1 · 系统管理页面</td><td>用户管理（禁用/启用/重置密码/角色）、数据库状态（PG 版本·体积·12 张表行数）、存储基础设施（NAS 可写性、按用户占用）、审计台账（操作人/动作/时间筛选）</td><td class="ok">P9a–P9k</td></tr>
+    <tr><td>2 · 云文档落盘模拟 NAS</td><td>文档增删改同步镜像 <span class="code">&lt;NAS&gt;/users/&lt;用户&gt;/projects/&lt;库&gt;/…</span>，结构一一对应；根目录可运行时切换（平台设置 + 审计）</td><td class="ok">P1d / P4b / P4d / P4g / P9i–P9j</td></tr>
+    <tr><td>3 · 注册 + LDAP 预留</td><td>注册页签 + <span class="code">POST /auth/register</span>；LDAP 预留路由、<span class="code">sso_subject</span> 字段、适配器位（未启用）</td><td class="ok">P1a / P1e / P1f / P0b</td></tr>
+    <tr><td>4 · 注册即得示例知识库</td><td>注册事务内创建「××的示例知识库」（4 篇示例文档并落盘 NAS）</td><td class="ok">P1b / P1c / P1d</td></tr>
+    <tr><td>5 · 模板/空库 × 云文档/Git</td><td><span class="code">/projects/new</span> 三步向导；模板：空 / 个人示例 / 团队知识库 / 项目空间 / 6 个 starter-pack</td><td class="ok">P4a / P6a</td></tr>
+    <tr><td>6 · 存储配置页面</td><td>GitLab（REST v4）与 Gitea（兼容演示）连接的增删改验；Token AES-256-GCM 加密落库</td><td class="ok">P5a / P5b / P5c</td></tr>
+    <tr><td>7 · 仓库不存在自动初始化</td><td>指定仓库名 + 连接配置；缺失→建仓+模板首推；已存在→关联不覆盖；关自动初始化且缺失→明确 404</td><td class="ok">P6a / P6b / P6h</td></tr>
+    <tr><td>8 · 增删查改自动提交</td><td>保存/删除 → 工作副本 → commit（提交人=操作者）→ push；<span class="code">sync_jobs</span> 留痕；推送失败标记 source error 不阻断保存</td><td class="ok">P6c–P6g</td></tr>
+    <tr><td>9 · 分享与多人协作</td><td>成员四角色 + 版本冲突 409 保护 + WS 房间广播 <span class="code">document.updated</span> 实时互见</td><td class="ok">P7a–P7g / P4e</td></tr>
+    <tr><td>10 · 模板发布为子路径网站</td><td>五套模板（t-docs 等），worker 渲染至 <span class="code">users/&lt;用户&gt;/sites/&lt;slug&gt;/vN</span> + current.json 指针；<span class="code">/sites/&lt;slug&gt;/*</span> 公开访问</td><td class="ok">P8a–P8e</td></tr>
+  </table>
+</section>
+
+<section id="s2">
+  <h2><span class="no">02</span>机制与数据流</h2>
+  <p class="lede">一次「保存文档」在平台内的完整路径：平台库为事实源，NAS 镜像与 Git 提交为旁路落盘，三者由断言逐环核验。</p>
+  <svg viewBox="0 0 960 236" width="100%" role="img" aria-label="保存文档数据流">
+    <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5c584d"/></marker></defs>
+    <g font-size="13" fill="#26241f" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+      <rect x="16" y="86" width="150" height="58" fill="none" stroke="#c9c3b2"/><text x="91" y="110" text-anchor="middle">用户编辑保存</text><text x="91" y="128" text-anchor="middle" font-size="11" fill="#8b8577">baseVersionNo 校验</text>
+      <rect x="236" y="86" width="170" height="58" fill="none" stroke="#c9c3b2"/><text x="321" y="110" text-anchor="middle">server · 事务</text><text x="321" y="128" text-anchor="middle" font-size="11" fill="#8b8577">documents + 版本快照</text>
+      <rect x="490" y="16" width="200" height="52" fill="none" stroke="#c9c3b2"/><text x="590" y="38" text-anchor="middle">NAS 镜像（模拟盘）</text><text x="590" y="54" text-anchor="middle" font-size="11" fill="#8b8577">users/…/projects/…</text>
+      <rect x="490" y="90" width="200" height="52" fill="none" stroke="#2f6b5e" stroke-width="1.5"/><text x="590" y="112" text-anchor="middle" fill="#24544a">Git 工作副本</text><text x="590" y="128" text-anchor="middle" font-size="11" fill="#8b8577">add → commit（操作者）</text>
+      <rect x="768" y="90" width="176" height="52" fill="none" stroke="#c9c3b2"/><text x="856" y="112" text-anchor="middle">Git 服务端</text><text x="856" y="128" text-anchor="middle" font-size="11" fill="#8b8577">GitLab / Gitea 可查历史</text>
+      <rect x="236" y="176" width="170" height="46" fill="none" stroke="#c9c3b2"/><text x="321" y="195" text-anchor="middle" font-size="12">pg_notify → WS 房间</text><text x="321" y="211" text-anchor="middle" font-size="11" fill="#8b8577">document.updated 互见</text>
+      <rect x="768" y="176" width="176" height="46" fill="none" stroke="#c9c3b2"/><text x="856" y="195" text-anchor="middle" font-size="12">audit_logs / sync_jobs</text><text x="856" y="211" text-anchor="middle" font-size="11" fill="#8b8577">操作台账</text>
+      <g stroke="#5c584d" stroke-width="1" fill="none">
+        <path d="M166,115 H236" marker-end="url(#a)"/>
+        <path d="M406,101 H490" marker-end="url(#a)"/>
+        <path d="M406,129 H490" marker-end="url(#a)"/>
+        <path d="M690,116 H768" marker-end="url(#a)"/>
+        <path d="M406,144 L406,199 L236,199" marker-end="url(#a)"/>
+        <path d="M690,142 L690,199 L768,199" marker-end="url(#a)"/>
+      </g>
+    </g>
+  </svg>
+  <p class="lede" style="margin-top:10px">冲突保护：后保存方收到 409 与「加载最新 / 留在当前」选择，绝不静默覆盖；他人保存实时推送，正在编辑者收到提示并将在保存时进入冲突检测。</p>
+</section>
+
+<section id="s3">
+  <h2><span class="no">03</span>验收标准自检</h2>
+  <p class="lede">对应 Goal Brief 十三条验收标准，逐条给出结论与可复查证据。</p>
+  <table>
+    <tr><th style="width:30%">验收标准</th><th style="width:8%">结论</th><th>关键证据</th></tr>
+    <tr><td>系统管理页面可用</td><td class="ok">通过</td><td>用户禁用/启用/重置密码生效（P9d–P9f）；数据库与存储状态可查（P9g/P9h）；非管理员 403（P9c）</td></tr>
+    <tr><td>云文档实际落盘配置存储目录</td><td class="ok">通过</td><td>磁盘路径与平台树一致，内容字节级一致（P4b/P4d/P4g）</td></tr>
+    <tr><td>用户注册可走通（LDAP 预留）</td><td class="ok">通过</td><td>注册/登录/重复注册 409/弱密码 400（P1a/P1e/P1f）；LDAP status enabled=false（P0b）</td></tr>
+    <tr><td>注册即得个人示例知识库</td><td class="ok">通过</td><td>4 篇示例文档 + NAS 落盘（P1b–P1d）</td></tr>
+    <tr><td>新建文档库支持模板/空库与双存储源</td><td class="ok">通过</td><td>云文档（P4a）与 Git（P6a）双路径实测</td></tr>
+    <tr><td>GitLab 连接配置可增可验</td><td class="ok">通过</td><td>验证成功回显账号；错误令牌给出明确原因（P5a/P5b）</td></tr>
+    <tr><td>Git 仓库自动初始化</td><td class="ok">通过</td><td>created=true 建仓 + 服务端可查（P6a/P6b）；已存在→关联不覆盖（首轮 created=false）</td></tr>
+    <tr><td>仓库文件增删查改并自动提交</td><td class="ok">通过</td><td>提交历史 3 commits、raw 内容与平台一致、commit hash 回显（P6d–P6g）</td></tr>
+    <tr><td>项目空间可分享并多人协作</td><td class="ok">通过</td><td>editor 写入成功、guest 只读 403、editor 无权管理成员（P7a–P7g）；冲突 409（P4e）</td></tr>
+    <tr><td>文档可发布为平台子路径网站</td><td class="ok">通过</td><td>匿名 200：index / 文档页 / CSS（P8a–P8e + 人工复验 ewiki-e2e-site-pl36）</td></tr>
+    <tr><td>关键操作有可追踪台账</td><td class="ok">通过</td><td>audit_logs 110 条，八类关键动作全覆盖（P9k）</td></tr>
+    <tr><td>越权访问被拦截</td><td class="ok">通过</td><td>非成员 403 / guest 写 403 / editor 管理成员 403 / 非 admin 403（P3/P7d/P7g/P9c）</td></tr>
+    <tr><td>备份与回滚演练</td><td class="ok">通过</td><td>备份 zip 96 KB；临时库还原 users=4、documents=69、connections=8，原库无扰动</td></tr>
+  </table>
+</section>
+
+<section id="s4">
+  <h2><span class="no">04</span>验证数据快照</h2>
+  <p class="lede">验收结束时平台内真实数据（<span class="code">psql</span> 计数）与关键工件路径。</p>
+  <div class="ledger">
+    <div><div class="v">4</div><div class="k">用户</div></div>
+    <div><div class="v">17</div><div class="k">项目空间</div></div>
+    <div><div class="v">69</div><div class="k">文档</div></div>
+    <div><div class="v">8</div><div class="k">发布站点</div></div>
+    <div><div class="v">110</div><div class="k">审计台账</div></div>
+  </div>
+  <table>
+    <tr><th style="width:34%">工件 / 路径</th><th>说明</th></tr>
+    <tr><td class="code">ewiki/scripts/e2e-report.json</td><td>51/51 断言明细（耗时 8.9s）</td></tr>
+    <tr><td class="code">ewiki/data-nas/users/Alice/projects/…</td><td>云文档镜像：目录与平台内结构一一对应</td></tr>
+    <tr><td class="code">ewiki/data-nas/users/Alice/sites/ewiki-e2e-site-pl36/</td><td>发布站点：current.json + v1/*（index 1,273 B · 文档页 · style.css）</td></tr>
+    <tr><td class="code">ewiki/apps/server/data/repos/&lt;sourceId&gt;/</td><td>Git 工作副本（含 .git，自动提交推送可复现）</td></tr>
+    <tr><td class="code">ewiki/backups/backup-20260909-222131.zip</td><td>备份演练产物：db dump + NAS zip，96 KB</td></tr>
+    <tr><td class="code">Gitea wikibot/ewiki-e2e-wiki-*</td><td>自动建仓 + 提交历史（服务端 API 与 Web 均可查）</td></tr>
+  </table>
+</section>
+
+<section id="s5">
+  <h2><span class="no">05</span>部署与运行</h2>
+  <p class="lede">完整步骤见 <span class="code">ewiki/docs/deploy.md</span>；此处为最小运行清单。</p>
+  <ul class="tight">
+    <li>设施：<span class="code">docker compose -f deploy/compose.dev.yml up -d</span>（PostgreSQL）；Git 演示可加 Gitea 容器。</li>
+    <li>依赖与建库：<span class="code">corepack pnpm install</span> → <span class="code">db:migrate</span> → <span class="code">db:seed</span>（迁移 <span class="code">0002_lumpy_joystick.sql</span> 新增 storage_connections / platform_settings / users.last_login_at）。</li>
+    <li>关键环境变量：<span class="code">DATABASE_URL · JWT_SECRET · ENCRYPTION_KEY · FS_NAS_ROOT（绝对路径，server/worker 一致） · WEB_DIST=../web/dist</span>。</li>
+    <li>启动：web 构建 <span class="code">pnpm --filter @ewiki/web build</span>，server 3000（API+静态+站点）、realtime 3001（WS）、worker（队列）。</li>
+    <li>初始管理员：<span class="code">admin@ewiki.local / ewiki-admin</span>（上线后立即重置）。</li>
+    <li>验收复跑：<span class="code">node scripts/e2e-platform.mjs</span>（幂等，可重复执行）。</li>
+  </ul>
+</section>
+
+<section id="s6">
+  <h2><span class="no">06</span>备份与回滚演练</h2>
+  <p class="lede">方案全文见 <span class="code">ewiki/docs/backup-rollback.md</span>；脚本刻意不含删除命令（平台安全约束），保留策略为人工清理最近 7 份。</p>
+  <table>
+    <tr><th style="width:22%">步骤</th><th>结果</th></tr>
+    <tr><td>备份</td><td><span class="code">pwsh scripts/backup.ps1</span> → <span class="code">backups/backup-20260909-222131.zip</span>（pg_dump -Fc + NAS 打包，96 KB）</td></tr>
+    <tr><td>恢复演练</td><td>还原至临时库（不动原库）：<span class="code">users=4 · documents=69 · storage_connections=8</span>，与原库一致；临时库已清理</td></tr>
+    <tr><td>回滚路径</td><td>停进程 → <span class="code">pg_restore --clean</span> → NAS 覆盖 → 重启 → <span class="code">/healthz</span> + 登录抽验（RTO ≤ 30 分钟）</td></tr>
+  </table>
+</section>
+
+<section id="s7">
+  <h2><span class="no">07</span>边界与遗留</h2>
+  <ul class="tight">
+    <li>GitLab 方言按 REST v4 完整实现；本地无 GitLab 实例，实测走 Gitea 兼容方言——两者共用同一条「验证 → 建仓/关联 → 克隆 → 自动提交」管线，接真实 GitLab 仅需实例与 Token。</li>
+    <li>协作机制为「基础同步机制」：版本冲突 409 + 实时互见，不承诺 OT/CRDT 字符级合并（与目标假设一致）。</li>
+    <li>发布站点按「用户当前姓名」解析存储路径，改名后历史站点目录不自动迁移（已记录，后续加目录别名）。</li>
+    <li>范围外：LDAP 启用、子域名发布、本地客户端形态、生产级高可用多副本。</li>
+    <li>修复记录：文档路由原有越权缺口（任何登录用户可读写任意项目文档）已补项目级权限校验；worker 令牌内嵌经核查无缺陷（输出脱敏造成的误判）。</li>
+    <li><b>2026-09-10 修订：</b>深化越权核验发现发布配置读取/修改（<span class="code">GET /projects/:id/publish-sites</span>、<span class="code">PATCH /publish-sites/:id</span>）缺少项目级校验，已随同全局系统性补齐 22 处 <span class="code">projectAccess</span> 校验（数据源增删改同步、成员管理、概览/图谱/预览/AI 整理/导入、全局文档与动态流范围过滤）；复验 21/21 通过（两个非成员对私有库 10 类资源均 403，全局三列表零泄露），详见验收记录修订章节。</li>
+  </ul>
+</section>
+
+<div class="foot">
+  <span>ewiki · 企业知识管理平台 · 首期验收</span>
+  <span>2026-09-09 · 51/51 assertions · 2026-09-10 授权加固复验 21/21</span>
+</div>
+
+</main>
+</div>
+</div>
+</body>
+</html>

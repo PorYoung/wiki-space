@@ -1,0 +1,20 @@
+# 本地开发拓扑：只容器化 PostgreSQL（有状态服务），应用进程走 pnpm dev（见 README）
+# 用法: docker compose -f deploy/compose.dev.yml up -d
+services:
+  postgres:
+    image: postgres:16
+    container_name: ewiki-pg
+    environment:
+      POSTGRES_USER: ewiki
+      POSTGRES_PASSWORD: ewiki
+      POSTGRES_DB: ewiki
+    ports: ["5432:5432"]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ewiki -d ewiki"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pg_data: {}

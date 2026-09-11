@@ -1,0 +1,2 @@
+
+D:\works\wiki-space\ewiki>  "C:\Program Files\nodejs\\node.exe"  "C:\Program Files\nodejs\\node_modules\corepack\dist\corepack.js" pnpm --filter @ewiki/web exec node -e console.log(Object.keys(require('./package.json').dependencies).filter(d=,'))

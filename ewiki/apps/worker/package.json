@@ -1,0 +1,28 @@
+{
+  "name": "@ewiki/worker",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/index.ts --format esm --out-dir dist --clean",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo ok",
+    "test": "echo ok"
+  },
+  "dependencies": {
+    "@ewiki/db": "workspace:*",
+    "@ewiki/render": "workspace:*",
+    "@ewiki/shared": "workspace:*",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.38.0",
+    "pg-boss": "^10.1.0",
+    "@ewiki/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
