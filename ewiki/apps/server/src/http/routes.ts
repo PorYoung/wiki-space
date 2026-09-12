@@ -2758,10 +2758,18 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       throw new HTTPException(404, { message: 'EXPORT_FILE_MISSING' });
     }
     const filename = job.path.split('/').pop() ?? `export-${job.id}.tar.gz`;
-    c.header('Content-Type', 'application/gzip');
-    c.header('Content-Disposition', `attachment; filename="${filename}"`);
-    c.header('X-Content-Type-Options', 'nosniff');
-    return c.body((await fs.readFile(abs)).buffer as ArrayBuffer);
+    const safeName = encodeURIComponent(filename);
+    try {
+      const buf = await fs.readFile(abs);
+      c.header('Content-Type', 'application/gzip');
+      c.header('Content-Disposition', `attachment; filename="${safeName}"; filename*=UTF-8''${safeName}`);
+      c.header('X-Content-Type-Options', 'nosniff');
+      c.header('Content-Length', String(buf.length));
+      return c.body(buf);
+    } catch (e) {
+      console.error('export download error:', e);
+      throw new HTTPException(500, { message: `DOWNLOAD_FAIL: ${(e as Error).message}` });
+    }
   });
 
   // ---- 通知中心（EXT-PLATFORM Step3 / ADR-P3）：个人收件箱读侧 ----
