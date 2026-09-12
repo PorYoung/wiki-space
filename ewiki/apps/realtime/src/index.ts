@@ -222,9 +222,14 @@ function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
         if (encoding.length(reply) > 1) ws.send(encoding.toUint8Array(reply));
         break;
       }
-      case 1:
-        // messageAwareness：二进制 awareness 忽略，presence 走 JSON presence 消息
+      case 1: {
+        // P4-6 CRDT awareness：二进制 awareness update 原样转发到房间其他客户端
+        // 协议：第 1 字节 msgType=1，剩余 payload 就是 awareness 二进制体（直接透传即可）
+        for (const peer of collabRooms.get(room) ?? []) {
+          if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(data);
+        }
         break;
+      }
       default:
         break;
     }

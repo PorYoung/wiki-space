@@ -20,10 +20,11 @@ import CodeMirror from '@uiw/react-codemirror';
 import { loadLanguage, type LanguageName } from '@uiw/codemirror-extensions-langs';
 import { githubLight, githubDark } from '@uiw/codemirror-theme-github';
 import { yCollab } from 'y-codemirror.next';
+import * as awarenessProtocol from 'y-protocols/awareness';
 import type { FileViewerProps } from '../types';
 import { downloadFile, fetchRawBlob } from '../api';
 import { decodeUtf8Strict, humanSize } from '../util';
-import { useCollab } from '../../lib/collab';
+import { useCollab, type CollabContextValue } from '../../lib/collab';
 
 const READONLY_LIMIT = 2 * 1024 * 1024;
 
@@ -172,9 +173,11 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
     const lang = langName ? loadLanguage(langName) : null;
     const base: Extension[] = [];
     if (lang) base.push(lang);
-    // P4-6：协同模式加 yCollab 扩展（关闭 undoManager，保留宿主可能的 Ctrl+S 保存）
+    // P4-6 CRDT awareness 全链路：awareness 替换 null → 启用远程光标显示
+    // CollabProvider 懒创建后会 export awareness 字段，这里用类型断言先接上
+    const awareness = (collab as CollabContextValue & { awareness?: awarenessProtocol.Awareness })?.awareness;
     if (collabEnabled && collab.ytext) {
-      base.push(yCollab(collab.ytext, null, { undoManager: false }));
+      base.push(yCollab(collab.ytext, awareness ?? null, { undoManager: false }));
     }
     return base;
   }, [file.ext, collabEnabled, collab?.ytext]);

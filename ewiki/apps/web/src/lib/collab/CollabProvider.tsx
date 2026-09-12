@@ -29,6 +29,8 @@ const CollabContext = createContext<CollabContextValue | null>(null);
 
 interface ProviderProps {
   docId: string;
+  /** P4-6：文件类型，binary 不建 ws 连接（懒创建）。缺省 'text' 保持向后兼容 */
+  kind?: 'text' | 'binary';
   children: ReactNode;
 }
 
@@ -39,13 +41,20 @@ interface ProviderProps {
  */
 const instanceCache = new Map<string, CollabYDoc>();
 
-export function CollabProvider({ docId, children }: ProviderProps): React.ReactElement {
+export function CollabProvider({ docId, kind = 'text', children }: ProviderProps): React.ReactElement {
+  // P4-6：binary 文件（image/pdf/其他二进制）不建 ws 连接——懒创建，零开销
+  // Provider 仍然 render（给子组件一个 valid context），但所有 ydoc/ws 操作都跳过
+  const shouldCollab = kind === 'text';
+
   const [connected, setConnected] = useState(false);
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const [synced, setSynced] = useState(false);
   const instanceRef = useRef<CollabYDoc | null>(null);
 
   useEffect(() => {
+    // P4-6 guard：binary 文件不创建 YDoc + ws，直接 return
+    if (!shouldCollab) return;
+
     const prev = instanceRef.current;
     if (prev) {
       prev.disconnect();
@@ -73,7 +82,7 @@ export function CollabProvider({ docId, children }: ProviderProps): React.ReactE
       instanceRef.current = null;
       instanceCache.delete(docId);
     };
-  }, [docId]);
+  }, [docId, shouldCollab]);
 
   const sendCursor = useCallback(
     (cursor: { line: number; ch: number } | null) => {

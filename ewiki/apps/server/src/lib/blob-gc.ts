@@ -11,10 +11,10 @@
 //   - server：POST /api/v1/admin/gc-blob 手动触发（需 admin）
 // ---------------------------------------------------------------------------
 
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import type { BlobStore } from '@ewiki/storage';
 import type { BlobRefs } from '@ewiki/storage';
-import { documentVersions, documents, activities } from '../db/schema.js';
+import { documentVersions, documents, activities, ydocSnapshots } from '../db/schema.js';
 
 export interface BlobGCRunInput {
   db: any; // drizzle instance
@@ -126,6 +126,22 @@ export async function runBlobGC(input: BlobGCRunInput): Promise<BlobGCRunResult>
     }
   }
 
+  // ---- P4-6：ydoc_snapshots 过期清理（7 天 TTL） ----
+  // ydoc_snapshots 每 30s 写入一次，但 Y.Doc 重启恢复只需要 7 天窗口，
+  // 超过的永远堆积。和 blob GC 同一次 cron 一起做。
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  let expiredSnapshots = 0;
+  try {
+    const delRes = await db
+      .delete(ydocSnapshots)
+      .where(lt(ydocSnapshots.updatedAt, sevenDaysAgo))
+      .returning({ id: ydocSnapshots.id });
+    expiredSnapshots = delRes?.length ?? 0;
+  } catch (err) {
+    // snapshots 清理失败不影响 blob GC 本身
+    console.error(JSON.stringify({ level: 'warn', msg: 'ydoc_snapshots expired cleanup failed', err: String(err) }));
+  }
+
   const result: BlobGCRunResult = {
     totalOnDisk: onDiskRefs.length,
     totalReferenced: activeRefs.size,
@@ -146,6 +162,8 @@ export async function runBlobGC(input: BlobGCRunInput): Promise<BlobGCRunResult>
       targetTitle: 'blob-store',
       meta: {
         ...result,
+        // P4-6：ydoc_snapshots 过期清理数量（7 天 TTL）
+        expiredSnapshots,
         triggeredAt: new Date().toISOString(),
       },
     });

@@ -15,6 +15,7 @@
 
 import * as Y from 'yjs';
 import * as syncProtocol from 'y-protocols/sync';
+import * as awarenessProtocol from 'y-protocols/awareness';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import { tokenStore } from '../api/client';
@@ -41,6 +42,8 @@ export interface YDocCallbacks {
 export class CollabYDoc {
   readonly doc: Y.Doc;
   readonly ytext: Y.Text;
+  /** P4-6 CRDT awareness：远程光标/ presence 二进制协议 */
+  readonly awareness: awarenessProtocol.Awareness;
   private ws: WebSocket | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryCount = 0;
@@ -51,9 +54,17 @@ export class CollabYDoc {
   constructor(
     public readonly docId: string,
     private readonly callbacks: YDocCallbacks = {},
+    /** P4-6：可选本地用户信息，用于 awareness 本地 state */
+    localUser?: { userId: string; name: string },
   ) {
     this.doc = new Y.Doc();
     this.ytext = this.doc.getText('content');
+    this.awareness = new awarenessProtocol.Awareness(this.doc);
+    // P4-6：设本地 user state（y-codemirror.next 会读取显示远程光标名）
+    if (localUser) {
+      this.awareness.setLocalStateField('user', { name: localUser.name, id: localUser.userId });
+    }
+    this.awareness.on('update', this.handleAwarenessUpdate.bind(this));
   }
 
   // -------------------------------------------------------------------------
@@ -71,6 +82,8 @@ export class CollabYDoc {
     this.clearRetry();
     this.ws?.close();
     this.ws = null;
+    // P4-6：销毁 awareness（会触发本地 state 移除，其他客户端收到后知道我们下线了）
+    this.awareness.destroy();
     this.callbacks.onStatus?.('disconnected');
   }
 
@@ -136,20 +149,37 @@ export class CollabYDoc {
   private handleSync(data: Uint8Array): void {
     const decoder = decoding.createDecoder(data);
     const msgType = decoding.readVarUint(decoder);
-    if (msgType !== 0) return; // 只处理 messageSync，awareness(1) 被 realtime 忽略
-    // syncProtocol.readSyncMessage 会把远端 update 合并进 this.doc
-    // 并把本地缺失的 update 写进 encoder（如果服务器是新节点）
-    const enc = encoding.createEncoder();
-    encoding.writeVarUint(enc, 0);
-    syncProtocol.readSyncMessage(decoder, enc, this.doc, this);
-    // 有数据才回发（SyncStep1 请求时服务器会回 SyncStep2 全量）
-    if (encoding.length(enc) > 1 && this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(encoding.toUint8Array(enc));
-    }
-    // P4-6：首次收到 SyncStep2（全量）时 synced 变 true，通知消费者
-    if (!this.synced) {
-      this.synced = true;
-      this.callbacks.onSynced?.();
+    switch (msgType) {
+      case 0: {
+        // messageSync：合并远端增量并回发本地缺失部分
+        // syncProtocol.readSyncMessage 会把远端 update 合并进 this.doc
+        // 并把本地缺失的 update 写进 encoder（如果服务器是新节点）
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, 0);
+        syncProtocol.readSyncMessage(decoder, enc, this.doc, this);
+        // 有数据才回发（SyncStep1 请求时服务器会回 SyncStep2 全量）
+        if (encoding.length(enc) > 1 && this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(encoding.toUint8Array(enc));
+        }
+        // P4-6：首次收到 SyncStep2（全量）时 synced 变 true，通知消费者
+        if (!this.synced) {
+          this.synced = true;
+          this.callbacks.onSynced?.();
+        }
+        break;
+      }
+      case 1: {
+        // P4-6 CRDT awareness：服务器转发的 awareness update
+        // applyAwarenessUpdate 需要完整的 awareness body Uint8Array（不包含 msgType 前缀）
+        // 先重新读一遍 msgType 拿到它占用的字节数，再 slice 出 body
+        const tmpDec = decoding.createDecoder(data);
+        decoding.readVarUint(tmpDec); // 跳过 msgType，tmpDec.pos 就是 body 起始偏移
+        const body = data.slice(tmpDec.pos);
+        awarenessProtocol.applyAwarenessUpdate(this.awareness, body, this);
+        break;
+      }
+      default:
+        break;
     }
   }
 
@@ -163,6 +193,61 @@ export class CollabYDoc {
     encoding.writeVarUint(enc, 0); // messageSync
     syncProtocol.writeUpdate(enc, update);
     this.ws.send(encoding.toUint8Array(enc));
+  }
+
+  // -------------------------------------------------------------------------
+  // P4-6 CRDT awareness：远程光标二进制协议
+  // -------------------------------------------------------------------------
+
+  /**
+   * Awareness update 回调——本地变化广播二进制消息；他人变化更新 peers 状态
+   * 事件签名: ({ added, updated, removed }: { added: number[], updated: number[], removed: number[] }, conn: unknown)
+   */
+  private handleAwarenessUpdate(
+    { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
+    conn: unknown,
+  ): void {
+    // conn === this.awareness 表示本地变化（y-codemirror.next 调用 setLocalStateField 时触发）
+    if (conn === this.awareness) {
+      if (this.ws?.readyState !== WebSocket.OPEN) return;
+      // P4-6：编码 awareness update 并广播（msgType=1）——服务器透传二进制给其他客户端
+      const changed = added.concat(updated);
+      if (changed.length === 0) return;
+      // encodeAwarenessUpdate(awareness, clients) 返回 Uint8Array body
+      const body = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changed);
+      const enc = encoding.createEncoder();
+      encoding.writeVarUint(enc, 1); // messageAwareness
+      encoding.writeUint8Array(enc, body);
+      this.ws.send(encoding.toUint8Array(enc));
+      return;
+    }
+    // 他人变化：从 awareness states 提取 user 信息更新 peers map
+    // getStates 是 Awareness 实例方法，返回 Map<clientId, state>
+    const states = this.awareness.getStates();
+    let peersChanged = false;
+    // 更新/添加
+    for (const clientId of added.concat(updated)) {
+      const state = states.get(clientId) as { user?: { name: string; id: string } } | undefined;
+      const userId = state?.user?.id;
+      const name = state?.user?.name;
+      if (!userId || !name) continue;
+      const existing = this.peers.get(userId);
+      if (!existing) {
+        this.peers.set(userId, { userId, name, cursor: null, joinedAt: Date.now() });
+        peersChanged = true;
+      } else if (existing.name !== name) {
+        existing.name = name;
+        peersChanged = true;
+      }
+    }
+    // 移除（客户端断开时会触发 removeAwarenessStates 广播 removed）
+    // 注意：awareness 的 state 在 removed 触发时已经被删除，所以我们无法从 awareness
+    // 查到对应的 userId。保守策略：JSON presence 的 leave 事件负责删 peers，
+    // 这里 awareness 只处理 added/updated，避免误删。
+    void removed;
+    if (peersChanged) {
+      this.callbacks.onPeers?.(new Map(this.peers));
+    }
   }
 
   // -------------------------------------------------------------------------

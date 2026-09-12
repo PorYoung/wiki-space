@@ -17,7 +17,7 @@ export default function FileHost(props: FileViewerProps): React.ReactElement {
   const Viewer = plugin.component;
   // P4-6：file.id 作为协同房间名 doc:<docId>（realtime 端约定）
   return (
-    <CollabProvider docId={props.file.id}>
+    <CollabProvider docId={props.file.id} kind={props.file.kind}>
       <Viewer {...props} />
     </CollabProvider>
   );
