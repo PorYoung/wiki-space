@@ -9,12 +9,13 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import MDEditor from '@uiw/react-md-editor';
+import MDEditor, { type RefMDEditor } from '@uiw/react-md-editor';
 import {
   BookOpen,
   Code,
   Eye,
   FileText,
+  Image as ImageIcon,
   Layers,
   Moon,
   Palette,
@@ -28,6 +29,7 @@ import {
 import { slugify, markdownToHtml } from '../../lib/markdown';
 import { useMermaidRender } from '../../lib/use-mermaid-render';
 import type { FileViewerProps } from '../types';
+import { ImagePickerModal } from './ImagePickerModal';
 
 const RENDER_THEMES: Array<{ key: string; label: string; desc: string; Icon: LucideIcon }> = [
   { key: 'plain', label: '经典', desc: '默认无衬线 · 紧凑', Icon: FileText },
@@ -58,7 +60,7 @@ function extractToc(md: string): TocItem[] {
   return toc;
 }
 
-export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerProps): React.ReactElement {
+export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: FileViewerProps): React.ReactElement {
   const initial = file.content ?? '';
   const [view, setView] = useState<'preview' | 'edit'>('preview');
   const [buffer, setBuffer] = useState(initial);
@@ -67,6 +69,12 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
   const [saveError, setSaveError] = useState<string | null>(null);
   const [renderTheme, setRenderTheme] = useState('plain');
   const [showThemeMenu, setShowThemeMenu] = useState(false);
+  // §4.1-F16 Markdown 引用图片：插入图片弹层开关
+  const [showImageModal, setShowImageModal] = useState(false);
+  // §4.1-F16 MDEditor ref —— 拿 textarea 做光标插入
+  const editorRef = useRef<RefMDEditor | null>(null);
+  // §4.1-F16 记录 textarea 光标/选区位置（弹层打开期间 textarea 失焦，需要预先保存）
+  const cursorPosRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
@@ -183,6 +191,28 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  // §4.1-F16 Markdown 引用图片：ImagePickerModal 回调 —— 把 Markdown 语法插入光标位置
+  const handlePickImage = (markdown: string) => {
+    const { start, end } = cursorPosRef.current;
+    // 边界兜底：如果 cursor 没被正确追踪（首次进入编辑态没点过 textarea），
+    // 就追加到 buffer 末尾。
+    const safeStart = Number.isFinite(start) && start >= 0 && start <= buffer.length ? start : buffer.length;
+    const safeEnd = Number.isFinite(end) && end >= safeStart && end <= buffer.length ? end : safeStart;
+    const next = buffer.slice(0, safeStart) + markdown + buffer.slice(safeEnd);
+    setBuffer(next);
+    setShowImageModal(false);
+    // 插入后恢复 textarea 焦点 + 光标放到插入内容之后（下次继续编辑更顺手）
+    requestAnimationFrame(() => {
+      const ta = editorRef.current?.textarea;
+      if (ta) {
+        ta.focus();
+        const newPos = safeStart + markdown.length;
+        ta.setSelectionRange(newPos, newPos);
+        cursorPosRef.current = { start: newPos, end: newPos };
+      }
+    });
+  };
+
   return (
     <section
       className="h-full min-h-0 flex flex-col min-w-0 overflow-hidden"
@@ -247,6 +277,25 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
                   </>
                 )}
               </div>
+            )}
+
+            {/* §4.1-F16 Markdown 引用图片：插入图片按钮（编辑态 + 可写权限时显示） */}
+            {canWrite && onSave && view === 'edit' && (
+              <button
+                type="button"
+                onClick={() => {
+                  // §4.1-F16 打开弹层前，从 editorRef 同步一次最新光标位置（按钮点击会让 textarea blur）
+                  const ta = editorRef.current?.textarea;
+                  if (ta) {
+                    cursorPosRef.current = { start: ta.selectionStart, end: ta.selectionEnd };
+                  }
+                  setShowImageModal(true);
+                }}
+                title="插入图片 / 附件（Markdown 图片语法）"
+                className="inline-flex items-center gap-1 h-7 px-2 rounded text-xs font-medium border border-neutral-200 hover:bg-neutral-50 transition"
+              >
+                <ImageIcon size={13} /> 插入图片
+              </button>
             )}
 
             <div className="bg-neutral-100 rounded-md p-0.5 inline-flex">
@@ -319,6 +368,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
         ) : (
           <div className="flex-1 min-h-0 overflow-hidden">
             <MDEditor
+              ref={editorRef}
               value={buffer}
               onChange={(v) => setBuffer(v ?? '')}
               preview="edit"
@@ -333,6 +383,19 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
                 placeholder: '开始编写 Markdown 文档…',
                 spellCheck: false,
                 onDoubleClick: () => setView('preview'),
+                onSelect: (e) => {
+                  // §4.1-F16 实时记录光标/选区位置，供弹层关闭后精确插入
+                  const t = e.currentTarget;
+                  cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
+                },
+                onKeyUp: (e) => {
+                  const t = e.currentTarget;
+                  cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
+                },
+                onClick: (e) => {
+                  const t = e.currentTarget;
+                  cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
+                },
                 onKeyDown: (e) => {
                   if (e.key === 'Escape') {
                     e.preventDefault();
@@ -379,6 +442,15 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
           </nav>
         )}
       </div>
+
+      {/* §4.1-F16 Markdown 引用图片：插入图片弹层 */}
+      <ImagePickerModal
+        open={showImageModal}
+        projectId={projectId}
+        currentDocPath={file.path}
+        onPick={handlePickImage}
+        onClose={() => setShowImageModal(false)}
+      />
     </section>
   );
 }

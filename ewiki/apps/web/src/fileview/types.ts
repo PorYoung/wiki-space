@@ -47,6 +47,9 @@ export interface FileViewerProps {
   /** 替换上传实现由宿主提供（multipart POST）；未提供则隐藏替换入口 */
   onReplaceUpload?(file: File): Promise<void>;
   host: FileViewerHost;
+  // §4.1-F16 Markdown 引用图片：项目 ID，用于库内图片列表查询和上传路径定位；
+  //   宿主未传时，MarkdownViewer/ImagePickerModal 从 window.location.pathname 路由兜底解析。
+  projectId?: string;
 }
 
 export interface FileViewerCapabilities {

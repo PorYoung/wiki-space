@@ -42,12 +42,17 @@ import type { AppDeps } from './app.js';
 
 type C = Context; // ContextVariableMap 已在 app.ts 扩充（userId/globalRole/requestId）
 
+// §4.1-F17 发布站点静态服务 MIME 白名单：覆盖 Markdown 相对引用的图片/二进制产物，
+// 以及页面自身 html/css/js/json。svg 虽属活动内容，但发布产物已脱离原始库上下文
+// （worker 渲染时相对引用已改写为 assets/，站点为离线静态制品，非原始 raw 接口）。
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
+  // §5.5 链接：Markdown 相对引用图片（worker 发布时经 extractDocLinks 收集并复制进 assets/）
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -55,8 +60,13 @@ const MIME: Record<string, string> = {
   '.gif': 'image/gif',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  // §4.1-F17：PDF 文档作为二进制资源发布（用户 markdown 相对引用 pdf 也能正确响应 Content-Type）
+  '.pdf': 'application/pdf',
   '.txt': 'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.eot': 'application/vnd.ms-fontobject',
 };
 
 function sha256(s: string): string {
