@@ -410,6 +410,36 @@ async function main() {
       respOk && afterRepeat.json?.storageStatus === 'synced' && !afterRepeat.json?.lastError,
       `http=${repeatSync.status} resp=${JSON.stringify(repeatSync.json).slice(0, 120)} after=${afterRepeat.json?.storageStatus}`,
     );
+
+    // 版本时间线/动态流留痕（PRD F46/F49）：初始化推送与平台内自动提交均应在平台侧可见
+    const gitDocs = await req(`/api/v1/projects/${ctx.gitId}/documents`, { token: ctx.alice });
+    const tplDoc = (gitDocs.json?.items ?? []).find((d) => d.path === '新人指引.md');
+    let tplV1 = null;
+    if (tplDoc) {
+      const tplVersions = await req(`/api/v1/documents/${tplDoc.id}/versions`, { token: ctx.alice });
+      tplV1 = (tplVersions.json?.items ?? []).find((v) => v.versionNo === 1);
+    }
+    record(
+      'P6o',
+      '初始化推送生成 v1 版本快照（commit hash 与建库响应一致）',
+      !!tplV1 && !!git?.commitHash && tplV1.commitHash === git.commitHash && !!tplV1.message,
+      `hash=${tplV1?.commitHash?.slice(0, 10)} init=${git?.commitHash?.slice(0, 10)}`,
+    );
+
+    const docVersions = await req(`/api/v1/documents/${ctx.gitDocId}/versions`, { token: ctx.alice });
+    const docV = docVersions.json?.items ?? [];
+    const dv1 = docV.find((v) => v.versionNo === 1);
+    const dv2 = docV.find((v) => v.versionNo === 2);
+    record(
+      'P6p',
+      '新建/保存文档的版本回填 commit hash（与自动提交一致）',
+      !!dv1 && !!dv2 && dv1.commitHash === pushed?.commitHash && dv2.commitHash === updGit?.commitHash,
+      `v1=${dv1?.commitHash?.slice(0, 10)} v2=${dv2?.commitHash?.slice(0, 10)}`,
+    );
+
+    const gitActs = await req(`/api/v1/activities?projectId=${ctx.gitId}`, { token: ctx.alice });
+    const initSync = (gitActs.json?.items ?? []).find((a) => a.verb === 'sync' && a.actorName === 'Alice');
+    record('P6q', '初始化推送进入动态流（「同步」记录）', !!initSync, JSON.stringify(initSync ?? gitActs.json).slice(0, 180));
   }
 
   // [P7] 分享与协作

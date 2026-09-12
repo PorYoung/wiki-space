@@ -11,7 +11,8 @@
     "test": "vitest run",
     "db:generate": "tsx node_modules/drizzle-kit/bin.cjs generate",
     "db:migrate": "tsx node_modules/drizzle-kit/bin.cjs migrate",
-    "db:seed": "tsx src/seed.ts"
+    "db:seed": "tsx src/seed.ts",
+    "backfill:versions": "tsx src/backfill-versions.ts"
   },
   "dependencies": {
     "@ewiki/db": "workspace:*",

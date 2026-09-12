@@ -10,6 +10,9 @@
 
 import path from 'node:path';
 
+export { LocalBlobStore } from './blob-store.js';
+export type { BlobStore, BlobStat } from './blob-store.js';
+
 export function toPosix(p: string): string {
   return p.replace(/\\/g, '/');
 }

@@ -187,7 +187,11 @@ export async function ensureRepo(
       };
     }
     if (status === 409 || status === 403 || status === 422) {
-      const msg = status === 403 ? '令牌无创建仓库权限，或对目标命名空间无写入权限' : '仓库创建被拒绝（可能已存在同名仓库）';
+      const giteaMsg = status === 403 && rec ? String(rec.message ?? '') : '';
+      const msg =
+        status === 403
+          ? `令牌无创建仓库权限，或对目标命名空间无写入权限${giteaMsg ? `：${giteaMsg}` : ''}`
+          : '仓库创建被拒绝（可能已存在同名仓库）';
       throw new GitHostError(status, 'CREATE_DENIED', msg);
     }
     throw mapHttpError(status, conn.kind);

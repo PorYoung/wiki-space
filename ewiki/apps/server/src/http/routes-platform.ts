@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { and, desc, eq, gte, ilike, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import {
   activities,
   auditLogs,
@@ -33,9 +33,9 @@ import { safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
 import { db } from '../db/client.js';
 import { hashPassword, generateRefreshToken, hashToken, signAccessToken } from '../auth/utils.js';
 import { ldapAutoLogin } from '../lib/ldap.js';
-import { commitAndPush, ensureWorkdir, validateConnection, type ConnLike } from '@ewiki/git';
+import { commitAndPush, ensureWorkdir, validateConnection, type ConnLike, type PushChange } from '@ewiki/git';
 import { getLibraryTemplate, LIBRARY_TEMPLATES } from '../lib/library-templates.js';
-import { ensureWritableDir, getNasRoot, getReposRoot, mirrorDoc, NAS_ROOT_SETTING_KEY } from '../lib/nas.js';
+import { ensureWritableDir, getNasRoot, getReposRoot, mirrorDoc, moveMirror, NAS_ROOT_SETTING_KEY } from '../lib/nas.js';
 import { denyIfNot } from '../lib/permissions.js';
 import type { Context } from 'hono';
 import type { AppDeps } from './app.js';
@@ -93,16 +93,42 @@ export interface DocEffectResult {
     pushed: boolean;
     noop?: boolean;
     commitHash?: string;
+    message?: string;
     error?: string;
   };
 }
 
-export async function docStorageEffects(
+/** 批量存储副作用操作（单文档保存/删除是 N=1 特例；移动/重命名 → move；文件夹级联 → 多个 move） */
+export interface DocStorageOp {
+  op: 'upsert' | 'delete' | 'move';
+  /** 目标路径（move 为移动后的新路径） */
+  path: string;
+  /** move 专用：移动前旧路径 */
+  fromPath?: string;
+  /** upsert/move 携带的文档内容（move 场景用于镜像源缺失时的补偿写入与 Git 落盘） */
+  content?: string | null;
+  /** 二进制载体（P2）：kind='binary' 时 content 可空，NAS 写 buffer，Git 一期跳过 */
+  kind?: 'text' | 'binary';
+  buffer?: Buffer;
+  mime?: string | null;
+  storageRef?: string | null;
+  /**
+   * 平台库内文档行 ID。提供时：推送成功回填 status='synced'（upsert/move）；
+   * delete 为软删除，列表不再展示，无需回填。
+   */
+  documentId?: string;
+}
+
+/**
+ * 批量副作用：一次调用 = 一批 NAS 镜像动作 + 一次 Git add/commit/push。
+ * 单文档保存/删除路由也收敛到本函数（docStorageEffects 为其 N=1 薄包装）。
+ */
+export async function docStorageEffectsBatch(
   deps: AppDeps,
   project: { id: string; name: string; ownerId: string },
-  docPath: string,
-  content: string | null,
+  ops: DocStorageOp[],
   actor: { id: string; name: string; email: string },
+  message: string,
 ): Promise<DocEffectResult> {
   const out: DocEffectResult = { mirrored: false, git: { attempted: false, ok: true, pushed: false } };
 
@@ -110,7 +136,29 @@ export async function docStorageEffects(
   try {
     const nasRoot = await getNasRoot(deps.config);
     const [owner] = await db.select({ name: users.name }).from(users).where(eq(users.id, project.ownerId)).limit(1);
-    await mirrorDoc(nasRoot, { username: owner?.name ?? 'unknown', projectName: project.name, projectId: project.id }, docPath, content);
+    const target = { username: owner?.name ?? 'unknown', projectName: project.name, projectId: project.id };
+    for (const op of ops) {
+      if (op.op === 'delete') {
+        await mirrorDoc(nasRoot, target, op.path, null);
+      } else if (op.op === 'upsert') {
+        if (op.kind === 'binary') {
+          if (!op.buffer) throw new Error('BINARY_BUFFER_REQUIRED');
+          await mirrorDoc(nasRoot, target, op.path, { kind: 'binary', buffer: op.buffer });
+        } else {
+          await mirrorDoc(nasRoot, target, op.path, { kind: 'text', content: op.content ?? '' });
+        }
+      } else {
+        // move：优先原样搬移镜像（保留磁盘上可能存在的最新内容），源文件缺失时按库内内容补偿写入
+        const moved = await moveMirror(nasRoot, target, op.fromPath ?? op.path, op.path);
+        if (!moved) {
+          if (op.kind === 'binary' && op.buffer) {
+            await mirrorDoc(nasRoot, target, op.path, { kind: 'binary', buffer: op.buffer });
+          } else if (op.kind !== 'binary' && op.content != null) {
+            await mirrorDoc(nasRoot, target, op.path, { kind: 'text', content: op.content });
+          }
+        }
+      }
+    }
     out.mirrored = true;
   } catch (e) {
     out.mirrorError = e instanceof Error ? e.message : String(e);
@@ -144,6 +192,20 @@ export async function docStorageEffects(
     return out;
   }
 
+  // 操作 → Git 写盘指令：move 展开为「删除旧路径 + 写入新路径」双指令，单提交内完成改名。
+  // 二进制一期不入 Git：binary op 全部跳过；过滤后无文本变更则直接返回（不建工作副本）。
+  const changes: PushChange[] = [];
+  for (const op of ops) {
+    if ((op.kind ?? 'text') === 'binary') continue;
+    if (op.op === 'upsert') changes.push({ path: op.path, op: 'upsert', content: op.content ?? '' });
+    else if (op.op === 'delete') changes.push({ path: op.path, op: 'delete' });
+    else {
+      changes.push({ path: op.fromPath ?? op.path, op: 'delete' });
+      changes.push({ path: op.path, op: 'upsert', content: op.content ?? '' });
+    }
+  }
+  if (changes.length === 0) return out;
+
   try {
     const conn: ConnLike = {
       kind: String(cfg.kind ?? 'gitlab'),
@@ -160,28 +222,39 @@ export async function docStorageEffects(
       login,
       String(projRow.defaultBranch ?? 'main'),
     );
-    const message =
-      content === null
-        ? `docs(${docPath}): 删除文档（${actor.name}）`
-        : `docs(${docPath}): 平台内更新（${actor.name}）`;
-    const result = await commitAndPush(
-      workdir,
-      [{ path: docPath, op: content === null ? 'delete' : 'upsert', content: content ?? undefined }],
-      { name: actor.name, email: actor.email },
-      message,
-    );
-    out.git = { attempted: true, ok: result.ok, pushed: result.pushed, noop: result.noop, commitHash: result.commitHash, error: result.error };
+    const result = await commitAndPush(workdir, changes, { name: actor.name, email: actor.email }, message);
+    out.git = { attempted: true, ok: result.ok, pushed: result.pushed, noop: result.noop, commitHash: result.commitHash, message, error: result.error };
     if (result.ok) {
       await db
         .update(projects)
         .set({ storageStatus: 'synced', lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
         .where(eq(projects.id, project.id));
+      // 文档状态机闭环：真正提交并推送成功后，受影响的在线文档（upsert/move）回到 synced。
+      // noop（无差异）说明远端本就一致，同样应纠正为 synced。仅按 ID 收敛，不误伤同库其它文档。
+      const syncedIds = [
+        ...new Set(
+          ops
+            .filter(
+              (o) =>
+                (o.op === 'upsert' || o.op === 'move') &&
+                o.documentId &&
+                (o.kind ?? 'text') === 'text',
+            )
+            .map((o) => o.documentId as string),
+        ),
+      ];
+      if (syncedIds.length > 0) {
+        await db
+          .update(documents)
+          .set({ status: 'synced', updatedAt: new Date() })
+          .where(and(inArray(documents.id, syncedIds), isNull(documents.deletedAt)));
+      }
       await db.insert(syncJobs).values({
         projectId: project.id,
         trigger: 'push',
         commitHash: result.commitHash ?? null,
         status: 'succeeded',
-        stats: { pushed: result.pushed, noop: result.noop ?? false, actor: actor.name },
+        stats: { pushed: result.pushed, noop: result.noop ?? false, actor: actor.name, paths: ops.length },
         finishedAt: new Date(),
       });
       await audit(db, {
@@ -189,7 +262,7 @@ export async function docStorageEffects(
         action: 'git.auto_commit',
         resourceType: 'project',
         resourceId: project.id,
-        meta: { path: docPath, commit: result.commitHash, pushed: result.pushed, noop: result.noop ?? false },
+        meta: { path: ops[0]?.path, count: ops.length, commit: result.commitHash, pushed: result.pushed, noop: result.noop ?? false },
       });
     } else {
       await db
@@ -209,7 +282,7 @@ export async function docStorageEffects(
         action: 'git.push_failed',
         resourceType: 'project',
         resourceId: project.id,
-        meta: { path: docPath, error: result.error },
+        meta: { path: ops[0]?.path, count: ops.length, error: result.error },
       });
     }
   } catch (e) {
@@ -224,10 +297,32 @@ export async function docStorageEffects(
       action: 'git.push_failed',
       resourceType: 'project',
       resourceId: project.id,
-      meta: { path: docPath, error: msg },
+      meta: { path: ops[0]?.path, count: ops.length, error: msg },
     });
   }
   return out;
+}
+
+/** 单文档副作用（保存/删除）：docStorageEffectsBatch 的 N=1 薄包装，保持既有调用语义不变 */
+export async function docStorageEffects(
+  deps: AppDeps,
+  project: { id: string; name: string; ownerId: string },
+  docPath: string,
+  content: string | null,
+  actor: { id: string; name: string; email: string },
+  documentId?: string,
+): Promise<DocEffectResult> {
+  const message =
+    content === null
+      ? `docs(${docPath}): 删除文档（${actor.name}）`
+      : `docs(${docPath}): 平台内更新（${actor.name}）`;
+  return docStorageEffectsBatch(
+    deps,
+    project,
+    [{ op: content === null ? 'delete' : 'upsert', path: docPath, content, documentId }],
+    actor,
+    message,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +370,10 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
         path: doc.path,
         title: firstHeading(doc.content),
         content: doc.content,
+        kind: 'text',
+        ext: 'md',
+        mime: 'text/markdown',
+        size: Buffer.byteLength(doc.content, 'utf8'),
         contentHash: sha256(doc.content),
         status: 'untracked',
         wordCount: doc.content.length,
@@ -386,7 +485,10 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
 
     const conn: ConnLike = { kind, baseUrl, tokenEncrypted: encryptJson({ token: body.token.trim() }), defaultNamespace: body.defaultNamespace ?? null };
     const v = await validateConnection(conn);
-
+    // 仅验证通过才落库：避免保存「验证失败」的脏配置，逼用户先改正确（修复「测试失败也保存」）
+    if (!v.ok) {
+      return c.json({ status: 'error', message: `连接验证失败，未保存：${v.message}` }, 400);
+    }
     const [row] = await db
       .insert(storageConnections)
       .values({
@@ -396,25 +498,38 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
         baseUrl,
         tokenEncrypted: conn.tokenEncrypted,
         defaultNamespace: body.defaultNamespace?.trim() || null,
-        status: v.ok ? 'ok' : 'error',
+        status: 'ok',
         lastCheckAt: new Date(),
-        lastCheckMsg: v.ok ? `已连接：${v.name}（@${v.login}）` : v.message ?? '验证失败',
+        lastCheckMsg: `已连接：${v.name}（@${v.login}）`,
       })
       .returning();
     await audit(db, {
       actorId: uid,
-      action: v.ok ? 'connection.create' : 'connection.create_failed',
+      action: 'connection.create',
       resourceType: 'storage_connection',
       resourceId: row.id,
-      meta: { name: row.name, kind, baseUrl, result: v.ok ? `@${v.login}` : v.message },
+      meta: { name: row.name, kind, baseUrl, result: `@${v.login}` },
     });
-    if (!v.ok) {
-      return c.json(
-        { id: row.id, status: row.status, message: `连接已保存但验证失败：${v.message}` },
-        201,
-      );
-    }
     return c.json({ id: row.id, status: row.status, message: `连接成功：${v.name}（@${v.login}）` }, 201);
+  });
+
+  // 仅验证连接、不落库，供「测试连接」按钮使用
+  app.post('/api/v1/connections/test', async (c: C) => {
+    const body = (await c.req.json()) as {
+      kind?: string;
+      baseUrl?: string;
+      token?: string;
+      defaultNamespace?: string;
+    };
+    const kind = body.kind ?? 'gitlab';
+    if (!['gitlab', 'gitea'].includes(kind)) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 目前仅支持 GitLab（及兼容演示 Gitea）连接' });
+    const baseUrl = (body.baseUrl ?? '').trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//.test(baseUrl)) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 服务地址需以 http(s):// 开头' });
+    if (!body.token?.trim()) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 请填写访问令牌（Token）' });
+    const conn: ConnLike = { kind, baseUrl, tokenEncrypted: encryptJson({ token: body.token.trim() }), defaultNamespace: body.defaultNamespace ?? null };
+    const v = await validateConnection(conn);
+    if (!v.ok) throw new HTTPException(400, { message: `验证失败：${v.message}` });
+    return c.json({ ok: true, login: v.login, name: v.name, message: `连接成功：${v.name}（@${v.login}）` });
   });
 
   app.post('/api/v1/connections/:id/validate', async (c: C) => {
@@ -448,9 +563,10 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
     const [row] = await db.select().from(storageConnections).where(eq(storageConnections.id, c.req.param('id')!)).limit(1);
     if (!row) throw new HTTPException(404, { message: 'NOT_FOUND' });
     denyIfNot(row.ownerId === uid || c.get('globalRole') === 'admin');
-    const body = (await c.req.json()) as { name?: string; baseUrl?: string; token?: string; defaultNamespace?: string };
+    const body = (await c.req.json()) as { name?: string; kind?: string; baseUrl?: string; token?: string; defaultNamespace?: string };
     const set: Record<string, unknown> = { updatedAt: new Date() };
     if (body.name?.trim()) set.name = body.name.trim();
+    if (body.kind && ['gitlab', 'gitea'].includes(body.kind)) set.kind = body.kind;
     if (body.baseUrl?.trim()) set.baseUrl = body.baseUrl.trim().replace(/\/+$/, '');
     if (body.defaultNamespace !== undefined) set.defaultNamespace = body.defaultNamespace?.trim() || null;
     if (body.token?.trim()) {
@@ -458,6 +574,22 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
       set.status = 'unverified';
     }
     await db.update(storageConnections).set(set).where(eq(storageConnections.id, row.id));
+
+    // 任一影响连通性的字段变更后，重新验证以刷新状态与提示
+    if (body.kind || body.baseUrl?.trim() || body.token?.trim() || body.defaultNamespace !== undefined) {
+      const [updated] = await db.select().from(storageConnections).where(eq(storageConnections.id, row.id)).limit(1);
+      const v = await validateConnection(updated);
+      await db
+        .update(storageConnections)
+        .set({
+          status: v.ok ? 'ok' : 'error',
+          lastCheckAt: new Date(),
+          lastCheckMsg: v.ok ? `已连接：${v.name}（@${v.login}）` : v.message ?? '验证失败',
+          updatedAt: new Date(),
+        })
+        .where(eq(storageConnections.id, row.id));
+    }
+
     await audit(db, { actorId: uid, action: 'connection.update', resourceType: 'storage_connection', resourceId: row.id, meta: { fields: Object.keys(set) } });
     return c.json({ ok: true });
   });

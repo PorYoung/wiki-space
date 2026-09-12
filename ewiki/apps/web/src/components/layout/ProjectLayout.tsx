@@ -3,14 +3,19 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useParams, useSearchPa
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Activity } from '@ewiki/shared';
 import {
-  Activity as ActivityIcon, ChevronDown, ChevronLeft, ChevronRight, ExternalLink,
+  Activity as ActivityIcon, ChevronDown, ChevronLeft, ChevronRight, Download, ExternalLink,
   FolderKanban, FolderOpen, History, MessageSquare, MoreHorizontal, Network, Pencil,
-  Rocket, Share2, Sparkles, Trash2, UserCog, Users, FileText,
+  Rocket, Share2, Sparkles, Trash2, UserCog, Users, FileText, RotateCcw, Diff,
 } from 'lucide-react';
+import { diffLines, type ChangeObject } from 'diff';
+import { resolveFileType } from '@ewiki/shared';
 import { apiFetch } from '../../lib/api/client';
 import { useProjectRole } from '../../lib/api/use-project-role';
 import { HeaderToast, type ProjectOutletContext } from '../Toast';
 import { AppearanceToggle } from '../AppearanceToggle';
+import { useUiStore } from '../../stores/uiStore';
+import { downloadFile } from '../../fileview/api';
+import { humanSize } from '../../fileview/util';
 
 // 迁移自 prototype ProjectLayout.jsx（774 行 → TS + 真实 API）：
 // 身份区 / 项目切换器 / 分享+更多菜单 / AppearanceToggle / 右侧信息栏 / toast 通道 /
@@ -48,6 +53,9 @@ interface DocumentVersionInfo {
   message: string | null;
   authorName: string | null;
   createdAt: string;
+  // P3a 契约：二进制版本下发大小与存储引用（文本类为 null/缺省）
+  size?: number | null;
+  storageRef?: string | null;
 }
 
 interface MemberRow {
@@ -198,6 +206,84 @@ function ProjectRightSidebar({ overview, members, activities, compact, onToggle 
     enabled: isBrowsePage && !!docParam,
   });
 
+  // 当前文档详情：判断二进制形态 + 提供下载所需 path（与信息面板共享 ['document', id] 缓存）
+  const { data: currentDoc } = useQuery<{ id: string; path: string; title?: string | null; mime?: string | null }>({
+    queryKey: ['document', docParam],
+    queryFn: () => apiFetch(`/api/v1/documents/${docParam}`),
+    enabled: isBrowsePage && !!docParam && activeTab === 'history',
+  });
+  const isBinaryDoc = !!currentDoc && resolveFileType(currentDoc.path, currentDoc.mime).kind === 'binary';
+  const [downloadingNo, setDownloadingNo] = useState<number | null>(null);
+
+  // 外部（目录树/查看器/信息面板）请求查看历史：切到 history tab
+  const historyRequestId = useUiStore((s) => s.historyRequestId);
+  useEffect(() => {
+    if (historyRequestId > 0 && isBrowsePage) setActiveTab('history');
+  }, [historyRequestId, isBrowsePage]);
+
+  // ---- P3c：版本 diff modal / 恢复 ----
+  const qc = useQueryClient();
+  const [diffTargetV, setDiffTargetV] = useState<number | null>(null);
+  const [restoringV, setRestoringV] = useState<number | null>(null);
+
+  // HEAD（最新版本，用于 diff 左列）
+  const headVersionNo = useMemo(() => (versionsData?.items?.[0]?.versionNo ?? 0), [versionsData]);
+
+  // 目标版本详情（diff 对比 + 恢复前置）
+  const { data: targetVersion } = useQuery<{
+    id: string; versionNo: number; authorName: string | null; message: string | null;
+    content: string; size: number; storageRef: string | null; kind: 'text' | 'binary';
+    changedSummary: { lines: string[] } | null; createdAt: string;
+  }>({
+    queryKey: ['document-version', docParam, diffTargetV],
+    queryFn: () => apiFetch(`/api/v1/documents/${docParam}/versions/${diffTargetV}`),
+    enabled: !!docParam && diffTargetV !== null && diffTargetV >= 1,
+  });
+
+  // HEAD 详情（当前文档内容）
+  const { data: headVersion } = useQuery<{ content: string }>({
+    queryKey: ['document', docParam],
+    queryFn: () => apiFetch(`/api/v1/documents/${docParam}`),
+    enabled: !!docParam && diffTargetV !== null,
+  });
+
+  // 恢复 mutation
+  const restoreMutation = useMutation({
+    mutationFn: (payload: { versionNo: number; message?: string }) =>
+      apiFetch<{ ok: boolean; restored: boolean; version?: number; restoredFrom?: number }>(
+        `/api/v1/documents/${docParam}/restore`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      ),
+    onMutate: (v) => setRestoringV(v.versionNo),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['document-versions', docParam] });
+      qc.invalidateQueries({ queryKey: ['document', docParam] });
+      qc.invalidateQueries({ queryKey: ['activities'] });
+      setRestoringV(null);
+      setDiffTargetV(null);
+    },
+    onError: () => setRestoringV(null),
+  });
+
+  // ProjectRightSidebar 自身判定可写（恢复按钮）
+  const { id: projectId } = useParams();
+  const { canWrite } = useProjectRole(projectId);
+
+  // ---- P3c：版本 diff 数据（组件顶层 useMemo，禁止在 renderTabContent 条件分支内调用） ----
+  const diffChanges = useMemo<ChangeObject<string>[] | null>(() => {
+    if (isBinaryDoc || !targetVersion || !headVersion) return null;
+    return diffLines(headVersion.content ?? '', targetVersion.content ?? '') as ChangeObject<string>[];
+  }, [isBinaryDoc, targetVersion, headVersion]);
+  const diffStat = useMemo(() => {
+    if (!diffChanges) return null;
+    let add = 0, rem = 0;
+    for (const c of diffChanges) {
+      if (c.added) add += c.value.split('\n').length - (c.value.endsWith('\n') ? 1 : 0);
+      else if (c.removed) rem += c.value.split('\n').length - (c.value.endsWith('\n') ? 1 : 0);
+    }
+    return { add, rem };
+  }, [diffChanges]);
+
   const renderTabContent = (): React.ReactElement => {
     if (activeTab === 'overview') {
       return (
@@ -313,27 +399,190 @@ function ProjectRightSidebar({ overview, members, activities, compact, onToggle 
         </div>
       );
     }
-    // history
+    // history：文本版本可点击查看 diff / 恢复；二进制版本展示大小 + 下载 + 恢复
+    const handleVersionDownload = (v: DocumentVersionInfo) => {
+      if (!currentDoc || downloadingNo !== null) return;
+      setDownloadingNo(v.versionNo);
+      void downloadFile(
+        { id: currentDoc.id, path: currentDoc.path, title: currentDoc.title ?? '',
+          kind: 'binary', ext: '', mime: currentDoc.mime ?? '', size: v.size ?? 0, versionNo: v.versionNo },
+        v.versionNo,
+      ).catch(() => undefined).finally(() => setDownloadingNo(null));
+    };
+
+    const versions = versionsData?.items ?? [];
+    const isHead = (v: DocumentVersionInfo) => v.versionNo === versions[0]?.versionNo;
+
     return (
-      <div className="space-y-1">
-        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-neutral-400">历史版本</div>
-        {(versionsData?.items?.length ?? 0) > 0 ? (
-          versionsData!.items.slice(0, 8).map((v) => (
-            <div key={v.id} className="rounded-md px-2 py-1.5 hover:bg-neutral-50">
-              <div className="flex items-center gap-2">
-                <span className="rounded bg-primary-50 px-1.5 py-0.5 font-mono text-[10px] text-primary-600">v{v.versionNo}</span>
-                <span className="ml-auto text-[10px] text-neutral-400">{relativeTime(v.createdAt)}</span>
-              </div>
-              <div className="mt-1 truncate text-xs text-neutral-700">{v.message ?? `${v.authorName ?? '用户'} 的修改`}</div>
+      <>
+        <div className="space-y-1">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">历史版本</span>
+            {(versions.length > 0) && (
+              <span className="text-[10px] text-neutral-400">{headVersionNo > 0 ? `共 v${headVersionNo}` : '—'}</span>
+            )}
+          </div>
+          {versions.length > 0 ? (
+            versions.slice(0, 12).map((v) => {
+              const head = isHead(v);
+              return isBinaryDoc ? (
+                <div key={v.id} className="rounded-md px-2 py-1.5 hover:bg-neutral-50">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDiffTargetV(v.versionNo)}
+                      title={head ? '已是当前版本' : '查看版本详情'}
+                      className="rounded bg-primary-50 px-1.5 py-0.5 font-mono text-[10px] text-primary-600 hover:bg-primary-100 hover:underline"
+                    >v{v.versionNo}</button>
+                    <span className="text-[10px] text-neutral-500">{typeof v.size === 'number' ? humanSize(v.size) : '大小未知'}</span>
+                    <span className="ml-auto flex items-center gap-1">
+                      {!head && canWrite && (
+                        <button type="button"
+                          disabled={restoringV !== null}
+                          onClick={() => {
+                            if (confirm(`确定要将二进制文件恢复到 v${v.versionNo} 吗？此操作会生成新版本记录。`)) {
+                              restoreMutation.mutate({ versionNo: v.versionNo });
+                            }
+                          }}
+                          title="恢复到此版本"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-200/70 hover:text-emerald-600 disabled:opacity-50">
+                          <RotateCcw size={12} className={restoringV === v.versionNo ? 'animate-spin' : ''} />
+                        </button>
+                      )}
+                      <button type="button" disabled={downloadingNo !== null}
+                        onClick={() => handleVersionDownload(v)}
+                        title={`下载 v${v.versionNo}`}
+                        className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-200/70 hover:text-primary-600 disabled:opacity-50">
+                        <Download size={12} className={downloadingNo === v.versionNo ? 'animate-pulse' : ''} />
+                      </button>
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-1.5 text-[10px] text-neutral-400">
+                    <span className="truncate">{v.authorName ?? '未知用户'}</span>
+                    <span className="w-1 h-1 shrink-0 rounded-full bg-neutral-300" />
+                    <span className="shrink-0">{relativeTime(v.createdAt)}</span>
+                    {head && <span className="rounded bg-emerald-50 px-1 text-emerald-600">当前</span>}
+                  </div>
+                </div>
+              ) : (
+                <div key={v.id} className="rounded-md px-2 py-1.5 hover:bg-neutral-50">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDiffTargetV(v.versionNo)}
+                      title={head ? '已是当前版本' : `对比当前与 v${v.versionNo}`}
+                      className="rounded bg-primary-50 px-1.5 py-0.5 font-mono text-[10px] text-primary-600 hover:bg-primary-100 hover:underline"
+                    >v{v.versionNo}</button>
+                    <span className="truncate text-[11px] text-neutral-500">
+                      {v.authorName ?? '未知用户'} · {relativeTime(v.createdAt)}
+                    </span>
+                    <span className="ml-auto flex items-center gap-1">
+                      {!head && canWrite && (
+                        <button type="button"
+                          disabled={restoringV !== null}
+                          onClick={() => {
+                            if (confirm(`确定要恢复到 v${v.versionNo} 吗？此操作会生成新版本记录。`)) {
+                              restoreMutation.mutate({ versionNo: v.versionNo });
+                            }
+                          }}
+                          title="恢复到此版本"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-200/70 hover:text-emerald-600 disabled:opacity-50">
+                          <RotateCcw size={12} className={restoringV === v.versionNo ? 'animate-spin' : ''} />
+                        </button>
+                      )}
+                      {!head && (
+                        <button type="button"
+                          onClick={() => setDiffTargetV(v.versionNo)}
+                          title="查看 diff"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-200/70 hover:text-primary-600">
+                          <Diff size={12} />
+                        </button>
+                      )}
+                      {head && <span className="rounded bg-emerald-50 px-1 text-emerald-600 text-[10px]">当前</span>}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-neutral-600">{v.message ?? `${v.authorName ?? '用户'} 的修改`}</div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="flex flex-col items-center py-8 text-center">
+              <History size={24} className="mb-2 text-neutral-300" />
+              <div className="text-[11px] text-neutral-400">{docParam ? '暂无版本记录' : '从目录树选择文档后查看历史'}</div>
             </div>
-          ))
-        ) : (
-          <div className="flex flex-col items-center py-8 text-center">
-            <History size={24} className="mb-2 text-neutral-300" />
-            <div className="text-[11px] text-neutral-400">{docParam ? '暂无版本记录' : '从目录树选择文档后查看历史'}</div>
+          )}
+        </div>
+
+        {/* Diff Modal */}
+        {diffTargetV !== null && diffTargetV >= 1 && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDiffTargetV(null)}>
+            <div
+              className="flex max-h-[80vh] w-[min(90vw,900px)] flex-col overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-neutral-900"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b px-4 py-2.5 dark:border-neutral-800">
+                <div className="flex items-center gap-2 text-sm">
+                  <Diff size={14} className="text-primary-600" />
+                  <span className="font-medium">版本对比</span>
+                  {headVersionNo > 0 && (
+                    <span className="font-mono text-[11px] text-neutral-400">
+                      当前 v{headVersionNo} → 目标 v{diffTargetV}
+                    </span>
+                  )}
+                  {diffStat && (
+                    <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] dark:bg-neutral-800">
+                      <span className="text-emerald-600">+{diffStat.add}</span>
+                      <span className="mx-1 text-neutral-400">/</span>
+                      <span className="text-rose-600">-{diffStat.rem}</span>
+                    </span>
+                  )}
+                </div>
+                <button type="button"
+                  onClick={() => setDiffTargetV(null)}
+                  className="rounded p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800">
+                  ✕
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto">
+                {targetVersion === undefined ? (
+                  <div className="p-6 text-center text-sm text-neutral-400">加载中…</div>
+                ) : isBinaryDoc ? (
+                  <div className="p-6 text-center text-sm text-neutral-500">
+                    二进制文件无文本内容，仅支持大小/下载比较
+                    {typeof targetVersion.size === 'number' && (
+                      <div className="mt-1 text-xs text-neutral-400">v{targetVersion.versionNo} · {humanSize(targetVersion.size)}</div>
+                    )}
+                  </div>
+                ) : diffChanges ? (
+                  <pre className="m-0 whitespace-pre-wrap break-all p-3 font-mono text-[12px] leading-5">
+                    {diffChanges.map((c, i) => {
+                      const cls = c.added ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : c.removed ? 'bg-rose-50 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                        : 'text-neutral-400';
+                      return <code key={i} className={`block ${cls}`}>{c.value}</code>;
+                    })}
+                  </pre>
+                ) : (
+                  <div className="p-6 text-center text-sm text-neutral-500">当前内容与 v{diffTargetV} 完全一致</div>
+                )}
+              </div>
+              {canWrite && targetVersion && !isHead({ versionNo: diffTargetV } as DocumentVersionInfo) && !isBinaryDoc && (
+                <div className="flex items-center justify-between border-t px-4 py-2.5 dark:border-neutral-800">
+                  <span className="text-[11px] text-neutral-400">恢复操作将创建新版本 v{headVersionNo + 1}</span>
+                  <button type="button"
+                    disabled={restoreMutation.isPending}
+                    onClick={() => {
+                      restoreMutation.mutate({ versionNo: diffTargetV });
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-600 disabled:opacity-50">
+                    <RotateCcw size={12} /> 恢复到 v{diffTargetV}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
-      </div>
+      </>
     );
   };
 
@@ -489,7 +738,9 @@ export function ProjectLayout(): React.ReactElement {
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  // 右栏开合上收 uiStore：查看器/目录树请求「历史」时可同时强制展开面板
+  const rightPanelOpen = useUiStore((s) => s.rightPanelOpen);
+  const toggleRightPanel = useUiStore((s) => s.toggleRightPanel);
   const [toast, setToast] = useState<string | null>(null);
 
   const menuRef = useRef<HTMLDivElement>(null);
@@ -510,9 +761,12 @@ export function ProjectLayout(): React.ReactElement {
     queryKey: ['projects'],
     queryFn: () => apiFetch<{ items: ProjectSummary[] }>('/api/v1/projects'),
   });
+  // 项目侧边栏「动态」= 最近 6 条项目动态（PRD 5.3）；必须带 projectId 过滤，
+  // 否则拉的是全局动态流、会混入其他项目行为（后端对 projectId 已做可见性校验）
   const { data: actData } = useQuery<{ items: Activity[] }>({
-    queryKey: ['activities'],
-    queryFn: () => apiFetch<{ items: Activity[] }>('/api/v1/activities'),
+    queryKey: ['activities', id],
+    queryFn: () => apiFetch<{ items: Activity[] }>(`/api/v1/activities?projectId=${id}`),
+    enabled: !!id,
   });
 
   const queryClient = useQueryClient();
@@ -758,7 +1012,7 @@ export function ProjectLayout(): React.ReactElement {
           members={members}
           activities={activities}
           compact={!rightPanelOpen}
-          onToggle={() => setRightPanelOpen((v) => !v)}
+          onToggle={toggleRightPanel}
         />
       </div>
 

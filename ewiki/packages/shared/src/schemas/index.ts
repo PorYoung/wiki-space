@@ -115,11 +115,20 @@ export const UpdateProjectSchema = z
   .strict();
 export type UpdateProjectBody = z.infer<typeof UpdateProjectSchema>;
 
+// FileKind 类型权威定义在 filetypes.ts（同包桶导出），此处仅提供 zod 校验器。
+export const FileKindSchema = z.enum(['text', 'binary']);
+
 export const DocumentSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
   path: z.string().min(1),
   title: z.string().nullable(),
+  kind: FileKindSchema.default('text'),
+  /** 小写无点扩展名；无扩展名文件为 '' */
+  ext: z.string().default(''),
+  mime: z.string().nullable(),
+  /** 字节大小：text=字符字节数，binary=blob 大小 */
+  size: z.number().int().nonnegative().default(0),
   status: DocumentStatus,
   contentHash: z.string().nullable(),
   wordCount: z.number().int().nonnegative().default(0),

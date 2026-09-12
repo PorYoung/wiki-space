@@ -416,7 +416,19 @@ async function harvestDocsFromDir(projectId: string, dir: string): Promise<void>
     if (existing) {
       await db
         .update(documents)
-        .set({ title, content, contentHash: hash, wordCount, status: 'synced', updatedAt: new Date(), deletedAt: null })
+        .set({
+          title,
+          content,
+          contentHash: hash,
+          wordCount,
+          kind: 'text',
+          ext: 'md',
+          mime: 'text/markdown',
+          size: Buffer.byteLength(content, 'utf8'),
+          status: 'synced',
+          updatedAt: new Date(),
+          deletedAt: null,
+        })
         .where(eq(documents.id, existing.id));
     } else {
       await db.insert(documents).values({
@@ -424,6 +436,10 @@ async function harvestDocsFromDir(projectId: string, dir: string): Promise<void>
         path: rel,
         title,
         content,
+        kind: 'text',
+        ext: 'md',
+        mime: 'text/markdown',
+        size: Buffer.byteLength(content, 'utf8'),
         contentHash: hash,
         wordCount,
         status: 'synced',

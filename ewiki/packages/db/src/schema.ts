@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   integer,
@@ -141,6 +142,11 @@ export const documents = pgTable(
     title: text('title'),
     content: text('content'),
     contentHash: text('content_hash'),
+    kind: text('kind').notNull().default('text'), // text | binary（文件管理重构 P0）
+    ext: text('ext'), // 小写无点扩展名，存量 md 回填（P0）
+    mime: text('mime'),
+    size: bigint('size', { mode: 'number' }).notNull().default(0), // 字节；text=字符字节数，binary=blob 大小
+    storageRef: text('storage_ref'), // 二进制内容寻址引用（P2 落 blob，一期始终 NULL）
     status: text('status').notNull().default('untracked'), // untracked | synced | modified | conflict
     tags: text('tags').array().notNull().default([]), // 文档标签（PLAN 3.4 标签三维 / 5.2.1）
     wordCount: integer('word_count').notNull().default(0),
@@ -149,7 +155,14 @@ export const documents = pgTable(
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [unique('documents_project_path_uq').on(t.projectId, t.path)],
+  (t) => [
+    unique('documents_project_path_uq').on(t.projectId, t.path),
+    check('documents_kind_check', sql`${t.kind} IN ('text','binary')`),
+    check(
+      'documents_storage_ref_check',
+      sql`(${t.kind} = 'binary') = (${t.storageRef} IS NOT NULL)`,
+    ),
+  ],
 );
 
 export const documentVersions = pgTable('document_versions', {
@@ -163,6 +176,8 @@ export const documentVersions = pgTable('document_versions', {
   authorNames: text('author_names').array().notNull().default([]), // 协同会话参与者（SDD 5.3）
   message: text('message'),
   content: text('content').notNull(),
+  storageRef: text('storage_ref'), // 二进制版本快照引用（P2）；text 版本始终 NULL
+  size: bigint('size', { mode: 'number' }).notNull().default(0),
   changedSummary: jsonb('changed_summary'),
   createdAt: ts('created_at').notNull().defaultNow(),
 });

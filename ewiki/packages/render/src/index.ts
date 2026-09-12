@@ -13,8 +13,10 @@
 
 import { createHash } from 'node:crypto';
 import { hasKatexOutput, hasMermaidBlock, markdownToHtml, mdEscapeHtml } from './markdown.js';
+import type { MarkdownRenderOptions } from './markdown.js';
 
 export { markdownToHtml, slugify, mdEscapeHtml } from './markdown.js';
+export type { MarkdownRenderOptions } from './markdown.js';
 
 const escapeHtml = mdEscapeHtml;
 
@@ -62,6 +64,56 @@ export interface SiteDocInput {
 export interface SitePage {
   rel: string;
   html: string;
+}
+
+/**
+ * 发布站点二进制资源映射（P3b）：path = 二进制文档在文档库中的 posix 路径
+ * （extractDocLinks 解析相对图片目标的命中口径），url = 站点内相对 URL
+ * （worker 实际落盘路径，如 assets/img/logo.png）。
+ */
+export interface SiteAsset {
+  path: string;
+  url: string;
+}
+
+/** POSIX 语义相对路径 resolve（与 @ewiki/shared links.resolvePosix 同口径：./ ../ 处理） */
+function resolveAssetPosix(fromDir: string, rel: string): string {
+  const combined = rel.startsWith('/') ? rel : `${fromDir}/${rel}`;
+  const segments: string[] = [];
+  for (const seg of combined.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') segments.pop();
+    else segments.push(seg);
+  }
+  return segments.join('/');
+}
+
+/**
+ * 构造单页图片地址改写器：以当前文档目录为基准 resolve 相对图片目标，
+ * 三级候选（精确 / 补 .md / 去 .md 与 links 抽取匹配口径对齐）命中 assets 映射则改写，
+ * 未命中（含 broken 图片）原样保留。
+ */
+function makeAssetRewriter(
+  docPath: string,
+  assetByPath: Map<string, string>,
+): ((target: string) => string) | undefined {
+  if (assetByPath.size === 0) return undefined;
+  const posixPath = docPath.replace(/\\/g, '/');
+  const dirParts = posixPath.split('/');
+  dirParts.pop();
+  const fromDir = dirParts.join('/');
+  return (target: string): string => {
+    const hashIdx = target.indexOf('#');
+    const pure = hashIdx >= 0 ? target.slice(0, hashIdx) : target;
+    if (!pure) return target;
+    const resolved = resolveAssetPosix(fromDir, pure.replace(/\\/g, '/'));
+    const candidates = [resolved, `${resolved}.md`, resolved.replace(/\.md$/i, '')];
+    for (const c of candidates) {
+      const url = assetByPath.get(c);
+      if (url !== undefined) return url;
+    }
+    return target;
+  };
 }
 
 const BASE_CSS =
@@ -124,16 +176,21 @@ export function renderSite(input: {
   docs: SiteDocInput[];
   siteTitle: string;
   templateId?: string | null;
+  /** 二进制资源映射（被 md 图片相对引用、需复制到站点 assets/ 的文档）；缺省 = 不改写图片地址 */
+  assets?: SiteAsset[];
 }): { pages: SitePage[]; hash: string } {
   const tpl = resolveTemplate(input.templateId);
   const pages: SitePage[] = [];
   const links: string[] = [];
 
+  const assetByPath = new Map<string, string>();
+  for (const a of input.assets ?? []) assetByPath.set(a.path.replace(/\\/g, '/'), a.url);
+
   for (const d of input.docs) {
     const safeName = d.path.replace(/\.(md|markdown)$/i, '').replace(/[\\/]/g, '__');
     const pageName = `page-${safeName}.html`;
     const title = d.title ?? d.path;
-    const body = markdownToHtml(d.content ?? '');
+    const body = markdownToHtml(d.content ?? '', { rewriteAsset: makeAssetRewriter(d.path, assetByPath) });
     pages.push({ rel: pageName, html: pageShell(title, body, { accent: tpl.accent, font: tpl.bodyFont, relativeRoot: '' }) });
     links.push(`<li><a href="${pageName}">${escapeHtml(title)}</a></li>`);
   }
@@ -169,12 +226,18 @@ export interface DocPreviewInput {
 
 export function renderDocPage(
   input: DocPreviewInput,
-  opts?: { templateId?: string | null; accent?: string | null; sidebarSide?: 'left' | 'right' | null },
+  opts?: {
+    templateId?: string | null;
+    accent?: string | null;
+    sidebarSide?: 'left' | 'right' | null;
+    /** 图片相对地址改写（预览侧目前不传，保持历史行为；预留与发布同源能力） */
+    rewriteAsset?: MarkdownRenderOptions['rewriteAsset'];
+  },
 ): string {
   const tpl = resolveTemplate(opts?.templateId);
   const accent = opts?.accent || tpl.accent;
   const side = opts?.sidebarSide || 'left';
-  const contentHtml = markdownToHtml(input.content ?? '');
+  const contentHtml = markdownToHtml(input.content ?? '', { rewriteAsset: opts?.rewriteAsset });
   const nav = input.navItems ?? [{ title: input.docTitle, active: true }];
 
   const railItems = nav

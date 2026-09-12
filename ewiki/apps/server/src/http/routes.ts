@@ -1,7 +1,13 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { createHash } from 'node:crypto';
-import { CreateProjectSchema, UpdateProjectSchema } from '@ewiki/shared';
+import {
+  basenameOf,
+  CreateProjectSchema,
+  extOf,
+  resolveFileType,
+  UpdateProjectSchema,
+} from '@ewiki/shared';
 import { renderDocPage } from '@ewiki/render';
 import type { AppDeps } from './app.js';
 import {
@@ -12,7 +18,7 @@ import {
   verifyAccessToken,
   verifyPassword,
 } from '../auth/utils.js';
-import { and, desc, eq, isNull, lt, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, ne, sql } from 'drizzle-orm';
 import {
   activities,
   aiClassifyRuns,
@@ -44,9 +50,12 @@ import {
   type HostRepo,
 } from '@ewiki/git';
 import { getLibraryTemplate } from '../lib/library-templates.js';
+import { buildAddedSummary, buildChangedSummary } from '../lib/diff-summary.js';
 import { getNasRoot, getReposRoot, mirrorDoc } from '../lib/nas.js';
 import { registerStarterRoutes } from './routes-starter.js';
-import { docStorageEffects, registerPlatformRoutes } from './routes-platform.js';
+import { docStorageEffects, docStorageEffectsBatch, registerPlatformRoutes, type DocEffectResult } from './routes-platform.js';
+import { registerFileRoutes } from './routes-files.js';
+import { buildRawUrl } from '../lib/raw-sign.js';
 import { denyIfNot, projectAccess } from '../lib/permissions.js';
 
 // ---- 发布模板元数据（PLAN 3.5 / 5.2.1：服务端权威源，ThemesPage / PublishPage 从此拉取） ----
@@ -125,6 +134,59 @@ function documentSummary(content: string | null): string {
     .filter(Boolean)
     .join(' ');
   return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+}
+
+/**
+ * 目录树路径规范化（移动/重命名/新建复用）：统一斜杠、拒绝危险段与 NAS/Windows 非法字符。
+ * 返回 null 表示路径不合法。
+ * - allowDotFile=true 时点开头文件（.keep/.gitignore）豁免尾随点与 basename 扩展名校验；
+ * - requireBasename=true 时末段必须含扩展名（用于文件路径；文件夹路径不传）。
+ */
+function normalizeTreePath(
+  raw: unknown,
+  opts: { requireBasename?: boolean; allowDotFile?: boolean } = {},
+): string | null {
+  if (typeof raw !== 'string') return null;
+  const p = raw
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .replace(/^\/+|\/+$/g, '');
+  if (!p || p.length > 512) return null;
+  const segments = p.split('/');
+  if (segments.length > 24) return null;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]!;
+    const isLast = i === segments.length - 1;
+    const dotFile = isLast && seg.startsWith('.');
+    if (!seg || seg === '..') return null;
+    if (seg.length > 128) return null;
+    // NAS 落盘在本地文件系统执行，直接拒绝跨平台非法字符
+    if (/[<>:"|?*\u0000-\u001f]/.test(seg)) return null;
+    if (!(opts.allowDotFile && dotFile)) {
+      // 尾随点/空格在 Windows 落盘会被静默裁剪；'.' 单独成段也无意义
+      if (/[ .]$/.test(seg) || seg === '.') return null;
+    }
+    // 文件路径末段必须带扩展名（P0 不允许创建无扩展名文件，.keep 等点文件豁免）
+    if (isLast && opts.requireBasename && !dotFile && !extOf(seg)) return null;
+  }
+  return p;
+}
+
+/** 无显式标题时的兜底显示名：markdown 抽 H1，其余文件取不含扩展名的 basename */
+function defaultDocTitle(path: string, content: string): string {
+  if (resolveFileType(path).typeId === 'markdown') {
+    const h1 = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
+    if (h1) return h1;
+  }
+  const base = basenameOf(path);
+  const dot = base.startsWith('.') ? -1 : base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+/** UTF-8 字节数（与 PG octet_length 对齐，用于 text 文件 size 回填） */
+function byteLength(s: string): number {
+  return Buffer.byteLength(s, 'utf8');
 }
 
 /** 路由注册（SDD 4.2 清单的骨架实现；未列出的端点随层 4 迭代补充） */
@@ -413,19 +475,28 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
 
     await db.insert(projectMembers).values({ projectId: project.id, userId, role: 'owner' });
 
-    // 模板文档：平台侧预置（documents + NAS 镜像）
+    // 模板文档：平台侧预置（documents + NAS 镜像）；记录落库行，供初始化推送后生成 v1 版本快照
     const docsCount = tplDocs.length;
+    const insertedDocs: Array<{ id: string; content: string }> = [];
     for (const doc of tplDocs) {
-      await db.insert(documents).values({
-        projectId: project.id,
-        path: doc.path,
-        title: doc.content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? doc.path.replace(/\.md$/, ''),
-        content: doc.content,
-        contentHash: createHash('sha256').update(doc.content).digest('hex'),
-        status: 'untracked',
-        wordCount: [...doc.content.matchAll(/[\p{L}\p{N}]/gu)].length,
-        updatedBy: userId,
-      });
+      const [row] = await db
+        .insert(documents)
+        .values({
+          projectId: project.id,
+          path: doc.path,
+          title: doc.content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? doc.path.replace(/\.md$/, ''),
+          content: doc.content,
+          kind: 'text',
+          ext: 'md',
+          mime: 'text/markdown',
+          size: byteLength(doc.content),
+          contentHash: createHash('sha256').update(doc.content).digest('hex'),
+          status: 'untracked',
+          wordCount: [...doc.content.matchAll(/[\p{L}\p{N}]/gu)].length,
+          updatedBy: userId,
+        })
+        .returning({ id: documents.id });
+      if (row) insertedDocs.push({ id: row.id, content: doc.content });
     }
     try {
       const nasRoot = await getNasRoot(config);
@@ -472,12 +543,13 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
             tplDocs.length > 0
               ? tplDocs
               : [{ path: 'README.md', content: `# ${project.name}\n\n由 eWiki 平台创建。\n` }];
+          const initMessage = `chore: 初始化文档库（${tplDocs.length} 篇模板文档）`;
           await seedWorkdirFiles(workdir, seedFiles);
           const pushed = await commitAndPush(
             workdir,
             [],
             { name: owner.name, email: owner.email },
-            `chore: 初始化文档库（${tplDocs.length} 篇模板文档）`,
+            initMessage,
           );
           git = {
             repo: gitProvision.repo.fullPath,
@@ -498,6 +570,52 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
               status: 'succeeded',
               stats: { pushed: pushed.pushed, init: true, docs: seedFiles.length },
               finishedAt: new Date(),
+            });
+            // 版本时间线留痕（PRD F46）：初始化提交 = 每篇模板文档的 v1 快照，commit hash 与 Gitea 一致
+            const initCommitHash = pushed.commitHash;
+            if (pushed.pushed && initCommitHash && insertedDocs.length > 0) {
+              await db.insert(documentVersions).values(
+                insertedDocs.map((doc) => ({
+                  documentId: doc.id,
+                  versionNo: 1,
+                  commitHash: initCommitHash,
+                  authorId: userId,
+                  message: initMessage,
+                  content: doc.content,
+                  size: byteLength(doc.content),
+                  changedSummary: buildAddedSummary(doc.content),
+                })),
+              );
+              // 文档状态机闭环：模板文档已随初始化提交进入远端，置为 synced（此前停留在 untracked）
+              await db
+                .update(documents)
+                .set({ status: 'synced', updatedAt: new Date() })
+                .where(
+                  and(
+                    inArray(
+                      documents.id,
+                      insertedDocs.map((d) => d.id),
+                    ),
+                    isNull(documents.deletedAt),
+                  ),
+                );
+            }
+            // 动态流留痕（PRD F49「同步」维度）：初始化推送在项目动态中可见
+            await db.insert(activities).values({
+              projectId: project.id,
+              actorId: userId,
+              verb: 'sync',
+              targetType: 'project',
+              targetId: project.id,
+              targetTitle: project.name,
+              meta: {
+                trigger: 'push',
+                backend: 'git',
+                init: true,
+                docs: seedFiles.length,
+                commitHash: initCommitHash ?? null,
+                branch: gitProvision.branch,
+              },
             });
           } else {
             await db
@@ -855,6 +973,10 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         projectId: documents.projectId,
         path: documents.path,
         title: documents.title,
+        kind: documents.kind,
+        ext: documents.ext,
+        mime: documents.mime,
+        size: documents.size,
         status: documents.status,
         tags: documents.tags,
         wordCount: documents.wordCount,
@@ -919,7 +1041,15 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const q = c.req.query('q');
     const conditions = [eq(documents.projectId, projectId), isNull(documents.deletedAt)];
     if (status) conditions.push(eq(documents.status, status));
-    if (q) conditions.push(sql`(${documents.path} ILIKE ${"%" + q + "%"} OR ${documents.title} ILIKE ${"%" + q + "%"})`);
+    if (q) {
+      const like = '%' + q + '%';
+      conditions.push(sql`(
+        ${documents.path} ILIKE ${like} OR
+        ${documents.title} ILIKE ${like} OR
+        array_to_string(${documents.tags}, ',') ILIKE ${like} OR
+        (${documents.kind} = 'text' AND ${documents.content} ILIKE ${like})
+      )`);
+    }
 
     const rows = await db
       .select({
@@ -927,6 +1057,10 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         projectId: documents.projectId,
         path: documents.path,
         title: documents.title,
+        kind: documents.kind,
+        ext: documents.ext,
+        mime: documents.mime,
+        size: documents.size,
         status: documents.status,
         tags: documents.tags,
         wordCount: documents.wordCount,
@@ -953,6 +1087,11 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         path: documents.path,
         title: documents.title,
         content: documents.content,
+        kind: documents.kind,
+        ext: documents.ext,
+        mime: documents.mime,
+        size: documents.size,
+        storageRef: documents.storageRef,
         status: documents.status,
         tags: documents.tags,
         wordCount: documents.wordCount,
@@ -969,7 +1108,13 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       const access = await projectAccess(doc.projectId, c.get('userId') as string, c.get('globalRole') as string);
       denyIfNot(access.canRead);
     }
-    return c.json(doc);
+    return c.json({
+      ...doc,
+      rawUrl:
+        doc.kind === 'binary'
+          ? buildRawUrl(config.JWT_SECRET, '/api/v1', doc, c.get('userId') as string, config.RAW_URL_TTL_SECONDS)
+          : null,
+    });
   });
 
   // ---- 保存文档（D4 BrowsePage 保存：新版本 + 更新 + activity） ----
@@ -997,6 +1142,11 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
     }
 
+    // 二进制文件不走文本保存链路（blob 上传 P2 提供）
+    if (existing.kind === 'binary') {
+      throw new HTTPException(415, { message: 'UNSUPPORTED_MEDIA_KIND: 二进制文件请通过上传接口保存' });
+    }
+
     // 乐观并发保护（多人协作不互相覆盖）：请求携带 baseVersionNo 且与最新版本不符 → 409
     if (typeof body.baseVersionNo === 'number') {
       const [latest] = await db
@@ -1010,6 +1160,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
 
     const newContent = body.content ?? existing.content;
     const wordCount = newContent ? [...newContent.matchAll(/[\p{L}\p{N}]/gu)].length : 0;
+    const byteSize = byteLength(newContent ?? '');
     const crypto = await import('crypto');
     const newHash = crypto.createHash('sha256').update(newContent ?? '').digest('hex');
 
@@ -1020,27 +1171,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         : [...new Set(body.tags.map((t) => t.trim()).filter(Boolean))].slice(0, 8);
 
     // 行级简化 diff：共同前缀/后缀之间的行视为删+改，各取前 4 行防超长
-    function buildChangedSummary(): { lines: string[] } | null {
-      if ((existing.content ?? '') === (newContent ?? '')) return null;
-      const a = (existing.content ?? '').split('\n');
-      const b = (newContent ?? '').split('\n');
-      let start = 0;
-      while (start < a.length && start < b.length && a[start] === b[start]) start++;
-      let endA = a.length;
-      let endB = b.length;
-      while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-        endA--;
-        endB--;
-      }
-      const removed = a.slice(start, endA);
-      const added = b.slice(start, endB);
-      const lines = [
-        ...removed.slice(0, 4).map((l) => `- ${l}`),
-        ...(removed.length > 4 ? [`- …（另有 ${removed.length - 4} 行删除）`] : []),
-        ...added.slice(0, 4).map((l) => `+ ${l}`),
-        ...(added.length > 4 ? [`+ …（另有 ${added.length - 4} 行新增）`] : []),
-      ];
-      return { lines };
+    function buildChangedSummaryForSave(): { lines: string[] } | null {
+      return buildChangedSummary(existing.content ?? '', newContent ?? '');
     }
 
     // 创建版本快照
@@ -1050,14 +1182,18 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .where(eq(documentVersions.documentId, id));
     const nextVersion = Number(maxVersion?.max ?? 0) + 1;
 
-    await db.insert(documentVersions).values({
-      documentId: id,
-      versionNo: nextVersion,
-      authorId: userId,
-      message: body.message ?? null,
-      content: newContent ?? '',
-      changedSummary: buildChangedSummary(),
-    });
+    const [versionRow] = await db
+      .insert(documentVersions)
+      .values({
+        documentId: id,
+        versionNo: nextVersion,
+        authorId: userId,
+        message: body.message ?? null,
+        content: newContent ?? '',
+        size: byteSize,
+        changedSummary: buildChangedSummaryForSave(),
+      })
+      .returning({ id: documentVersions.id });
 
     // 更新文档
     const [updated] = await db
@@ -1067,6 +1203,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         title: body.title ?? existing.title,
         tags: newTags,
         wordCount,
+        size: byteSize,
         contentHash: newHash,
         status: 'modified',
         updatedBy: userId,
@@ -1093,13 +1230,24 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       existing.path,
       newContent ?? '',
       { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+      id,
     );
+    // Git 推送成功后回填版本提交号（时间线 commit hash 展示；未填保存说明时以提交信息兜底）
+    if (versionRow && effects.git.ok && effects.git.pushed && effects.git.commitHash) {
+      await db
+        .update(documentVersions)
+        .set({
+          commitHash: effects.git.commitHash,
+          ...(body.message ? {} : effects.git.message ? { message: effects.git.message } : {}),
+        })
+        .where(eq(documentVersions.id, versionRow.id));
+    }
     await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
       channel: 'sync',
       payload: {
         room: `project:${existing.projectId}`,
         event: 'document.updated',
-        payload: { documentId: existing.id, path: existing.path, versionNo: nextVersion, by: meUser?.name ?? '' },
+        payload: { documentId: existing.id, path: existing.path, versionNo: nextVersion, by: meUser?.name ?? '', byId: userId },
       },
     })})`);
 
@@ -1128,6 +1276,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         authorId: documentVersions.authorId,
         message: documentVersions.message,
         changedSummary: documentVersions.changedSummary,
+        size: documentVersions.size,
+        storageRef: documentVersions.storageRef,
         createdAt: documentVersions.createdAt,
         authorName: users.name,
       })
@@ -1139,14 +1289,201 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json({ items: rows, total: rows.length });
   });
 
+  // ---- 单版本详情（diff 对比 / 版本预览 / 恢复前置） ----
+  app.get('/api/v1/documents/:id/versions/:vNo', async (c) => {
+    const userId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const vNo = Number(c.req.param('vNo'));
+    if (!Number.isFinite(vNo) || vNo < 1) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 版本号须为正整数' });
+
+    const [docRow] = await db
+      .select({ projectId: documents.projectId, kind: documents.kind })
+      .from(documents)
+      .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!docRow) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(docRow.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+
+    const [version] = await db
+      .select({
+        id: documentVersions.id,
+        documentId: documentVersions.documentId,
+        versionNo: documentVersions.versionNo,
+        authorId: documentVersions.authorId,
+        authorName: users.name,
+        message: documentVersions.message,
+        content: documentVersions.content,
+        size: documentVersions.size,
+        storageRef: documentVersions.storageRef,
+        changedSummary: documentVersions.changedSummary,
+        createdAt: documentVersions.createdAt,
+      })
+      .from(documentVersions)
+      .leftJoin(users, eq(documentVersions.authorId, users.id))
+      .where(and(eq(documentVersions.documentId, id), eq(documentVersions.versionNo, vNo)))
+      .limit(1);
+
+    if (!version) throw new HTTPException(404, { message: 'NOT_FOUND: VERSION_NOT_EXIST' });
+    return c.json({ ...version, kind: docRow.kind });
+  });
+
+  // ---- 恢复到指定版本（多人协作冲突版本回滚） ----
+  app.post('/api/v1/documents/:id/restore', async (c) => {
+    const userId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const body = (await c.req.json()) as { versionNo?: number; message?: string; baseVersionNo?: number };
+    const versionNo = Number(body.versionNo);
+    if (!Number.isFinite(versionNo) || versionNo < 1) {
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: versionNo 须为正整数' });
+    }
+
+    const [existing] = await db
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(existing.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    // 乐观并发保护（与 PUT 一致）
+    if (typeof body.baseVersionNo === 'number') {
+      const [latest] = await db
+        .select({ v: sql<number>`coalesce(max(${documentVersions.versionNo}), 0)` })
+        .from(documentVersions)
+        .where(eq(documentVersions.documentId, id));
+      if (Number(latest?.v ?? 0) !== body.baseVersionNo) {
+        throw new HTTPException(409, { message: 'DOCUMENT_VERSION_CONFLICT' });
+      }
+    }
+
+    const [targetVersion] = await db
+      .select()
+      .from(documentVersions)
+      .where(and(eq(documentVersions.documentId, id), eq(documentVersions.versionNo, versionNo)))
+      .limit(1);
+    if (!targetVersion) throw new HTTPException(404, { message: 'NOT_FOUND: VERSION_NOT_EXIST' });
+
+    // 幂等：已是当前最新内容 → 不产生新版本
+    const alreadyCurrent =
+      targetVersion.content === existing.content &&
+      (targetVersion.storageRef ?? null) === (existing.storageRef ?? null) &&
+      targetVersion.size === existing.size;
+    if (alreadyCurrent) {
+      return c.json({ ok: true, restored: false, reason: 'ALREADY_CURRENT', restoredFrom: versionNo });
+    }
+
+    const newContent = targetVersion.content;
+    const newStorageRef = targetVersion.storageRef;
+    const newSize = targetVersion.size;
+
+    // 版本号：取 next（事务内重算避免并发）
+    const [maxVersion] = await db
+      .select({ max: sql<number>`coalesce(max(${documentVersions.versionNo}), 0)` })
+      .from(documentVersions)
+      .where(eq(documentVersions.documentId, id));
+    const nextVersion = Number(maxVersion?.max ?? 0) + 1;
+
+    // 行级简化 diff（从当前内容恢复到目标内容）
+    const summary = existing.kind === 'text'
+      ? buildChangedSummary(existing.content ?? '', newContent ?? '')
+      : null;
+
+    await db.transaction(async (tx) => {
+      await tx.insert(documentVersions).values({
+        documentId: id,
+        versionNo: nextVersion,
+        authorId: userId,
+        message: body.message ?? `恢复自 v${versionNo}`,
+        content: newContent,
+        storageRef: newStorageRef ?? null,
+        size: newSize,
+        changedSummary: summary,
+      });
+
+      if (existing.kind === 'text') {
+        const wordCount = newContent ? [...newContent.matchAll(/[\p{L}\p{N}]/gu)].length : 0;
+        const crypto = await import('crypto');
+        const newHash = crypto.createHash('sha256').update(newContent ?? '').digest('hex');
+        await tx.update(documents).set({
+          content: newContent,
+          size: newSize,
+          wordCount,
+          contentHash: newHash,
+          status: 'modified',
+          updatedBy: userId,
+          updatedAt: new Date(),
+        }).where(eq(documents.id, id));
+      } else {
+        // binary：恢复 blob 指针
+        await tx.update(documents).set({
+          storageRef: newStorageRef,
+          size: newSize,
+          content: '',
+          status: 'modified',
+          updatedBy: userId,
+          updatedAt: new Date(),
+        }).where(eq(documents.id, id));
+      }
+    });
+
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, existing.projectId)).limit(1);
+
+    // NAS / Git 同步（文本：写回 content → NAS 落盘；binary：blob 引用不变但 storageRef 可能变 → 落 blob）
+    const effects = await docStorageEffects(
+      deps,
+      { id: existing.projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+      existing.path,
+      null,
+      { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+    );
+
+    await db.insert(activities).values({
+      projectId: existing.projectId,
+      actorId: userId,
+      verb: 'restore',
+      targetType: 'document',
+      targetId: existing.id,
+      targetTitle: existing.title ?? existing.path,
+      meta: { fromVersionNo: versionNo, toVersionNo: nextVersion },
+    });
+
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${existing.projectId}`,
+        event: 'document.updated',
+        payload: { documentId: existing.id, path: existing.path, by: meUser?.name ?? '', byId: userId, restoredFrom: versionNo },
+      },
+    })})`);
+
+    return c.json({ ok: true, restored: true, version: nextVersion, restoredFrom: versionNo, effects });
+  });
+
   // ---- 新建文档（D6 BrowsePage 新建按钮） ----
   app.post('/api/v1/projects/:id/documents', async (c) => {
     const userId = c.get('userId') as string;
     const projectId = c.req.param('id')!;
     const body = (await c.req.json()) as { path?: string; title?: string; content?: string };
 
-    if (!body.path || !body.path.endsWith('.md'))
-      throw new HTTPException(400, { message: 'VALIDATION_FAILED: path must end with .md' });
+    // 任意扩展名的文本/代码文件均可创建；二进制上传在 P2 提供
+    const norm = normalizeTreePath(body.path, { requireBasename: true, allowDotFile: true });
+    if (!norm)
+      throw new HTTPException(400, {
+        message: 'VALIDATION_FAILED: 路径不合法（须含文件扩展名，不含非法字符）',
+      });
+    const ft = resolveFileType(norm);
+    if (ft.kind === 'binary') {
+      throw new HTTPException(415, {
+        message: `UNSUPPORTED_MEDIA_KIND: 暂不支持通过此接口创建 .${ft.ext || '未知'} 二进制文件（上传能力 P2 提供）`,
+      });
+    }
 
     {
       const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
@@ -1156,23 +1493,28 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const [existing] = await db
       .select({ id: documents.id })
       .from(documents)
-      .where(and(eq(documents.projectId, projectId), eq(documents.path, body.path), isNull(documents.deletedAt)))
+      .where(and(eq(documents.projectId, projectId), eq(documents.path, norm), isNull(documents.deletedAt)))
       .limit(1);
     if (existing) throw new HTTPException(409, { message: 'DOCUMENT_EXISTS' });
 
     const content = body.content ?? '';
-    const title = body.title ?? content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? body.path.replace(/\.md$/, '');
+    const title = body.title?.trim() || defaultDocTitle(norm, content);
     const crypto = await import('crypto');
     const contentHash = content ? crypto.createHash('sha256').update(content).digest('hex') : null;
     const wordCount = content ? [...content.matchAll(/[\p{L}\p{N}]/gu)].length : 0;
+    const byteSize = byteLength(content);
 
     const [doc] = await db
       .insert(documents)
       .values({
         projectId,
-        path: body.path,
+        path: norm,
         title,
         content: content || null,
+        kind: 'text',
+        ext: ft.ext,
+        mime: ft.mime,
+        size: byteSize,
         contentHash,
         status: content ? 'modified' : 'untracked',
         wordCount,
@@ -1189,22 +1531,49 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       targetTitle: title,
     });
 
+    // 版本时间线留痕（PRD F46）：新建即生成 v1 快照（空文档无内容，不产生快照）
+    let versionId: string | null = null;
+    if (content) {
+      const [v] = await db
+        .insert(documentVersions)
+        .values({
+          documentId: doc!.id,
+          versionNo: 1,
+          authorId: userId,
+          content,
+          size: byteSize,
+        })
+        .returning({ id: documentVersions.id });
+      versionId = v?.id ?? null;
+    }
+
     // NAS 镜像 + Git 自动提交 + 项目房间广播
     const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
     const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, projectId)).limit(1);
     const effects = await docStorageEffects(
       deps,
       { id: projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
-      body.path!,
+      norm,
       content,
       { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+      doc!.id,
     );
+    // Git 推送成功后回填版本提交号（与 Gitea 提交一一对应）
+    if (versionId && effects.git.ok && effects.git.pushed && effects.git.commitHash) {
+      await db
+        .update(documentVersions)
+        .set({
+          commitHash: effects.git.commitHash,
+          ...(effects.git.message ? { message: effects.git.message } : {}),
+        })
+        .where(eq(documentVersions.id, versionId));
+    }
     await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
       channel: 'sync',
       payload: {
         room: `project:${projectId}`,
         event: 'document.updated',
-        payload: { documentId: doc!.id, path: body.path, by: meUser?.name ?? '' },
+        payload: { documentId: doc!.id, path: norm, created: true, by: meUser?.name ?? '', byId: userId },
       },
     })})`);
 
@@ -1226,6 +1595,18 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
     }
 
+    // 反向引用（验收 #7）：哪些未删除文档链接/图片边指向本文件
+    const referrers = await db
+      .select({
+        id: documents.id,
+        path: documents.path,
+        title: documents.title,
+      })
+      .from(documents)
+      .innerJoin(documentLinks, eq(documentLinks.fromDocumentId, documents.id))
+      .where(and(eq(documentLinks.toDocumentId, id), isNull(documents.deletedAt)))
+      .limit(10);
+
     await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, id));
 
     await db.insert(activities).values({
@@ -1235,6 +1616,10 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       targetType: 'document',
       targetId: existing.id,
       targetTitle: existing.title ?? existing.path,
+      meta: {
+        referencedCount: referrers.length,
+        referencedBy: referrers,
+      },
     });
 
     // NAS 镜像删除 + Git 自动提交删除 + 项目房间广播
@@ -1252,11 +1637,274 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       payload: {
         room: `project:${existing.projectId}`,
         event: 'document.updated',
-        payload: { documentId: existing.id, path: existing.path, deleted: true, by: meUser?.name ?? '' },
+        payload: { documentId: existing.id, path: existing.path, deleted: true, by: meUser?.name ?? '', byId: userId },
       },
     })})`);
 
     return c.json({ ok: true, effects });
+  });
+
+  // ---- 移动/重命名文档（D8 目录树管理：右键菜单 / 拖拽移动；meta 记录 from→to） ----
+  // 路径变更 = Git 工作副本内一次「删除旧路径 + 写入新路径」的原子提交；NAS 镜像同步搬移。
+  // 只改 title 不触发存储副作用；移动不产生新版本快照（不污染 baseVersionNo 冲突检测语义）。
+  app.patch('/api/v1/documents/:id', async (c) => {
+    const userId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const body = (await c.req.json().catch(() => null)) as { path?: unknown; title?: unknown } | null;
+    if (!body) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 请求体需为 JSON' });
+
+    const [existing] = await db
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
+      .limit(1);
+    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(existing.projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    let newTitle: string | undefined;
+    if (body.title !== undefined) {
+      if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200) {
+        throw new HTTPException(400, { message: 'VALIDATION_FAILED: 标题需为 1–200 字符' });
+      }
+      newTitle = body.title.trim();
+    }
+
+    let newPath = existing.path;
+    let newExt = existing.ext;
+    let newMime = existing.mime;
+    if (body.path !== undefined) {
+      const norm = normalizeTreePath(body.path, { requireBasename: true, allowDotFile: true });
+      if (!norm) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 路径不合法（须含文件扩展名，不含非法字符）' });
+      if (norm !== existing.path) {
+        if (existing.kind !== 'binary') {
+          const ft = resolveFileType(norm);
+          if (ft.kind === 'binary') {
+            throw new HTTPException(415, {
+              message: `UNSUPPORTED_MEDIA_KIND: 不能将文件改为 .${ft.ext || '未知'} 二进制类型（请使用上传接口）`,
+            });
+          }
+          newExt = ft.ext;
+          newMime = ft.mime;
+        }
+        // 全量唯一约束（软删除行仍占位）：一经占用即拒绝，避免撞 documents_project_path_uq
+        const [dup] = await db
+          .select({ id: documents.id })
+          .from(documents)
+          .where(and(eq(documents.projectId, existing.projectId), eq(documents.path, norm), ne(documents.id, id)))
+          .limit(1);
+        if (dup) throw new HTTPException(409, { message: `DOCUMENT_EXISTS: 目标路径已被占用（${norm}）` });
+        newPath = norm;
+      }
+    }
+
+    const moved = newPath !== existing.path;
+    const titleChanged = newTitle !== undefined && newTitle !== existing.title;
+    if (!moved && !titleChanged) {
+      return c.json({ ok: true, document: existing, effects: null });
+    }
+
+    const [updated] = await db
+      .update(documents)
+      .set({
+        path: newPath,
+        title: newTitle ?? existing.title,
+        ext: newExt,
+        mime: newMime,
+        status: moved ? 'modified' : existing.status,
+        updatedBy: userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(documents.id, id))
+      .returning();
+
+    await db.insert(activities).values({
+      projectId: existing.projectId,
+      actorId: userId,
+      verb: moved ? 'move' : 'rename',
+      targetType: 'document',
+      targetId: existing.id,
+      targetTitle: updated?.title ?? newPath,
+      meta: moved ? { from: existing.path, to: newPath } : { from: existing.title, to: newTitle },
+    });
+
+    // 存储副作用（仅路径变更时触发）：NAS 镜像搬移 + Git 单提交改名
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, existing.projectId)).limit(1);
+    let effects: DocEffectResult | null = null;
+    if (moved) {
+      effects = await docStorageEffectsBatch(
+        deps,
+        { id: existing.projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+        [{ op: 'move', path: newPath, fromPath: existing.path, kind: existing.kind === 'binary' ? 'binary' : 'text', content: existing.content, documentId: existing.id }],
+        { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+        `docs(${existing.path} → ${newPath}): 移动/重命名文档（${meUser?.name ?? ''}）`,
+      );
+    }
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${existing.projectId}`,
+        event: 'document.updated',
+        payload: {
+          documentId: existing.id,
+          path: newPath,
+          oldPath: moved ? existing.path : undefined,
+          moved: moved || undefined,
+          by: meUser?.name ?? '',
+          byId: userId,
+        },
+      },
+    })})`);
+
+    return c.json({ ok: true, document: updated, effects });
+  });
+
+  // ---- 重命名文件夹（D8 目录树管理：批量改 path 前缀，一次 Git 提交） ----
+  app.post('/api/v1/projects/:id/folders/rename', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json().catch(() => null)) as { from?: unknown; to?: unknown } | null;
+    const from = normalizeTreePath(body?.from);
+    const to = normalizeTreePath(body?.to);
+    if (!from || !to) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 文件夹路径不合法' });
+    if (from === to) return c.json({ ok: true, moved: 0, effects: null });
+    if (to.startsWith(`${from}/`)) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 不能移动到自身的子目录' });
+
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    const rows = await db
+      .select({ id: documents.id, path: documents.path, content: documents.content })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
+    const affected = rows.filter((r) => r.path.startsWith(`${from}/`));
+    if (affected.length === 0) throw new HTTPException(404, { message: 'FOLDER_NOT_FOUND: 文件夹不存在或没有文档' });
+
+    const affectedIds = new Set(affected.map((r) => r.id));
+    const taken = new Set(rows.filter((r) => !affectedIds.has(r.id)).map((r) => r.path));
+    const updates = affected.map((r) => ({ id: r.id, from: r.path, to: to + r.path.slice(from.length), content: r.content }));
+    for (const u of updates) {
+      if (taken.has(u.to)) throw new HTTPException(409, { message: `DOCUMENT_EXISTS: 目标路径已被占用（${u.to}）` });
+    }
+
+    const now = new Date();
+    for (const u of updates) {
+      await db
+        .update(documents)
+        .set({ path: u.to, status: 'modified', updatedBy: userId, updatedAt: now })
+        .where(eq(documents.id, u.id));
+    }
+
+    await db.insert(activities).values({
+      projectId,
+      actorId: userId,
+      verb: 'rename',
+      targetType: 'folder',
+      targetId: null,
+      targetTitle: `${from} → ${to}`,
+      meta: { from, to, count: updates.length },
+    });
+
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, projectId)).limit(1);
+    const effects = await docStorageEffectsBatch(
+      deps,
+      { id: projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+      updates.map((u) => ({
+        op: 'move' as const,
+        path: u.to,
+        fromPath: u.from,
+        content: u.content,
+        documentId: u.id,
+      })),
+      { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+      `docs(${from}/): 重命名文件夹（${meUser?.name ?? ''}）`,
+    );
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${projectId}`,
+        event: 'document.updated',
+        payload: { folder: from, folderTo: to, moved: true, documentIds: updates.map((u) => u.id), by: meUser?.name ?? '', byId: userId },
+      },
+    })})`);
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'folder.rename',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { from, to, count: updates.length },
+    });
+
+    return c.json({ ok: true, moved: updates.length, effects });
+  });
+
+  // ---- 删除文件夹（D8 目录树管理：批量软删除 + 一次 Git 提交） ----
+  app.post('/api/v1/projects/:id/folders/delete', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json().catch(() => null)) as { folder?: unknown } | null;
+    const folder = normalizeTreePath(body?.folder);
+    if (!folder) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 文件夹路径不合法' });
+
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+
+    const rows = await db
+      .select({ id: documents.id, path: documents.path })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
+    const affected = rows.filter((r) => r.path.startsWith(`${folder}/`));
+    if (affected.length === 0) throw new HTTPException(404, { message: 'FOLDER_NOT_FOUND: 文件夹不存在或没有文档' });
+
+    await db
+      .update(documents)
+      .set({ deletedAt: new Date() })
+      .where(inArray(documents.id, affected.map((r) => r.id)));
+
+    await db.insert(activities).values({
+      projectId,
+      actorId: userId,
+      verb: 'delete',
+      targetType: 'folder',
+      targetId: null,
+      targetTitle: folder,
+      meta: { count: affected.length },
+    });
+
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, projectId)).limit(1);
+    const effects = await docStorageEffectsBatch(
+      deps,
+      { id: projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
+      affected.map((r) => ({ op: 'delete' as const, path: r.path })),
+      { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+      `docs(${folder}/): 删除文件夹（${meUser?.name ?? ''}）`,
+    );
+    await db.execute(sql`select pg_notify('ewiki_events', ${JSON.stringify({
+      channel: 'sync',
+      payload: {
+        room: `project:${projectId}`,
+        event: 'document.updated',
+        payload: { folder, deleted: true, documentIds: affected.map((r) => r.id), by: meUser?.name ?? '', byId: userId },
+      },
+    })})`);
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'folder.delete',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { folder, count: affected.length },
+    });
+
+    return c.json({ ok: true, deleted: affected.length, effects });
   });
 
   // ---- PATCH projects/:id（P5 ProjectSettingsPage） ----
@@ -2042,4 +2690,5 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
 
   // ---- 平台化扩展路由（需求 1-10）：注册/系统管理/存储配置/建库向导/站点公开访问 ----
   registerPlatformRoutes(app, deps);
+  registerFileRoutes(app, deps);
 }

@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Clock,
   Download,
+  Files,
   FileText,
   Filter,
   GitBranch,
@@ -229,30 +230,96 @@ interface AggregatedVersion extends DocumentVersion {
   docTitle: string;
 }
 
-function CommitCard({ version, docTitle, delay }: {
-  version: AggregatedVersion;
-  docTitle: string | null;
+// 同一 Git 提交可能一次改动多个文件，document_versions 里表现为共享 commitHash 的多行；
+// 时间线按提交聚合展示（commitHash 为空的行各自独立成组）。
+type CommitGroup = {
+  key: string;
+  hash: string | null;
+  versions: AggregatedVersion[];
+  time: number;
+};
+
+function groupByCommit(versions: AggregatedVersion[]): CommitGroup[] {
+  const map = new Map<string, CommitGroup>();
+  for (const v of versions) {
+    const key = v.commitHash ? `c:${v.commitHash}` : `l:${v.id}`;
+    let g = map.get(key);
+    if (!g) {
+      g = { key, hash: v.commitHash, versions: [], time: new Date(v.createdAt).getTime() || 0 };
+      map.set(key, g);
+    }
+    g.versions.push(v);
+    const t = new Date(v.createdAt).getTime() || 0;
+    if (t > g.time) g.time = t;
+  }
+  return [...map.values()]
+    .map((g) => ({
+      ...g,
+      versions: [...g.versions].sort((a, b) => a.docTitle.localeCompare(b.docTitle)),
+    }))
+    .sort((a, b) => b.time - a.time);
+}
+
+function DiffPreview({ diffLines, max = 6 }: { diffLines: DiffLine[]; max?: number }): React.ReactElement | null {
+  if (diffLines.length === 0) return null;
+  return (
+    <div
+      className="rounded-md overflow-hidden border"
+      style={{ background: 'var(--bg-page)', borderColor: 'var(--border-soft)' }}
+    >
+      {diffLines.slice(0, max).map((line, i) => {
+        if (line.type === 'add') {
+          return (
+            <div key={i} className="px-3 py-0.5 text-xs font-mono leading-5 bg-emerald-50 text-emerald-700">
+              <span className="mr-2 text-emerald-500">+</span>
+              {line.text}
+            </div>
+          );
+        }
+        if (line.type === 'del') {
+          return (
+            <div key={i} className="px-3 py-0.5 text-xs font-mono leading-5 bg-red-50 text-red-700">
+              <span className="mr-2 text-red-500">−</span>
+              {line.text}
+            </div>
+          );
+        }
+        return (
+          <div key={i} className="px-3 py-0.5 text-xs font-mono leading-5 text-neutral-500">
+            <span className="mr-2 text-neutral-300"> </span>
+            {line.text}
+          </div>
+        );
+      })}
+      {diffLines.length > max && (
+        <div className="px-3 py-1 text-[11px] text-neutral-400 border-t"
+          style={{ borderColor: 'var(--border-soft)' }}>
+          … 共 {diffLines.length} 行变更
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CommitCard({ group, delay }: {
+  group: CommitGroup;
   delay: number;
 }): React.ReactElement {
   const [hover, setHover] = useState(false);
   const showToast = useShowToast();
 
-  // 真实 changedSummary 解析；后端尚未写入时 diffLines 为空数组
-  const diffLines = useMemo(
-    () => parseChangedSummary(version.changedSummary),
-    [version.changedSummary],
-  );
-  const additions = diffLines.filter((l) => l.type === 'add').length;
-  const deletions = diffLines.filter((l) => l.type === 'del').length;
+  const multi = group.versions.length > 1;
+  // 同一次提交的各版本共享 message / author / hash，取首个作为卡片头代表
+  const head = group.versions[0];
+  const diffs = group.versions.map((v) => ({ v, lines: parseChangedSummary(v.changedSummary) }));
+  const additions = diffs.reduce((n, d) => n + d.lines.filter((l) => l.type === 'add').length, 0);
+  const deletions = diffs.reduce((n, d) => n + d.lines.filter((l) => l.type === 'del').length, 0);
+  const hasDiff = diffs.some((d) => d.lines.length > 0);
 
   // 裁剪维度：完整 diff / 版本回滚 / 版本星标 均无后端接口支撑
   // （versions 列表不返回 content，无 rollback / star 端点），按计划先 toast 占位
   const handleViewDiff = (): void => {
-    if (diffLines.length > 0) {
-      showToast('完整 diff 对比视图即将上线');
-    } else {
-      showToast('该版本暂无差异摘要数据');
-    }
+    showToast(hasDiff ? '完整 diff 对比视图即将上线' : '该提交暂无差异摘要数据');
   };
   const handleRollback = (): void => showToast('版本回滚功能即将上线');
   const handleStar = (): void => showToast('版本星标功能即将上线');
@@ -267,14 +334,16 @@ function CommitCard({ version, docTitle, delay }: {
       <div className="flex items-start gap-3">
         <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
           style={{ background: 'var(--bg-page)' }}>
-          <GitCommit size={16} className="text-neutral-400" />
+          {multi
+            ? <Files size={16} className="text-primary-500" />
+            : <GitCommit size={16} className="text-neutral-400" />}
         </div>
 
         <div className="flex-1 min-w-0">
-          {docTitle && (
+          {multi && (
             <div className="mb-1 flex items-center gap-1 text-[11px] text-neutral-500">
-              <FileText size={12} className="text-neutral-400" />
-              <span className="font-medium text-neutral-700 truncate">{docTitle}</span>
+              <Files size={12} className="text-primary-400" />
+              <span className="font-medium text-primary-600">提交包含 {group.versions.length} 个文件</span>
             </div>
           )}
 
@@ -283,38 +352,61 @@ function CommitCard({ version, docTitle, delay }: {
             <span className="text-sm text-neutral-500 flex items-center gap-1">
               {/* 对齐原型 ProjectActivity.jsx:141：时间前的 Clock 图标 */}
               <Clock size={14} className="text-neutral-400" />
-              {relativeTime(version.createdAt)}
+              {relativeTime(head.createdAt)}
             </span>
             <span className="text-neutral-300">·</span>
             <div className="flex items-center gap-1">
               <span className={`w-5 h-5 rounded-full text-[10px] flex items-center justify-center font-medium ${AVATAR_CLS}`}>
-                {(version.authorName ?? '?').slice(0, 1).toUpperCase()}
+                {(head.authorName ?? '?').slice(0, 1).toUpperCase()}
               </span>
-              <span className="text-sm text-neutral-600 truncate">{version.authorName ?? '未知用户'}</span>
+              <span className="text-sm text-neutral-600 truncate">{head.authorName ?? '未知用户'}</span>
             </div>
-            <span className="inline-flex items-center gap-1 text-xs rounded-full px-2 py-0.5"
-              style={{ background: 'var(--bg-page)', color: 'var(--text-muted, #64748b)' }}>
-              <GitBranch size={11} />
-              v{version.versionNo}
-            </span>
+            {multi ? (
+              <span className="inline-flex items-center gap-1 text-xs rounded-full px-2 py-0.5 bg-primary-50 text-primary-600">
+                <GitBranch size={11} />
+                {group.versions.length} 个版本
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-xs rounded-full px-2 py-0.5"
+                style={{ background: 'var(--bg-page)', color: 'var(--text-muted, #64748b)' }}>
+                <GitBranch size={11} />
+                v{head.versionNo}
+              </span>
+            )}
           </div>
 
           {/* hash + message */}
           <div className="mt-1.5 flex items-start gap-2">
-            {version.commitHash && (
+            {group.hash && (
               <code className="shrink-0 font-mono text-xs rounded-full px-2 py-0.5"
                 style={{ background: 'var(--bg-page)', color: 'var(--text-muted, #64748b)' }}>
-                {version.commitHash.slice(0, 7)}
+                {group.hash.slice(0, 7)}
               </code>
             )}
             <span className="text-sm text-neutral-800 leading-6 break-all">
-              {version.message ?? '—'}
+              {head.message ?? '—'}
             </span>
           </div>
 
+          {/* 多文件：文件清单 */}
+          {multi && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {group.versions.map((v) => (
+                <span key={v.id}
+                  className="inline-flex items-center gap-1 text-[11px] rounded-full px-2 py-0.5 max-w-full"
+                  style={{ background: 'var(--bg-page)', color: 'var(--text-muted, #64748b)' }}
+                  title={v.docTitle}>
+                  <FileText size={11} className="shrink-0 text-neutral-400" />
+                  <span className="truncate max-w-[180px]">{v.docTitle}</span>
+                  <span className="shrink-0 text-neutral-400">v{v.versionNo}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           {/* 变更统计 + hover 三操作（操作后端未实现，toast 占位） */}
           <div className="mt-2 flex items-center gap-3 text-xs">
-            {diffLines.length > 0 ? (
+            {hasDiff ? (
               <>
                 <span className="font-medium text-emerald-600">+{additions}</span>
                 <span className="font-medium text-red-500">−{deletions}</span>
@@ -354,43 +446,28 @@ function CommitCard({ version, docTitle, delay }: {
         </div>
       </div>
 
-      {/* diff 预览块：原型 :42-54 的 +绿/-红 两行式渲染，数据来自 changedSummary */}
-      {diffLines.length > 0 && (
-        <div
-          className="mt-3 rounded-md overflow-hidden border"
-          style={{ background: 'var(--bg-page)', borderColor: 'var(--border-soft)' }}
-        >
-          {diffLines.slice(0, 6).map((line, i) => {
-            if (line.type === 'add') {
-              return (
-                <div key={i} className="px-3 py-0.5 text-xs font-mono leading-5 bg-emerald-50 text-emerald-700">
-                  <span className="mr-2 text-emerald-500">+</span>
-                  {line.text}
-                </div>
-              );
-            }
-            if (line.type === 'del') {
-              return (
-                <div key={i} className="px-3 py-0.5 text-xs font-mono leading-5 bg-red-50 text-red-700">
-                  <span className="mr-2 text-red-500">−</span>
-                  {line.text}
-                </div>
-              );
-            }
-            return (
-              <div key={i} className="px-3 py-0.5 text-xs font-mono leading-5 text-neutral-500">
-                <span className="mr-2 text-neutral-300"> </span>
-                {line.text}
+      {/* diff 预览块：单文件沿用两行式；多文件按文件分段，每段带文件名头 */}
+      {multi ? (
+        <div className="mt-3 space-y-2">
+          {diffs.map(({ v, lines }) => (
+            <div key={v.id} className="space-y-1">
+              <div className="flex items-center gap-1 text-[11px] text-neutral-500 px-0.5">
+                <FileText size={11} className="text-neutral-400" />
+                <span className="font-medium text-neutral-600 truncate">{v.docTitle}</span>
+                <span className="text-neutral-400">· v{v.versionNo}</span>
               </div>
-            );
-          })}
-          {diffLines.length > 6 && (
-            <div className="px-3 py-1 text-[11px] text-neutral-400 border-t"
-              style={{ borderColor: 'var(--border-soft)' }}>
-              … 共 {diffLines.length} 行变更
+              {lines.length > 0
+                ? <DiffPreview diffLines={lines} max={4} />
+                : <div className="text-[11px] text-neutral-400 px-0.5">无差异摘要</div>}
             </div>
-          )}
+          ))}
         </div>
+      ) : (
+        hasDiff && (
+          <div className="mt-3">
+            <DiffPreview diffLines={diffs[0].lines} max={6} />
+          </div>
+        )
       )}
     </div>
   );
@@ -525,7 +602,8 @@ export function ActivityPage(): React.ReactElement {
     return list;
   }, [allVersions, selectedDocId, search]);
 
-  // ---- Filtered feed ----
+  // 版本时间线以「提交」为原子单位：相同 commitHash 的多文件版本聚合为一张卡片
+  const commitGroups = useMemo(() => groupByCommit(filteredVersions), [filteredVersions]);
   const filteredFeed = useMemo(() => {
     const feed = feedQ.data?.items ?? [];
     let list = feed;
@@ -546,15 +624,21 @@ export function ActivityPage(): React.ReactElement {
 
   // ---- Export ----
   const handleExport = () => {
-    if (filteredVersions.length === 0) return;
+    if (commitGroups.length === 0) return;
     const header = selectedDocId === 'all'
       ? '# Changelog — 本项目全部文档\n\n'
       : `# Changelog — ${docTitleMap.get(selectedDocId) ?? ''}\n\n`;
-    const body = filteredVersions
-      .map((v) =>
-        `- \`${(v.commitHash ?? '').slice(0, 7) || 'v' + v.versionNo}\` ` +
-        `${v.authorName ?? '未知'}: ${v.message ?? ''} (${relativeTime(v.createdAt)})`,
-      )
+    const body = commitGroups
+      .map((g) => {
+        const h = g.versions[0];
+        const tag = (g.hash ?? '').slice(0, 7) || 'v' + h.versionNo;
+        const head = `- \`${tag}\` ${h.authorName ?? '未知'}: ${h.message ?? ''} (${relativeTime(h.createdAt)})`;
+        if (g.versions.length > 1) {
+          const files = g.versions.map((v) => `  - ${v.docTitle} (v${v.versionNo})`).join('\n');
+          return `${head}\n${files}`;
+        }
+        return head;
+      })
       .join('\n');
     const blob = new Blob([header + body], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -647,7 +731,7 @@ export function ActivityPage(): React.ReactElement {
               <button
                 type="button"
                 onClick={handleExport}
-                disabled={filteredVersions.length === 0}
+                disabled={commitGroups.length === 0}
                 className="btn-secondary !h-9 text-xs disabled:opacity-50 inline-flex items-center gap-1.5"
               >
                 <Download size={13} />
@@ -690,7 +774,7 @@ export function ActivityPage(): React.ReactElement {
           <div className="animate-fade-up" key="versions">
             {versionsLoading ? (
               <VersionSkeleton />
-            ) : filteredVersions.length === 0 ? (
+            ) : commitGroups.length === 0 ? (
               <div className="card p-12 text-center text-neutral-400">
                 <GitCommit size={40} className="mx-auto mb-3 text-neutral-300" />
                 <p className="text-sm">暂无版本记录</p>
@@ -704,15 +788,14 @@ export function ActivityPage(): React.ReactElement {
                 <div className="absolute left-[18px] top-0 bottom-0 w-px"
                   style={{ background: 'var(--border-soft)' }} />
                 <div className="space-y-4 pl-2">
-                  {filteredVersions.map((v, i) => (
-                    <div key={v.id} className="relative">
+                  {commitGroups.map((g, i) => (
+                    <div key={g.key} className="relative">
                       {/* timeline dot */}
                       <div
                         className="absolute -left-[2px] top-5 w-[10px] h-[10px] rounded-full bg-white border-2 border-primary-500 z-10"
                       />
                       <CommitCard
-                        version={v}
-                        docTitle={selectedDocId === 'all' ? v.docTitle : null}
+                        group={g}
                         delay={i * 55}
                       />
                     </div>

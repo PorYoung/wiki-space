@@ -58,4 +58,46 @@ describe('extractDocLinks', () => {
     expect(extractDocLinks([])).toEqual([]);
     expect(extractDocLinks([doc('x', 'a.md', null)])).toEqual([]);
   });
+
+  it('默认不抽图片边（向后兼容）', () => {
+    const out = extractDocLinks([
+      doc('x', 'README.md', '![封面](assets/cover.png)'),
+      doc('i', 'assets/cover.png', null),
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it('includeImages 时图片解析为内部图片边（精确路径优先）', () => {
+    const out = extractDocLinks(
+      [
+        doc('x', 'guides/start.md', '![封面](../assets/cover.png)'),
+        doc('i', 'assets/cover.png', null),
+      ],
+      { includeImages: true },
+    );
+    expect(out).toEqual([
+      { fromDocumentId: 'x', toDocumentId: 'i', externalUrl: null, broken: false, image: true },
+    ]);
+  });
+
+  it('includeImages 时缺失图片标记 broken 图片边', () => {
+    const out = extractDocLinks([doc('x', 'README.md', '![幽灵](assets/missing.png)')], {
+      includeImages: true,
+    });
+    expect(out).toEqual([
+      { fromDocumentId: 'x', toDocumentId: null, externalUrl: null, broken: true, image: true },
+    ]);
+  });
+
+  it('图片与普通链接指向同一目标时各自成边', () => {
+    const out = extractDocLinks(
+      [
+        doc('x', 'README.md', '[链接](assets/cover.png) ![图片](assets/cover.png)'),
+        doc('i', 'assets/cover.png', null),
+      ],
+      { includeImages: true },
+    );
+    expect(out).toHaveLength(2);
+    expect(out.filter((l) => l.image)).toHaveLength(1);
+  });
 });

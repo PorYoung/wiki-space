@@ -6,6 +6,7 @@ import type PgBoss from 'pg-boss';
 import { createDb } from '@ewiki/db';
 import type { Config } from '../config.js';
 import { registerRoutes } from './routes.js';
+import { registerRawRoute } from './routes-files.js';
 
 /** Hono 上下文变量类型扩充（SDD 4.1/4.2） */
 declare module 'hono' {
@@ -56,6 +57,7 @@ export function createApp(deps: AppDeps): Hono {
     c.json({ code: 'NOT_FOUND', message: '资源不存在', requestId: c.get('requestId') }, 404),
   );
 
+  registerRawRoute(app, deps);
   registerRoutes(app, deps);
 
   // ---- 生产模式静态托管：WEB_DIST 指向前端构建产物（apps/web/dist），SPA 回退 index.html ----

@@ -1,15 +1,17 @@
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import PgBoss from 'pg-boss';
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql as dsql } from 'drizzle-orm';
 import {
   activities,
   aiClassifyRuns,
   createDb,
   documentLinks,
   documents,
+  documentVersions,
   importJobs,
   notifications,
   projectMembers,
@@ -21,10 +23,12 @@ import {
   users,
 } from '@ewiki/db';
 import { ensureWorkdir, pullWorkdir, type ConnLike } from '@ewiki/git';
-import { reposRoot, resolveRoot, safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
-import { extractDocLinks, type Job } from '@ewiki/shared';
+import { LocalBlobStore, reposRoot, resolveRoot, safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
+import type { BlobStore } from '@ewiki/storage';
+import { extractDocLinks, resolveFileType, type ImportDocPayload, type Job } from '@ewiki/shared';
 import type { ClassifyProvider, ImportProvider, Notifier, NotificationType } from '@ewiki/shared';
-import { renderSite } from '@ewiki/render';
+import { renderSite, type SiteAsset } from '@ewiki/render';
+import { pipeline } from 'node:stream/promises';
 
 // Worker（SDD ADR-1：与 server 分池伸缩）
 // sync 队列为真实实现：文档库（projects 内嵌 Git/本地存储后端）→ MD 消化 → 状态机 → 动态写入 → LISTEN/NOTIFY 广播
@@ -37,15 +41,170 @@ const boss = new PgBoss({
 const log = (msg: string, extra?: object): void =>
   console.log(JSON.stringify({ level: 'info', msg, ...extra })); // pino 接入点（SDD 6.4）
 
-async function walkMd(dir: string, root: string, out: Array<{ rel: string; abs: string }>): Promise<void> {
+async function walkFiles(dir: string, root: string, out: Array<{ rel: string; abs: string }>): Promise<void> {
   for (const e of await fs.readdir(dir, { withFileTypes: true })) {
     if (e.name === '.git' || e.name === 'node_modules') continue;
     const abs = path.join(dir, e.name);
-    if (e.isDirectory()) await walkMd(abs, root, out);
-    else if (/\.(md|markdown)$/i.test(e.name)) {
+    if (e.isDirectory()) await walkFiles(abs, root, out);
+    else if (e.isFile()) {
       out.push({ rel: path.relative(root, abs).replace(/\\/g, '/'), abs });
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// BlobStore 单例：解析规则照抄 server routes-files.ts（BLOB_LOCAL_ROOT 优先，
+// 缺省回退 <FS_NAS_ROOT>/blobs）；worker 不 import server 包，env 就地读取。
+// ---------------------------------------------------------------------------
+
+let blobStoreSingleton: BlobStore | null = null;
+function getBlobStore(): BlobStore {
+  if (!blobStoreSingleton) {
+    const root = process.env.BLOB_LOCAL_ROOT?.trim()
+      ? path.resolve(process.env.BLOB_LOCAL_ROOT.trim())
+      : path.join(resolveRoot(process.env.FS_NAS_ROOT), 'blobs');
+    blobStoreSingleton = new LocalBlobStore(root);
+  }
+  return blobStoreSingleton;
+}
+
+type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+
+async function nextVersionNo(executor: DbExecutor, documentId: string): Promise<number> {
+  const [row] = await executor
+    .select({ v: dsql<string>`coalesce(max(${documentVersions.versionNo}), 0)` })
+    .from(documentVersions)
+    .where(eq(documentVersions.documentId, documentId));
+  return Number(row?.v ?? 0) + 1;
+}
+
+/** 去扩展名 basename 作为二进制/非 md 文本缺省标题（server titleFromPath 同规则） */
+function titleFromDocPath(p: string): string {
+  const base = p.split('/').pop() ?? p;
+  const dot = base.startsWith('.') ? -1 : base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+export interface UpsertFileDocResult {
+  documentId: string;
+  kind: 'text' | 'binary';
+  storageRef: string | null;
+  hash: string;
+}
+
+/**
+ * 文件库统一落库通道（P3b）：harvest（文件夹同步）与 import（文件夹导入）共用，
+ * 避免两套逻辑漂移。文本写 content 列；二进制先 put blob（内容寻址天然去重），
+ * 再在同事务内成对写 documents(kind=binary,storageRef…) + document_versions 首版本
+ * （DB CHECK：(kind='binary')=(storage_ref IS NOT NULL)）。
+ */
+async function upsertFileDoc(
+  executor: DbExecutor,
+  projectId: string,
+  docPath: string,
+  payload: ImportDocPayload,
+  status: 'synced' | 'modified',
+): Promise<UpsertFileDocResult> {
+  const ft = resolveFileType(docPath);
+  const now = new Date();
+
+  if (payload.kind === 'binary') {
+    const buffer = Buffer.isBuffer(payload.data) ? payload.data : Buffer.from(payload.data);
+    const storageRef = await getBlobStore().put(buffer);
+    const hashHex = storageRef.slice('sha256:'.length);
+
+    const [upserted] = await executor
+      .insert(documents)
+      .values({
+        projectId,
+        path: docPath,
+        title: titleFromDocPath(docPath),
+        content: '',
+        contentHash: hashHex,
+        kind: 'binary',
+        ext: ft.ext,
+        mime: ft.mime,
+        size: buffer.length,
+        storageRef,
+        status,
+        wordCount: 0,
+      })
+      .onConflictDoUpdate({
+        target: [documents.projectId, documents.path],
+        set: {
+          title: titleFromDocPath(docPath),
+          content: '',
+          contentHash: hashHex,
+          kind: 'binary',
+          ext: ft.ext,
+          mime: ft.mime,
+          size: buffer.length,
+          storageRef,
+          status,
+          wordCount: 0,
+          deletedAt: null,
+          updatedAt: now,
+        },
+      })
+      .returning({ id: documents.id });
+
+    const versionNo = await nextVersionNo(executor, upserted!.id);
+    await executor.insert(documentVersions).values({
+      documentId: upserted!.id,
+      versionNo,
+      content: '',
+      storageRef,
+      size: buffer.length,
+      message: status === 'synced' ? '文件夹同步导入' : '文件夹导入',
+    });
+
+    return { documentId: upserted!.id, kind: 'binary', storageRef, hash: hashHex };
+  }
+
+  const content = payload.content;
+  const hashHex = createHash('sha256').update(content).digest('hex');
+  const isMd = ft.typeId === 'markdown';
+  const title = isMd
+    ? content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? titleFromDocPath(docPath)
+    : titleFromDocPath(docPath);
+  const wordCount = content.length;
+
+  const [upserted] = await executor
+    .insert(documents)
+    .values({
+      projectId,
+      path: docPath,
+      title,
+      content,
+      contentHash: hashHex,
+      kind: 'text',
+      ext: ft.ext,
+      mime: ft.mime,
+      size: Buffer.byteLength(content, 'utf8'),
+      storageRef: null,
+      status,
+      wordCount,
+    })
+    .onConflictDoUpdate({
+      target: [documents.projectId, documents.path],
+      set: {
+        title,
+        content,
+        contentHash: hashHex,
+        kind: 'text',
+        ext: ft.ext,
+        mime: ft.mime,
+        size: Buffer.byteLength(content, 'utf8'),
+        storageRef: null,
+        status,
+        wordCount,
+        deletedAt: null,
+        updatedAt: now,
+      },
+    })
+    .returning({ id: documents.id });
+
+  return { documentId: upserted!.id, kind: 'text', storageRef: null, hash: hashHex };
 }
 
 async function harvestDocsFromDir(
@@ -53,40 +212,52 @@ async function harvestDocsFromDir(
   root: string,
 ): Promise<{ docsUpserted: number; docsRemoved: number }> {
   const found: Array<{ rel: string; abs: string }> = [];
-  await walkMd(root, root, found);
+  await walkFiles(root, root, found);
 
   // 先取现存（含已软删）文档哈希，用于区分「真正写入」与「内容未变」
-  const existingHash = new Map<string, { id: string; hash: string; deleted: boolean }>();
+  const existingHash = new Map<string, { id: string; hash: string; deleted: boolean; status: string }>();
   const before = await db
-    .select({ id: documents.id, path: documents.path, contentHash: documents.contentHash, deletedAt: documents.deletedAt })
+    .select({
+      id: documents.id,
+      path: documents.path,
+      contentHash: documents.contentHash,
+      deletedAt: documents.deletedAt,
+      status: documents.status,
+    })
     .from(documents)
     .where(eq(documents.projectId, projectId));
-  for (const d of before) existingHash.set(d.path, { id: d.id, hash: d.contentHash ?? '', deleted: d.deletedAt !== null });
+  for (const d of before)
+    existingHash.set(d.path, { id: d.id, hash: d.contentHash ?? '', deleted: d.deletedAt !== null, status: d.status });
 
+  // 后端实际文件内容哈希：供下方「内容一致但状态滞后」的状态机对账使用
+  const fileHash = new Map<string, string>();
   let docsUpserted = 0;
   for (const f of found) {
-    const content = await fs.readFile(f.abs, 'utf8');
-    const contentHash = createHash('sha256').update(content).digest('hex');
+    const ft = resolveFileType(f.rel);
+    const buffer = await fs.readFile(f.abs);
+    const payload: ImportDocPayload =
+      ft.kind === 'text'
+        ? { kind: 'text', content: buffer.toString('utf8') }
+        : { kind: 'binary', data: buffer, size: buffer.length };
+
+    let hashHex: string;
+    if (payload.kind === 'binary') {
+      hashHex = createHash('sha256').update(buffer).digest('hex');
+    } else {
+      hashHex = createHash('sha256').update(payload.content).digest('hex');
+    }
+    fileHash.set(f.rel, hashHex);
     const prev = existingHash.get(f.rel);
-    // 内容哈希未变且文档在线：跳过无谓写入，也不计入变更数
-    if (prev && !prev.deleted && prev.hash === contentHash) continue;
-    const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? path.basename(f.rel);
-    const wordCount = content.length; // 中文近似：按字符数（TODO：分词计数，SDD 7.3）
-    await db
-      .insert(documents)
-      .values({
-        projectId,
-        path: f.rel,
-        title,
-        content,
-        contentHash,
-        status: 'synced',
-        wordCount,
-      })
-      .onConflictDoUpdate({
-        target: [documents.projectId, documents.path],
-        set: { title, content, contentHash, status: 'synced', wordCount, deletedAt: null, updatedAt: new Date() },
-      });
+    // 内容哈希未变且文档在线：跳过无谓写入，也不计入变更数（blob put 同样跳过，零 I/O）
+    if (prev && !prev.deleted && prev.hash === hashHex) continue;
+
+    if (payload.kind === 'binary') {
+      // 二进制 documents + document_versions 必须同事务成对写
+      await db.transaction((tx) => upsertFileDoc(tx, projectId, f.rel, payload, 'synced'));
+    } else {
+      // 文本通道沿用历史行为：不产生 document_versions（Git 历史即版本史）
+      await upsertFileDoc(db, projectId, f.rel, payload, 'synced');
+    }
     docsUpserted++;
   }
 
@@ -99,6 +270,20 @@ async function harvestDocsFromDir(
       docsRemoved++;
     }
   }
+
+  // 状态机对账：仍在线、内容哈希与后端一致、却停留在 untracked/modified/conflict 的文档，
+  // 说明其改动其实已经进入后端（保存推送链路回填前的历史数据），一次同步即纠正为 synced，
+  // 避免界面长期误报「未跟踪/本地修改」。
+  const reconciledIds = [...existingHash.entries()]
+    .filter(([p, info]) => !info.deleted && info.status !== 'synced' && fileHash.get(p) === info.hash)
+    .map(([, info]) => info.id);
+  if (reconciledIds.length > 0) {
+    await db
+      .update(documents)
+      .set({ status: 'synced', updatedAt: new Date() })
+      .where(inArray(documents.id, reconciledIds));
+  }
+
   return { docsUpserted, docsRemoved };
 }
 
@@ -337,17 +522,60 @@ async function handleSync(job: Job): Promise<void> {
 // 本文件仅保留 DB 查询与工件落盘；worker/server 预览共用同一渲染器。
 // ---------------------------------------------------------------------------
 
+/** 发布用资源复制项：站点相对 rel ← blob storageRef（safeJoin 落盘防穿越） */
+interface AssetCopy {
+  rel: string;
+  storageRef: string;
+}
+
 async function renderDocsToHtml(
   projectId: string,
   templateId: string | null,
-): Promise<{ pages: Array<{ rel: string; html: string }>; hash: string }> {
+): Promise<{ pages: Array<{ rel: string; html: string }>; hash: string; assets: SiteAsset[]; assetCopies: AssetCopy[] }> {
   const rows = await db
-    .select({ path: documents.path, title: documents.title, content: documents.content })
+    .select({
+      id: documents.id,
+      path: documents.path,
+      title: documents.title,
+      content: documents.content,
+      kind: documents.kind,
+      storageRef: documents.storageRef,
+    })
     .from(documents)
     .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)))
     .orderBy(documents.path);
 
-  return renderSite({ docs: rows, siteTitle: rows[0]?.title ?? 'Wiki', templateId });
+  // 二进制文档不产生页面（content 为空），仅作为图片资源候选参与链接解析
+  const textRows = rows.filter((r) => r.kind !== 'binary');
+
+  // 收集 md 图片相对引用：includeImages 产出 image 边；命中本项目二进制文档（storageRef 非空）
+  // 的目标才复制进站点 assets/，broken/外链不处理（broken 不阻断发布）。
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const assetByDocId = new Map<string, { path: string; storageRef: string }>();
+  const edges = extractDocLinks(
+    rows.map((r) => ({ id: r.id, path: r.path, content: r.content })),
+    { includeImages: true },
+  );
+  for (const e of edges) {
+    if (!e.image || e.broken || !e.toDocumentId) continue;
+    const target = byId.get(e.toDocumentId);
+    if (target && target.kind === 'binary' && target.storageRef && !assetByDocId.has(target.id)) {
+      assetByDocId.set(target.id, { path: target.path, storageRef: target.storageRef });
+    }
+  }
+
+  // assets 目录布局：assets/<二进制文档原 posix 路径>（层级与文档库一致；
+  // 物理 blob 按 sha256 去重与站点副本数量无关）
+  const assets: SiteAsset[] = [];
+  const assetCopies: AssetCopy[] = [];
+  for (const a of assetByDocId.values()) {
+    const rel = `assets/${a.path}`;
+    assets.push({ path: a.path, url: rel });
+    assetCopies.push({ rel, storageRef: a.storageRef });
+  }
+
+  const rendered = renderSite({ docs: textRows, siteTitle: textRows[0]?.title ?? 'Wiki', templateId, assets });
+  return { pages: rendered.pages, hash: rendered.hash, assets, assetCopies };
 }
 
 async function writeArtifacts(
@@ -356,6 +584,7 @@ async function writeArtifacts(
   ownerName: string,
   versionNo: number,
   pages: Array<{ rel: string; html: string }>,
+  assetCopies: AssetCopy[] = [],
 ): Promise<string> {
   // 站点资源写入用户分配的存储目录（模拟 NAS）：<NAS>/users/<owner>/sites/<slug>/vN
   const nasRoot = resolveRoot(process.env.FS_NAS_ROOT);
@@ -366,6 +595,21 @@ async function writeArtifacts(
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, p.html, 'utf8');
   }
+
+  // 被引用二进制：从内容寻址 BlobStore 流式复制到站点 assets/（safeJoin 防目录穿越）。
+  // 单个资源缺失/失败只告警不阻断发布（broken 图片语义：页面保留原相对地址）。
+  let assetsWritten = 0;
+  for (const a of assetCopies) {
+    const abs = safeJoin(root, a.rel);
+    try {
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await pipeline(getBlobStore().createReadStream(a.storageRef), createWriteStream(abs));
+      assetsWritten++;
+    } catch (err) {
+      log('publish asset copy failed', { siteId, rel: a.rel, storageRef: a.storageRef, err: String(err) });
+    }
+  }
+
   // 原子切换：写 current.json 指针（server /sites/:slug 读取该指针定位当前版本）
   const siteRoot = siteDir(nasRoot, ownerName, slug);
   await fs.writeFile(
@@ -373,7 +617,15 @@ async function writeArtifacts(
     JSON.stringify({ version: versionNo, publishedAt: new Date().toISOString() }, null, 2),
     'utf8',
   );
-  log('publish artifacts written', { siteId, slug, owner: ownerName, versionNo, files: pages.length, root });
+  log('publish artifacts written', {
+    siteId,
+    slug,
+    owner: ownerName,
+    versionNo,
+    files: pages.length,
+    assets: assetsWritten,
+    root,
+  });
   return root;
 }
 
@@ -429,11 +681,11 @@ async function handlePublish(job: Job): Promise<void> {
     .returning({ id: publishJobs.id });
 
   try {
-    const { pages, hash } = await renderDocsToHtml(projectId, site.templateId ?? null);
+    const { pages, hash, assetCopies } = await renderDocsToHtml(projectId, site.templateId ?? null);
     contentHash = hash;
     pagesCount = pages.filter((p) => p.rel.endsWith('.html')).length;
 
-    await writeArtifacts(site.id, slugForSite, ownerNameForSite, nextVersion, pages);
+    await writeArtifacts(site.id, slugForSite, ownerNameForSite, nextVersion, pages, assetCopies);
     artifactRef = `v${nextVersion}`;
 
     // 状态机：building → published
@@ -575,17 +827,13 @@ async function handleAiClassify(job: Job): Promise<void> {
 
 const toPosixPath = (p: string): string => p.replace(/\\/g, '/');
 
-async function upsertImportedDoc(projectId: string, docPath: string, content: string): Promise<void> {
-  const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? docPath;
-  const contentHash = createHash('md5').update(content).digest('hex');
-  const wordCount = content.length;
-  await db
-    .insert(documents)
-    .values({ projectId, path: docPath, title, content, contentHash, status: 'synced', wordCount })
-    .onConflictDoUpdate({
-      target: [documents.projectId, documents.path],
-      set: { title, content, contentHash, status: 'synced', wordCount, deletedAt: null, updatedAt: new Date() },
-    });
+/** 导入 sink 落库：复用 upsertFileDoc；二进制同事务成对写 documents + document_versions */
+async function upsertImportedDoc(projectId: string, docPath: string, payload: ImportDocPayload): Promise<void> {
+  if (payload.kind === 'binary') {
+    await db.transaction((tx) => upsertFileDoc(tx, projectId, docPath, payload, 'modified'));
+    return;
+  }
+  await upsertFileDoc(db, projectId, docPath, payload, 'modified');
 }
 
 /** 剥除 HTML → 纯文本，并从 URL 推导文档 path（URL path 优先，空则域名 slug） */
@@ -623,15 +871,23 @@ const importProviders: Record<string, ImportProvider> = {
       const root = String(params.path ?? '');
       if (!root) throw new Error('folder 导入缺少 params.path');
       const found: Array<{ rel: string; abs: string }> = [];
-      await walkMd(root, root, found);
+      await walkFiles(root, root, found);
       let docs = 0;
+      let binary = 0;
       for (const f of found) {
-        const content = await fs.readFile(f.abs, 'utf8');
-        await sink.upsertDoc(f.rel, content);
+        const ft = resolveFileType(f.rel);
+        if (ft.kind === 'text') {
+          const content = await fs.readFile(f.abs, 'utf8');
+          await sink.upsertDoc(f.rel, { kind: 'text', content });
+        } else {
+          const buf = await fs.readFile(f.abs);
+          await sink.upsertDoc(f.rel, { kind: 'binary', data: buf, size: buf.length });
+          binary++;
+        }
         docs++;
         if (docs % 10 === 0) await sink.onProgress(docs);
       }
-      return { docs };
+      return { docs, binary };
     },
   },
   // key 与 shared Importer 枚举/server 白名单一致；自研实现为单页抓取（深度爬取后期换适配器）
@@ -644,9 +900,9 @@ const importProviders: Record<string, ImportProvider> = {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`fetch failed with status ${res.status}`);
       const { docPath, title, text } = htmlToDoc(url, await res.text());
-      await sink.upsertDoc(docPath, `# ${title}\n\n${text}`);
+      await sink.upsertDoc(docPath, { kind: 'text', content: `# ${title}\n\n${text}` });
       await sink.onProgress(1);
-      return { docs: 1 };
+      return { docs: 1, binary: 0 };
     },
   },
 };
@@ -671,21 +927,27 @@ async function handleImport(job: Job): Promise<void> {
   try {
     if (!provider) throw new Error(`importer not supported: ${data.importer}`);
     const result = await provider.run(params, {
-      upsertDoc: (docPath, content) => upsertImportedDoc(data.projectId!, docPath, content),
+      upsertDoc: (docPath, payload) => upsertImportedDoc(data.projectId!, docPath, payload),
       onProgress: async (done) => {
         await db.update(importJobs).set({ progress: done }).where(eq(importJobs.id, data.importJobId!));
       },
     });
 
+    const binaryCount = result.binary ?? 0;
     await db
       .update(importJobs)
-      .set({ status: 'done', progress: result.docs, stats: { docs: result.docs, provider: provider.id }, finishedAt: new Date() })
+      .set({
+        status: 'done',
+        progress: result.docs,
+        stats: { docs: result.docs, binary: binaryCount, provider: provider.id },
+        finishedAt: new Date(),
+      })
       .where(eq(importJobs.id, data.importJobId));
     // 导入完成 → 通知触发者（startedBy 由 server 入队时随 job 下发）
     await notifyUsers([data.startedBy ?? null], 'import.finished', {
       projectId: data.projectId,
       title: data.importer,
-      message: `导入完成：${result.docs} 篇文档已入库`,
+      message: `导入完成：${result.docs} 个文件已入库（其中二进制 ${binaryCount} 个）`,
       link: `/projects/${data.projectId}/browse`,
     });
     log('import finished', { jobId: job.id, importJobId: data.importJobId, importer: data.importer, docs: result.docs });

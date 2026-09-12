@@ -73,6 +73,30 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return defaultLinkOpen(tokens, idx, options, env, self);
 };
 
+// -- 图片相对地址改写（发布站点：相对引用 → 站点 assets URL）。
+// 仅相对路径经 env.rewriteAsset 改写；http(s)/mailto/data:/页内锚点/绝对路径原样保留。
+// env 随每次 md.render(src, env) 传入，无 env 时默认渲染，行为与历史完全一致。
+interface MarkdownRenderEnv {
+  rewriteAsset?: (target: string) => string;
+}
+
+const ASSET_EXTERNAL_RE = /^(https?:|mailto:|data:)/i;
+
+const defaultImage =
+  md.renderer.rules.image ??
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.image = (tokens, idx, options, env, self) => {
+  const rewriteAsset = (env as MarkdownRenderEnv | undefined)?.rewriteAsset;
+  if (rewriteAsset) {
+    const token = tokens[idx]!;
+    const src = token.attrGet('src');
+    if (typeof src === 'string' && src && !ASSET_EXTERNAL_RE.test(src) && !src.startsWith('#') && !src.startsWith('/')) {
+      token.attrSet('src', rewriteAsset(src));
+    }
+  }
+  return defaultImage(tokens, idx, options, env, self);
+};
+
 // ---------------------------------------------------------------------------
 // KaTeX 数学公式（$..$ 行内 / $$..$$ 块级）
 // 适配自 waylonflinn/markdown-it-katex（MIT）：分隔符合法性校验 + 反斜杠转义扫描
@@ -198,8 +222,15 @@ md.renderer.rules.math_block = (tokens, idx) => `<div class="math-block">${katex
 
 // ---------------------------------------------------------------------------
 
-export const markdownToHtml = (src: string | null | undefined): string =>
-  src ? md.render(src) : '';
+export interface MarkdownRenderOptions {
+  /** 相对图片地址改写回调（发布站点相对资源 → 站点 assets URL）；不传时图片地址原样输出 */
+  rewriteAsset?: (target: string) => string;
+}
+
+export const markdownToHtml = (
+  src: string | null | undefined,
+  opts?: MarkdownRenderOptions,
+): string => (src ? md.render(src, { rewriteAsset: opts?.rewriteAsset }) : '');
 
 /** 渲染层 HTML 转义（mermaid 错误提示等复用） */
 export const mdEscapeHtml = md.utils.escapeHtml;

@@ -39,16 +39,45 @@ export function mirrorDirFor(nasRoot: string, t: MirrorTarget): string {
   return projectMirrorDir(nasRoot, t.username, t.projectName, t.projectId);
 }
 
-/** 写入/更新镜像文件；content=null 表示删除 */
-export async function mirrorDoc(nasRoot: string, t: MirrorTarget, docPath: string, content: string | null): Promise<void> {
+export type MirrorPayload =
+  | { kind: 'text'; content: string }
+  | { kind: 'binary'; buffer: Buffer };
+
+/** 写入/更新镜像文件；payload=null 表示删除。string 入参为兼容旧文本调用点 */
+export async function mirrorDoc(
+  nasRoot: string,
+  t: MirrorTarget,
+  docPath: string,
+  payload: MirrorPayload | string | null,
+): Promise<void> {
   const dir = mirrorDirFor(nasRoot, t);
   const abs = safeJoin(dir, docPath);
-  if (content === null) {
+  if (payload === null) {
     await fs.rm(abs, { force: true });
     return;
   }
+  const norm: MirrorPayload = typeof payload === 'string' ? { kind: 'text', content: payload } : payload;
   await fs.mkdir(path.dirname(abs), { recursive: true });
-  await fs.writeFile(abs, content, 'utf8');
+  if (norm.kind === 'binary') {
+    await fs.writeFile(abs, norm.buffer);
+    return;
+  }
+  await fs.writeFile(abs, norm.content, 'utf8');
+}
+
+/** 移动/重命名镜像文件（目标目录自动创建）；源文件不存在返回 false，其余错误抛出 */
+export async function moveMirror(nasRoot: string, t: MirrorTarget, fromPath: string, toPath: string): Promise<boolean> {
+  const dir = mirrorDirFor(nasRoot, t);
+  const src = safeJoin(dir, fromPath);
+  const dst = safeJoin(dir, toPath);
+  await fs.mkdir(path.dirname(dst), { recursive: true });
+  try {
+    await fs.rename(src, dst);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw e;
+  }
 }
 
 /** 目录可写验证：写入探针文件后删除 */

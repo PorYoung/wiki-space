@@ -85,14 +85,20 @@ export interface ClassifyProvider {
   suggest(docs: Array<{ id: string; path: string; title: string }>): Promise<ClassifySuggestion[]>;
 }
 
+/** 导入单个文件的载荷：文本直接给 content；二进制给 Uint8Array + 字节大小 */
+export type ImportDocPayload =
+  | { kind: 'text'; content: string }
+  | { kind: 'binary'; data: Uint8Array; size: number };
+
 /** 导入进度/落库 sink（由 worker 提供，隔离 Provider 与 DB 细节） */
 export interface ImportDocSink {
-  upsertDoc(path: string, content: string): Promise<void>;
+  upsertDoc(path: string, payload: ImportDocPayload): Promise<void>;
   onProgress(done: number): Promise<void>;
 }
 
 export interface ImportResult {
   docs: number;
+  binary?: number;
 }
 
 export interface ImportProvider {
