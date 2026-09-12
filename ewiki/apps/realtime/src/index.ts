@@ -75,6 +75,31 @@ const collabRooms = new Map<string, Set<WsSocket>>();
 
 // ---- presence 广播 + ydoc_snapshots 定时持久化（30s，仅房间活跃时） ----
 const snapshotTimers = new Map<string, ReturnType<typeof setInterval>>();
+// SDD 5.3 协同通道：客户端全离线后 Y.Doc 保留 15min，避免短期频繁进出反复重建
+const docIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// ---- 启动时从 ydoc_snapshots 恢复内存 Y.Doc（SDD 5.3 P4-6 CRDT 改造：冷启动恢复） ----
+async function restoreFromSnapshots(): Promise<void> {
+  try {
+    const rows = await sql<{ document_id: string; state: Buffer }[]>`
+      SELECT document_id, state FROM ydoc_snapshots
+      WHERE updated_at > now() - interval '7 days'
+    `;
+    for (const row of rows) {
+      const room = `doc:${row.document_id}`;
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, new Uint8Array(row.state));
+      ydocs.set(room, doc);
+      collabRooms.set(room, new Set()); // 预创建空 Set，首次 join 时直接 add
+      // 不启动 snapshot timer，等第一个客户端 join 再启动（避免空闲文档占资源）
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[realtime] restored ${rows.length} docs from ydoc_snapshots`);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[realtime] restore failed: ${String(err)}`);
+  }
+}
 
 function broadcastToOthers(room: string, except: WsSocket, data: object): void {
   for (const ws of collabRooms.get(room) ?? []) {
@@ -160,12 +185,18 @@ function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
   const doc = getYDoc(room);
   if (!collabRooms.has(room)) collabRooms.set(room, new Set());
   collabRooms.get(room)!.add(ws);
+  // 取消空闲 TTL（SDD 5.3：有人加入就重置 15min 计时）
+  const idleTimer = docIdleTimers.get(room);
+  if (idleTimer) { clearTimeout(idleTimer); docIdleTimers.delete(room); }
   startSnapshotTimer(room);
   broadcastToOthers(room, ws, { type: 'presence', event: 'join', userId, name, docId });
 
+  // SDD 5.3 协同通道（P4-6 CRDT 改造）：服务器主动下发全量状态 + 自身 state vector，
+  // 客户端立刻看到历史状态（无需先回复 step2），并根据服务器 vector 发送自己的增量。
   const enc = encoding.createEncoder();
   encoding.writeVarUint(enc, 0);
-  syncProtocol.writeSyncStep1(enc, doc);
+  syncProtocol.writeSyncStep2(enc, doc); // 服务器全量 → 客户端立刻看到历史状态
+  syncProtocol.writeSyncStep1(enc, doc); // 服务器 state vector → 客户端发它的增量
   ws.send(encoding.toUint8Array(enc));
 
   ws.on('message', (data: Buffer, isBinary: boolean) => {
@@ -207,20 +238,30 @@ function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
       const timer = snapshotTimers.get(room);
       if (timer) clearInterval(timer);
       snapshotTimers.delete(room);
-      ydocs.delete(room);
+      // SDD 5.3：客户端全离线后 Y.Doc 保留 15min，避免短期频繁进出反复重建
+      if (docIdleTimers.has(room)) clearTimeout(docIdleTimers.get(room)!);
+      docIdleTimers.set(room, setTimeout(() => {
+        ydocs.delete(room);
+        docIdleTimers.delete(room);
+      }, 15 * 60 * 1000));
     }
   });
 }
 
-// ---- 令牌自检端点（供 compose healthcheck） ----
-server.listen(PORT, () => {
-  console.log(`ewiki realtime listening on ${PORT}`); // eslint-disable-line no-console
+// ---- 启动：先从 ydoc_snapshots 恢复，再监听端口（SDD 5.3 P4-6 CRDT 冷启动恢复） ----
+void restoreFromSnapshots().then(() => {
+  server.listen(PORT, () => {
+    // eslint-disable-next-line no-console
+    console.log(`ewiki realtime listening on ${PORT}`);
+  });
 });
 
 // 优雅退出
 const shutdown = async (): Promise<void> => {
   for (const timer of snapshotTimers.values()) clearInterval(timer);
   snapshotTimers.clear();
+  for (const timer of docIdleTimers.values()) clearTimeout(timer);
+  docIdleTimers.clear();
   await sql.end();
   process.exit(0);
 };

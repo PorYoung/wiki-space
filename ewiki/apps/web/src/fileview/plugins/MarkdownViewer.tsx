@@ -5,10 +5,15 @@
 //   - 预览用 @ewiki/render 的 markdownToHtml（经 web 侧 lib/markdown，含 KaTeX 样式）
 //   - TOC 提取 + scroll-spy、mermaid 占位异步渲染、7 套渲染主题
 //   - 未保存离开拦截（beforeunload）
-// 本期不被 BrowsePage 集成，但类型完整、可独立渲染。
+//
+// P4-6 CRDT 协同 presence 接入：
+//   - 编辑器顶部显示协同状态：✅ N 人在线 / ⚠️ 协同离线
+//   - 编辑器右上渲染在线协作者头像（首字母 + 彩色圆底，hover 看名字）
+//   - MDEditor textarea onKeyUp/onClick 捕获光标位置 → sendCursor(JSON) 广播
+//   - 内容仍为本地 buffer + PUT baseVersionNo 保存（Markdown 不做 ytext 绑定）
 // ---------------------------------------------------------------------------
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import MDEditor, { type RefMDEditor } from '@uiw/react-md-editor';
 import {
   BookOpen,
@@ -30,6 +35,7 @@ import { slugify, markdownToHtml } from '../../lib/markdown';
 import { useMermaidRender } from '../../lib/use-mermaid-render';
 import type { FileViewerProps } from '../types';
 import { ImagePickerModal } from './ImagePickerModal';
+import { useCollab } from '../../lib/collab';
 
 const RENDER_THEMES: Array<{ key: string; label: string; desc: string; Icon: LucideIcon }> = [
   { key: 'plain', label: '经典', desc: '默认无衬线 · 紧凑', Icon: FileText },
@@ -60,7 +66,31 @@ function extractToc(md: string): TocItem[] {
   return toc;
 }
 
+// P4-6：根据 userId hash 生成固定色值（HSL），头像底圈颜色稳定
+const AVATAR_COLORS = [
+  '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e',
+  '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6',
+  '#a855f7', '#ec4899',
+];
+function hashColor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length]!;
+}
+
+// P4-6：把 textarea 绝对位置转成 { line, ch }（用于 cursor presence）
+function posToLineCh(text: string, pos: number): { line: number; ch: number } {
+  const safe = Math.min(Math.max(0, pos), text.length);
+  const upTo = text.slice(0, safe);
+  const line = upTo.split('\n').length - 1;
+  const lastNl = upTo.lastIndexOf('\n');
+  const ch = lastNl < 0 ? safe : safe - lastNl - 1;
+  return { line, ch };
+}
+
 export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: FileViewerProps): React.ReactElement {
+  const collab = useCollab();
+
   const initial = file.content ?? '';
   const [view, setView] = useState<'preview' | 'edit'>('preview');
   const [buffer, setBuffer] = useState(initial);
@@ -69,31 +99,49 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
   const [saveError, setSaveError] = useState<string | null>(null);
   const [renderTheme, setRenderTheme] = useState('plain');
   const [showThemeMenu, setShowThemeMenu] = useState(false);
-  // §4.1-F16 Markdown 引用图片：插入图片弹层开关
   const [showImageModal, setShowImageModal] = useState(false);
-  // §4.1-F16 MDEditor ref —— 拿 textarea 做光标插入
   const editorRef = useRef<RefMDEditor | null>(null);
-  // §4.1-F16 记录 textarea 光标/选区位置（弹层打开期间 textarea 失焦，需要预先保存）
   const cursorPosRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
-  // §6.2 ref 存最新值：避免 useEffect 闭包陷阱（saved/buffer 变化频率高，不能放 deps）
   const prevFileIdRef = useRef<string | null>(null);
   const savedRef = useRef(saved);
   const bufferRef = useRef(buffer);
   savedRef.current = saved;
   bufferRef.current = buffer;
 
-  // §6.2 跨宿主文件切换逻辑：
-  //   - file.id 变 → 切换了文件：全重置 buffer/saved/view/toc
-  //   - file.id 不变但 file.content 变 → WS 通知服务器有新版本：
-  //     - buffer === saved（clean）→ 自动更新 buffer 为新 content
-  //     - buffer !== saved（dirty）→ 保留 buffer 等待用户保存（保存时触发 409）
+  // P4-6：协同光标广播（防抖 150ms，避免打字时每条按键都发一条 presence）
+  const lastSentCursorRef = useRef<{ line: number; ch: number } | null>(null);
+  const cursorDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const broadcastCursor = useCallback(() => {
+    const ta = editorRef.current?.textarea;
+    if (!ta) return;
+    const pos = ta.selectionStart;
+    const lc = posToLineCh(bufferRef.current, pos);
+    // 同位置不重复发
+    const last = lastSentCursorRef.current;
+    if (last && last.line === lc.line && last.ch === lc.ch) return;
+    lastSentCursorRef.current = lc;
+    if (cursorDebounceRef.current) clearTimeout(cursorDebounceRef.current);
+    cursorDebounceRef.current = setTimeout(() => {
+      collab.sendCursor(lc);
+    }, 150);
+  }, [collab]);
+
+  // 文件切换时重置协同光标状态
+  useEffect(() => {
+    lastSentCursorRef.current = null;
+    if (cursorDebounceRef.current) {
+      clearTimeout(cursorDebounceRef.current);
+      cursorDebounceRef.current = null;
+    }
+  }, [file.id]);
+
+  // §6.2 跨宿主文件切换逻辑
   useEffect(() => {
     const next = file.content ?? '';
     if (file.id !== prevFileIdRef.current) {
-      // 切换到新文件
       prevFileIdRef.current = file.id;
       setBuffer(next);
       setSaved(next);
@@ -101,18 +149,14 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
       setView('preview');
       setActiveHeadingId(null);
     } else if (next !== savedRef.current) {
-      // 同文件，服务器 content 变了
       if (bufferRef.current === savedRef.current) {
-        // clean：安全更新 buffer（saved 将在下轮 render 同步到 ref）
         setBuffer(next);
       }
-      // dirty：保留 buffer，等用户手动处理（保存时触发 PUT 409）
       setSaveError(null);
     }
   }, [file.id, file.content]);
 
   const tocItems = useMemo(() => extractToc(buffer), [buffer]);
-  // 预览始终渲染已保存内容（与 BrowsePage 旧行为一致：编辑缓冲不污染预览）
   const previewHtml = useMemo(() => markdownToHtml(saved), [saved]);
   useMermaidRender(previewScrollRef, view === 'preview', isDark, previewHtml);
 
@@ -136,7 +180,6 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
   const setViewRef = useRef(setView);
   setViewRef.current = setView;
 
-  // Ctrl/⌘+S 保存、Ctrl/⌘+E 切换编辑/预览（与 BrowsePage 旧行为一致）
   useEffect(() => {
     if (!canWrite || !onSave) return undefined;
     const handler = (e: KeyboardEvent) => {
@@ -155,7 +198,6 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     return () => window.removeEventListener('keydown', handler);
   }, [canWrite, onSave]);
 
-  // scroll-spy（从 BrowsePage 平移）
   useEffect(() => {
     if (view !== 'preview' || !previewScrollRef.current) return;
     const container = previewScrollRef.current;
@@ -174,7 +216,6 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     return () => container.removeEventListener('scroll', handleScroll);
   }, [view, file.id, previewHtml]);
 
-  // 未保存离开提示
   useEffect(() => {
     if (!dirty) return undefined;
     const handler = (e: BeforeUnloadEvent) => {
@@ -191,17 +232,13 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
-  // §4.1-F16 Markdown 引用图片：ImagePickerModal 回调 —— 把 Markdown 语法插入光标位置
   const handlePickImage = (markdown: string) => {
     const { start, end } = cursorPosRef.current;
-    // 边界兜底：如果 cursor 没被正确追踪（首次进入编辑态没点过 textarea），
-    // 就追加到 buffer 末尾。
     const safeStart = Number.isFinite(start) && start >= 0 && start <= buffer.length ? start : buffer.length;
     const safeEnd = Number.isFinite(end) && end >= safeStart && end <= buffer.length ? end : safeStart;
     const next = buffer.slice(0, safeStart) + markdown + buffer.slice(safeEnd);
     setBuffer(next);
     setShowImageModal(false);
-    // 插入后恢复 textarea 焦点 + 光标放到插入内容之后（下次继续编辑更顺手）
     requestAnimationFrame(() => {
       const ta = editorRef.current?.textarea;
       if (ta) {
@@ -213,11 +250,60 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     });
   };
 
+  // P4-6：协作者头像列表（最多 3 个 +N 折叠）
+  const peersList = Array.from(collab.peers.values());
+  const shownPeers = peersList.slice(0, 3);
+  const extraCount = Math.max(0, peersList.length - 3);
+
   return (
     <section
       className="h-full min-h-0 flex flex-col min-w-0 overflow-hidden"
       style={{ background: 'var(--bg-surface)' }}
     >
+      {/* P4-6 CRDT 协同状态条（顶部） */}
+      <div
+        className="shrink-0 flex items-center justify-between gap-4 px-6 py-1.5 text-[11px]"
+        style={{ borderBottom: '1px solid var(--border-soft)', background: 'var(--bg-page)' }}
+      >
+        <div className="flex items-center gap-2 text-neutral-400">
+          {collab.connected ? (
+            <span className="inline-flex items-center gap-1 text-emerald-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              协同在线
+              {peersList.length > 0 ? ` · 共 ${peersList.length + 1} 人编辑` : ' · 仅你一人'}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-amber-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              协同离线（仅本地编辑）
+            </span>
+          )}
+        </div>
+        {/* P4-6：在线协作者头像组 */}
+        {peersList.length > 0 && (
+          <div className="flex items-center -space-x-1.5">
+            {shownPeers.map((p) => (
+              <div
+                key={p.userId}
+                title={p.name}
+                className="w-5 h-5 rounded-full border border-white flex items-center justify-center text-[10px] font-semibold text-white shrink-0"
+                style={{ background: hashColor(p.userId) }}
+              >
+                {(p.name || p.userId).charAt(0).toUpperCase()}
+              </div>
+            ))}
+            {extraCount > 0 && (
+              <div
+                title={`还有 ${extraCount} 位协作者`}
+                className="w-5 h-5 rounded-full border border-white bg-neutral-300 flex items-center justify-center text-[10px] font-semibold text-neutral-600 shrink-0"
+              >
+                +{extraCount}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* 头部：文件名 + 渲染主题 / 预览编辑切换 / 保存 */}
       <div className="shrink-0 border-b px-6 pt-4 pb-3" style={{ borderColor: 'var(--border-soft)' }}>
         <div className="flex items-center justify-between gap-3">
@@ -279,12 +365,10 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
               </div>
             )}
 
-            {/* §4.1-F16 Markdown 引用图片：插入图片按钮（编辑态 + 可写权限时显示） */}
             {canWrite && onSave && view === 'edit' && (
               <button
                 type="button"
                 onClick={() => {
-                  // §4.1-F16 打开弹层前，从 editorRef 同步一次最新光标位置（按钮点击会让 textarea blur）
                   const ta = editorRef.current?.textarea;
                   if (ta) {
                     cursorPosRef.current = { start: ta.selectionStart, end: ta.selectionEnd };
@@ -384,21 +468,20 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
                 spellCheck: false,
                 onDoubleClick: () => setView('preview'),
                 onSelect: (e) => {
-                  // §4.1-F16 实时记录光标/选区位置，供弹层关闭后精确插入
                   const t = e.currentTarget;
                   cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
                 },
+                // P4-6：捕获光标位置并广播给协同服务器
                 onKeyUp: (e) => {
                   const t = e.currentTarget;
                   cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
+                  broadcastCursor();
                 },
                 onClick: (e) => {
                   const t = e.currentTarget;
                   cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
+                  broadcastCursor();
                 },
-                // §4.1-F16 防御性保存：任何导致 textarea blur 的路径（切预览、Esc、其他按钮点击），
-                // 都在 blur 瞬间把当前 range 写进 ref，确保即使未来新增「快捷键直接打开弹层」
-                // 这类不经过按钮 onClick 的路径，cursorPosRef 也不会过期。
                 onBlur: (e) => {
                   const t = e.currentTarget;
                   cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
@@ -450,7 +533,6 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
         )}
       </div>
 
-      {/* §4.1-F16 Markdown 引用图片：插入图片弹层 */}
       <ImagePickerModal
         open={showImageModal}
         projectId={projectId}

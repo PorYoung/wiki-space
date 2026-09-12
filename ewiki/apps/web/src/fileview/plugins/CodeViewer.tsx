@@ -4,16 +4,26 @@
 //   - 仅支持 UTF-8：content 未内联时拉 raw blob 并用 fatal TextDecoder 校验
 //   - file.size > 2MB 强制只读并提示下载
 //   - 未保存离开拦截（beforeunload），保存成功后清 dirty
+//
+// P4-6 CRDT 协同接入：
+//   - 当 CollabProvider 提供 ytext + connected + synced 时：
+//     extensions 加 yCollab(ytext, null, { undoManager: false })
+//     value 始终取 ytext.toString()（ytext 为权威源）
+//     首次 sync 时若 ytext 为空（新房间），用 file.content transact 初始化
+//     onSave 取 ytext.toString() 而非本地 state
+//   - 否则退回纯本地模式（与原来完全一致）
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Extension } from '@codemirror/state';
 import CodeMirror from '@uiw/react-codemirror';
 import { loadLanguage, type LanguageName } from '@uiw/codemirror-extensions-langs';
 import { githubLight, githubDark } from '@uiw/codemirror-theme-github';
-import { AlertTriangle, Download, FileCog, History, Save } from 'lucide-react';
+import { yCollab } from 'y-codemirror.next';
 import type { FileViewerProps } from '../types';
 import { downloadFile, fetchRawBlob } from '../api';
 import { decodeUtf8Strict, humanSize } from '../util';
+import { useCollab } from '../../lib/collab';
 
 const READONLY_LIMIT = 2 * 1024 * 1024;
 
@@ -37,8 +47,13 @@ const EXT_LANG: Record<string, LanguageName> = {
 };
 
 export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerProps): React.ReactElement {
+  const collab = useCollab();
+  // P4-6：协同模式必须 ytext 存在 + 已连 + 已收全量 synced 才启用
+  const collabEnabled = collab?.ytext !== null && collab.connected && collab.synced;
+
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // value 在协同模式下被重置为 ytext.toString() 覆盖，onChange 仅用于 dirty 检测
   const [value, setValue] = useState('');
   const [savedValue, setSavedValue] = useState('');
   const [saving, setSaving] = useState(false);
@@ -47,42 +62,63 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
 
   const tooLarge = file.size > READONLY_LIMIT;
 
-  // §6.2 ref 存最新值：避免 useEffect 闭包陷阱（§6.2 跨宿主文件切换逻辑）
+  // §6.2 ref 存最新值：避免 useEffect 闭包陷阱
   const prevFileIdRef = useRef<string | null>(null);
   const savedRef = useRef(savedValue);
   const valueRef = useRef(value);
   savedRef.current = savedValue;
   valueRef.current = value;
 
-  // §6.2 跨宿主文件切换逻辑：
-  //   - file.id 变 → 切换了文件：全重置 + 载入新内容（从 content 内联或拉 raw blob）
-  //   - file.id 不变但 file.content 变 → WS 通知服务器有新版本：
-  //     - value === savedValue（clean）→ 自动更新为新 content
-  //     - value !== savedValue（dirty）→ 保留用户输入，保存时触发 409
+  // P4-6：协同初始化——在 synced 后把 file.content transact 写入空 ytext（新房间）
+  const initializedRef = useRef<string | null>(null); // 已初始化过的 docId，防重入
+  useEffect(() => {
+    if (!collab?.ytext || !collab.synced) return;
+    if (initializedRef.current === file.id) return;
+    initializedRef.current = file.id;
+
+    const ytext = collab.ytext;
+    if (ytext.toString().length === 0 && ytext.doc) {
+      // 新房间（服务器无历史）→ 用 file.content 初始化 ytext
+      const initContent = typeof file.content === 'string' ? file.content : '';
+      ytext.doc.transact(() => {
+        ytext.insert(0, initContent);
+      });
+    }
+    // 否则服务器已有状态，ySync 插件会自动从 ytext 推送到 CM6
+    // 把 saved/value 对齐到 ytext
+    const remote = ytext.toString();
+    setSavedValue(remote);
+    setValue(remote);
+  }, [collab?.ytext, collab?.synced, file.id, file.content]);
+
+  // §6.2 跨宿主文件切换逻辑（非协同模式下的服务器 content 更新）
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
     setSaveError(null);
 
-    // file.id 变 = 切换文件，需全重置；否则只是服务器版本变更
     const switched = file.id !== prevFileIdRef.current;
     if (switched) prevFileIdRef.current = file.id;
+
+    // P4-6：协同模式下等 synced，不从 API content 填充（权威源在 ytext）
+    if (collabEnabled) {
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const finish = (text: string) => {
       if (cancelled) return;
       if (switched) {
-        // 切换文件：全重置
         setValue(text);
         setSavedValue(text);
       } else if (text !== savedRef.current) {
-        // 同文件，服务器 content 变了
         if (valueRef.current === savedRef.current) {
-          // clean：安全更新
           setValue(text);
           setSavedValue(text);
         } else {
-          // dirty：用户有未保存输入，只更新 saved 让状态与服务器对齐
           setSavedValue(text);
         }
       }
@@ -119,25 +155,39 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
     return () => {
       cancelled = true;
     };
-    // 仅按稳定字段重载：宿主重渲染产生新对象（但内容未变）不能冲掉本地未保存缓冲
-  }, [file.id, file.content, file.rawUrl, file.versionNo]);
+  }, [file.id, file.content, file.rawUrl, file.versionNo, collabEnabled]);
 
-  const dirty = value !== savedValue;
+  // P4-6：协同模式下 value 始终取 ytext.toString() —— CM6 由 ySync 插件驱动，
+  // react-codemirror 只负责把 value 作为初始 doc（它内部对 setValue 有 diff 保护）
+  const displayValue = collabEnabled && collab.ytext ? collab.ytext.toString() : value;
+
+  // dirty 判定：协同模式用 ytext vs savedValue；非协同用本地 state
+  const dirty = collabEnabled
+    ? collab.ytext?.toString() !== savedValue
+    : value !== savedValue;
   const editable = canWrite && !!onSave && !tooLarge && !loadError;
 
-  const extensions = useMemo(() => {
+  const extensions = useMemo<Extension[]>(() => {
     const langName = EXT_LANG[file.ext];
     const lang = langName ? loadLanguage(langName) : null;
-    return lang ? [lang] : [];
-  }, [file.ext]);
+    const base: Extension[] = [];
+    if (lang) base.push(lang);
+    // P4-6：协同模式加 yCollab 扩展（关闭 undoManager，保留宿主可能的 Ctrl+S 保存）
+    if (collabEnabled && collab.ytext) {
+      base.push(yCollab(collab.ytext, null, { undoManager: false }));
+    }
+    return base;
+  }, [file.ext, collabEnabled, collab?.ytext]);
 
   const doSave = async () => {
     if (!onSave || saving || !dirty) return;
     setSaving(true);
     setSaveError(null);
     try {
-      await onSave(value);
-      setSavedValue(value);
+      // P4-6：协同模式取 ytext 权威源，非协同取本地 state
+      const content = collabEnabled && collab.ytext ? collab.ytext.toString() : value;
+      await onSave(content);
+      setSavedValue(content);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : '保存失败');
     } finally {
@@ -148,7 +198,7 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
     void doSave();
   };
 
-  // Ctrl/⌘+S 保存（焦点在编辑器内同样拦截浏览器默认）
+  // Ctrl/⌘+S 保存
   useEffect(() => {
     if (!editable) return undefined;
     const handler = (e: KeyboardEvent) => {
@@ -184,14 +234,13 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
     return (
       <div className="h-full flex items-center justify-center p-6">
         <div className="max-w-md text-center">
-          <AlertTriangle size={36} className="mx-auto mb-3 text-amber-500" />
           <p className="text-sm text-neutral-700 mb-3">{loadError}</p>
           <button
             type="button"
             className="btn-secondary !h-8 !px-3 !text-xs"
             onClick={() => void downloadFile(file)}
           >
-            <Download size={13} /> 下载文件
+            下载文件
           </button>
         </div>
       </div>
@@ -214,6 +263,13 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
           </span>
         )}
         {saveError && <span className="text-red-500 truncate">{saveError}</span>}
+        {/* P4-6 CRDT 协同状态提示 */}
+        {collabEnabled && collab.peers.size > 0 && (
+          <span className="inline-flex items-center gap-1 text-emerald-600">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            {collab.peers.size + 1} 人协同中
+          </span>
+        )}
         <span className="flex-1" />
         <button
           type="button"
@@ -221,15 +277,7 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
           onClick={() => host?.openOpenInfo()}
           title="文件信息"
         >
-          <FileCog size={13} />
-        </button>
-        <button
-          type="button"
-          className="btn-secondary !h-7 !w-7 !p-0"
-          onClick={() => host?.openHistory()}
-          title="历史记录"
-        >
-          <History size={13} />
+          信息
         </button>
         {editable && (
           <button
@@ -238,7 +286,7 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
             disabled={!dirty || saving}
             onClick={() => void doSave()}
           >
-            <Save size={13} /> {saving ? '保存中…' : '保存'}
+            {saving ? '保存中…' : '保存'}
           </button>
         )}
       </div>
@@ -248,22 +296,13 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
           className="shrink-0 px-4 py-2.5 flex items-center gap-3 border-b text-xs bg-amber-50 text-amber-800"
           style={{ borderColor: 'var(--border-soft)' }}
         >
-          <AlertTriangle size={14} className="shrink-0" />
           <span>文件超过 2MB，已降级只读，请下载后编辑</span>
-          <span className="flex-1" />
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 h-7 px-2.5 rounded text-xs font-medium border border-amber-300 text-amber-800 hover:bg-amber-100 transition"
-            onClick={() => void downloadFile(file)}
-          >
-            <Download size={13} /> 下载
-          </button>
         </div>
       )}
 
       <div className="flex-1 min-h-0 overflow-auto">
         <CodeMirror
-          value={value}
+          value={displayValue}
           height="100%"
           style={{ height: '100%' }}
           theme={isDark ? githubDark : githubLight}
@@ -271,7 +310,11 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
           readOnly={!editable}
           editable={editable}
           basicSetup={{ lineNumbers: true, highlightActiveLine: editable, foldGutter: true }}
-          onChange={(next) => setValue(next)}
+          onChange={(next) => {
+            // P4-6：协同模式下 ytext 是权威源，但 onChange 仍保留——
+            // 它会触发 dirty 状态更新，保存按钮得以启用。
+            setValue(next);
+          }}
         />
       </div>
     </div>
