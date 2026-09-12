@@ -495,6 +495,52 @@ html[data-appearance='dark'] .prose-doc a { color: #6ee7b7; }
 html[data-appearance='dark'] .prose-doc a:hover { color: #34d399; }
 html[data-appearance='dark'] .prose-doc hr { border-color: #1e293b; }
 
+/* --- 表格（markdown-it GFM）：块级化支持窄栏横向滚动 --- */
+.prose-doc table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 1rem 0; }
+.prose-doc th, .prose-doc td { border: 1px solid #e2e8f0; padding: 6px 12px; text-align: left; font-size: 13px; line-height: 1.6; }
+.prose-doc th { background: #f8fafc; font-weight: 600; color: #0f172a; }
+.prose-doc tr:nth-child(2n) td { background: #fbfcfe; }
+html[data-appearance='dark'] .prose-doc th, html[data-appearance='dark'] .prose-doc td { border-color: #1e293b; color: #cbd5e1; }
+html[data-appearance='dark'] .prose-doc th { background: #1e293b; color: #f1f5f9; }
+html[data-appearance='dark'] .prose-doc tr:nth-child(2n) td { background: rgba(30, 41, 59, 0.4); }
+
+/* --- 代码块内 code 重置 + highlight.js 令牌配色（github 亮 / github-dark 暗色基准） ---
+   旧规则 .prose-doc code 的浅底绿字会穿透到 pre 内，先重置；令牌色与 pre 深底/主题联动 */
+.prose-doc pre code { background: transparent; color: inherit; padding: 0; }
+.prose-doc .hljs { color: #24292e; }
+.prose-doc .hljs-comment, .prose-doc .hljs-quote { color: #6a737d; font-style: italic; }
+.prose-doc .hljs-keyword, .prose-doc .hljs-selector-tag, .prose-doc .hljs-doctag { color: #d73a49; }
+.prose-doc .hljs-string, .prose-doc .hljs-regexp { color: #032f62; }
+.prose-doc .hljs-number, .prose-doc .hljs-literal, .prose-doc .hljs-variable, .prose-doc .hljs-template-variable { color: #005cc5; }
+.prose-doc .hljs-title, .prose-doc .hljs-title.function_, .prose-doc .hljs-section { color: #6f42c1; }
+.prose-doc .hljs-title.class_, .prose-doc .hljs-type, .prose-doc .hljs-built_in { color: #e36209; }
+.prose-doc .hljs-attr, .prose-doc .hljs-attribute, .prose-doc .hljs-property, .prose-doc .hljs-selector-class { color: #005cc5; }
+.prose-doc .hljs-meta, .prose-doc .hljs-symbol, .prose-doc .hljs-bullet { color: #6a737d; }
+.prose-doc .hljs-addition { color: #22863a; background: #f0fff4; }
+.prose-doc .hljs-deletion { color: #b31d28; background: #ffeef0; }
+html[data-appearance='dark'] .prose-doc .hljs { color: #e6edf3; }
+html[data-appearance='dark'] .prose-doc .hljs-comment, html[data-appearance='dark'] .prose-doc .hljs-quote { color: #8b949e; }
+html[data-appearance='dark'] .prose-doc .hljs-keyword, html[data-appearance='dark'] .prose-doc .hljs-selector-tag, html[data-appearance='dark'] .prose-doc .hljs-doctag { color: #ff7b72; }
+html[data-appearance='dark'] .prose-doc .hljs-string, html[data-appearance='dark'] .prose-doc .hljs-regexp { color: #a5d6ff; }
+html[data-appearance='dark'] .prose-doc .hljs-number, html[data-appearance='dark'] .prose-doc .hljs-literal, html[data-appearance='dark'] .prose-doc .hljs-variable, html[data-appearance='dark'] .prose-doc .hljs-template-variable { color: #79c0ff; }
+html[data-appearance='dark'] .prose-doc .hljs-title, html[data-appearance='dark'] .prose-doc .hljs-title.function_, html[data-appearance='dark'] .prose-doc .hljs-section { color: #d2a8ff; }
+html[data-appearance='dark'] .prose-doc .hljs-title.class_, html[data-appearance='dark'] .prose-doc .hljs-type, html[data-appearance='dark'] .prose-doc .hljs-built_in { color: #ffa657; }
+html[data-appearance='dark'] .prose-doc .hljs-attr, html[data-appearance='dark'] .prose-doc .hljs-attribute, html[data-appearance='dark'] .prose-doc .hljs-property, html[data-appearance='dark'] .prose-doc .hljs-selector-class { color: #79c0ff; }
+html[data-appearance='dark'] .prose-doc .hljs-meta, html[data-appearance='dark'] .prose-doc .hljs-symbol, html[data-appearance='dark'] .prose-doc .hljs-bullet { color: #8b949e; }
+html[data-appearance='dark'] .prose-doc .hljs-addition { color: #aff5b4; background: rgba(46, 160, 67, 0.15); }
+html[data-appearance='dark'] .prose-doc .hljs-deletion { color: #ffa198; background: rgba(248, 81, 73, 0.15); }
+
+/* --- KaTeX 公式：块级横向滚动，行内随文；字号与正文比例 1:1 --- */
+.prose-doc .math-block { overflow-x: auto; overflow-y: hidden; padding: 0.5rem 0; margin: 1rem 0; }
+.prose-doc .katex { font-size: 1.05em; }
+
+/* --- mermaid 流程图：占位容器居中浅底，SVG 自适应不溢出 --- */
+.prose-doc .mermaid-block { display: flex; justify-content: center; padding: 1rem; margin: 1rem 0; border: 1px dashed #e2e8f0; border-radius: 8px; background: #f8fafc; min-height: 3rem; }
+.prose-doc .mermaid-block svg { max-width: 100%; height: auto; }
+.prose-doc .mermaid-error { color: #b91c1c; font-size: 12px; line-height: 1.6; white-space: pre-wrap; text-align: left; word-break: break-all; }
+html[data-appearance='dark'] .prose-doc .mermaid-block { border-color: #1e293b; background: #0b1220; }
+html[data-appearance='dark'] .prose-doc .mermaid-error { color: #fca5a5; }
+
 /* --- 渲染主题变体 --- */
 /* 每个主题覆盖色彩、字号、行距、字体、最大宽度 */
 

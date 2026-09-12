@@ -1,16 +1,13 @@
 import 'dotenv/config';
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import PgBoss from 'pg-boss';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import {
   activities,
   aiClassifyRuns,
   createDb,
-  decryptJson,
   documentLinks,
   documents,
   importJobs,
@@ -19,18 +16,19 @@ import {
   projects,
   publishJobs,
   publishSites,
-  sources,
+  storageConnections,
+  syncJobs,
   users,
 } from '@ewiki/db';
-import { resolveRoot, safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
+import { ensureWorkdir, pullWorkdir, type ConnLike } from '@ewiki/git';
+import { reposRoot, resolveRoot, safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
 import { extractDocLinks, type Job } from '@ewiki/shared';
 import type { ClassifyProvider, ImportProvider, Notifier, NotificationType } from '@ewiki/shared';
 import { renderSite } from '@ewiki/render';
 
 // Worker（SDD ADR-1：与 server 分池伸缩）
-// sync 队列为真实实现（SDD 5.1）：git/local → MD 消化 → 状态机 → 动态写入 → LISTEN/NOTIFY 广播
+// sync 队列为真实实现：文档库（projects 内嵌 Git/本地存储后端）→ MD 消化 → 状态机 → 动态写入 → LISTEN/NOTIFY 广播
 
-const exec = promisify(execFile);
 const { sql, db } = createDb();
 const boss = new PgBoss({
   connectionString: process.env.DATABASE_URL ?? 'postgres://ewiki:ewiki@localhost:5432/ewiki',
@@ -38,12 +36,6 @@ const boss = new PgBoss({
 
 const log = (msg: string, extra?: object): void =>
   console.log(JSON.stringify({ level: 'info', msg, ...extra })); // pino 接入点（SDD 6.4）
-
-type SourceRow = typeof sources.$inferSelect;
-
-async function git(args: string[], cwd?: string): Promise<void> {
-  await exec('git', args, { cwd, maxBuffer: 20 * 1024 * 1024 });
-}
 
 async function walkMd(dir: string, root: string, out: Array<{ rel: string; abs: string }>): Promise<void> {
   for (const e of await fs.readdir(dir, { withFileTypes: true })) {
@@ -57,23 +49,33 @@ async function walkMd(dir: string, root: string, out: Array<{ rel: string; abs: 
 }
 
 async function harvestDocsFromDir(
-  source: SourceRow,
+  projectId: string,
   root: string,
 ): Promise<{ docsUpserted: number; docsRemoved: number }> {
   const found: Array<{ rel: string; abs: string }> = [];
   await walkMd(root, root, found);
 
+  // 先取现存（含已软删）文档哈希，用于区分「真正写入」与「内容未变」
+  const existingHash = new Map<string, { id: string; hash: string; deleted: boolean }>();
+  const before = await db
+    .select({ id: documents.id, path: documents.path, contentHash: documents.contentHash, deletedAt: documents.deletedAt })
+    .from(documents)
+    .where(eq(documents.projectId, projectId));
+  for (const d of before) existingHash.set(d.path, { id: d.id, hash: d.contentHash ?? '', deleted: d.deletedAt !== null });
+
   let docsUpserted = 0;
   for (const f of found) {
     const content = await fs.readFile(f.abs, 'utf8');
     const contentHash = createHash('sha256').update(content).digest('hex');
+    const prev = existingHash.get(f.rel);
+    // 内容哈希未变且文档在线：跳过无谓写入，也不计入变更数
+    if (prev && !prev.deleted && prev.hash === contentHash) continue;
     const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? path.basename(f.rel);
     const wordCount = content.length; // 中文近似：按字符数（TODO：分词计数，SDD 7.3）
     await db
       .insert(documents)
       .values({
-        projectId: source.projectId,
-        sourceId: source.id,
+        projectId,
         path: f.rel,
         title,
         content,
@@ -88,26 +90,22 @@ async function harvestDocsFromDir(
     docsUpserted++;
   }
 
-  // 源内已消失的文档 → 软删除（状态机 untracked→deleted 语义，SDD 5.1）
+  // 库内已消失的文档 → 软删除（与存储后端目录内容对齐）
   const seen = new Set(found.map((f) => f.rel));
-  const existing = await db
-    .select({ id: documents.id, path: documents.path })
-    .from(documents)
-    .where(and(eq(documents.sourceId, source.id), isNull(documents.deletedAt)));
   let docsRemoved = 0;
-  for (const d of existing) {
-    if (!seen.has(d.path)) {
-      await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, d.id));
+  for (const [docPath, info] of existingHash) {
+    if (!info.deleted && !seen.has(docPath)) {
+      await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, info.id));
       docsRemoved++;
     }
   }
   return { docsUpserted, docsRemoved };
 }
 
-async function notifySyncStatus(projectId: string, sourceId: string, status: string): Promise<void> {
+async function notifySyncStatus(projectId: string, status: string): Promise<void> {
   await sql`select pg_notify('ewiki_events', ${JSON.stringify({
     channel: 'sync',
-    payload: { room: `project:${projectId}`, event: 'sync.status_changed', payload: { sourceId, status } },
+    payload: { room: `project:${projectId}`, event: 'sync.status_changed', payload: { projectId, status } },
   })})`;
 }
 
@@ -186,99 +184,152 @@ async function rebuildProjectLinks(projectId: string): Promise<number> {
   return links.length;
 }
 
-async function syncSource(sourceId: string, trigger: string): Promise<{ docsUpserted: number; docsRemoved: number; links: number }> {
-  const [source] = await db
+/**
+ * 本地后端缺省目录：storageConfig.path 缺省时回退 <FS_ROOT>/local-library/<projectId>。
+ * 该规则与 server 种子脚本（seed.ts ensureLocalStorage）保持一致，修改需同步两处。
+ */
+function localLibraryDir(projectId: string): string {
+  return path.resolve(process.cwd(), process.env.FS_ROOT ?? './data', 'local-library', projectId);
+}
+
+async function syncProject(
+  projectId: string,
+  trigger: string,
+): Promise<{ docsUpserted: number; docsRemoved: number; links: number; commitHash: string | null; noop: boolean }> {
+  const [project] = await db
     .select()
-    .from(sources)
-    .where(and(eq(sources.id, sourceId), isNull(sources.deletedAt)))
+    .from(projects)
+    .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
     .limit(1);
-  if (!source) throw new Error(`source not found: ${sourceId}`);
+  if (!project) throw new Error(`project not found: ${projectId}`);
 
-  await db.update(sources).set({ status: 'syncing', updatedAt: new Date() }).where(eq(sources.id, sourceId));
+  // sync_jobs 留痕：实际执行开始即置 running（重复同步的投递幂等由 pg-boss singletonKey 承载）
+  const [jobRow] = await db
+    .insert(syncJobs)
+    .values({
+      projectId,
+      trigger: trigger === 'push' || trigger === 'schedule' ? trigger : 'manual',
+      commitHash: null,
+      status: 'running',
+    })
+    .returning({ id: syncJobs.id });
 
-  const out = { docsUpserted: 0, docsRemoved: 0, links: 0 };
+  await db
+    .update(projects)
+    .set({ storageStatus: 'syncing', updatedAt: new Date() })
+    .where(eq(projects.id, projectId));
+
+  const out = {
+    docsUpserted: 0,
+    docsRemoved: 0,
+    links: 0,
+    commitHash: null as string | null,
+    noop: false,
+  };
   try {
-    if (source.type === 'git') {
-      const pub = source.configPublic as { url?: string };
-      let url = pub.url ?? '';
-      if (!url) throw new Error('Git 源缺少仓库地址');
-      // 凭据：仅支持 token 内嵌 URL（SSH/OAuth 见 SDD 5.1 TODO）
-      if (source.configEncrypted) {
-        try {
-          const sec = decryptJson<{ token?: string }>(source.configEncrypted as string);
-          if (sec.token && url.startsWith('https://')) url = url.replace('https://', `https://oauth2:${sec.token}@`);
-        } catch {
-          // 解密失败按匿名拉取处理
-        }
+    let advanced: boolean | undefined;
+    if (project.storageKind === 'git') {
+      if (!project.storageConnectionId) throw new Error('Git 后端缺少存储源连接');
+      const [connRow] = await db
+        .select()
+        .from(storageConnections)
+        .where(eq(storageConnections.id, project.storageConnectionId))
+        .limit(1);
+      if (!connRow) throw new Error('存储源连接不存在或已删除');
+      const conn: ConnLike = {
+        kind: connRow.kind,
+        baseUrl: connRow.baseUrl,
+        tokenEncrypted: connRow.tokenEncrypted,
+        defaultNamespace: connRow.defaultNamespace,
+      };
+      const cfg = (project.storageConfig ?? {}) as { url?: string; namespace?: string };
+      const cloneUrl = cfg.url ?? '';
+      if (!cloneUrl) throw new Error('Git 后端缺少仓库地址');
+      // storageConfig.namespace 建库时写入的是托管平台登录名（token 注入 URL 用）
+      const login = cfg.namespace ?? '';
+      const branch = project.defaultBranch || 'main';
+      // 工作副本根目录与 server 保存推送链路一致：<FS_ROOT>/repos/<projectId>
+      const root = reposRoot(path.resolve(process.cwd(), process.env.FS_ROOT ?? './data'));
+      const ensured = await ensureWorkdir(root, project.id, conn, cloneUrl, login, branch);
+      const workdir = ensured.workdir;
+      if (ensured.hadCommits) {
+        const pulled = await pullWorkdir(workdir, branch);
+        out.commitHash = pulled.commitHash;
+        advanced = pulled.advanced;
       }
-      const workdir = path.resolve(process.cwd(), process.env.FS_ROOT ?? './data', 'repos', sourceId);
-      const cloned = await fs
-        .access(path.join(workdir, '.git'))
-        .then(() => true, () => false);
-      if (!cloned) {
-        await git(['clone', '--depth', '1', url, workdir]);
-      } else {
-        await git(['pull', '--ff-only'], workdir);
-      }
-      if (source.defaultBranch) {
-        await git(['checkout', source.defaultBranch], workdir).catch(() => undefined);
-      }
-      Object.assign(out, await harvestDocsFromDir(source, workdir));
-    } else if (source.type === 'local') {
-      const pub = source.configPublic as { path?: string };
-      if (!pub.path) throw new Error('本地源缺少文件夹路径');
-      Object.assign(out, await harvestDocsFromDir(source, pub.path));
+      Object.assign(out, await harvestDocsFromDir(project.id, workdir));
     } else {
-      // web/database：接入点见 SDD 5.1 TODO（网页抓取 → 单页归档；数据库 → 只读快照）
-      throw new Error(`${source.type} 类型同步尚未实现`);
+      // storageKind CHECK 仅允许 git/local：本地后端直接消化指定文件夹
+      const cfg = (project.storageConfig ?? {}) as { path?: string };
+      const dir = cfg.path && cfg.path.trim() ? path.resolve(cfg.path) : localLibraryDir(project.id);
+      await fs.access(dir).catch(() => fs.mkdir(dir, { recursive: true }));
+      Object.assign(out, await harvestDocsFromDir(project.id, dir));
     }
 
-    out.links = await rebuildProjectLinks(source.projectId);
+    out.links = await rebuildProjectLinks(project.id);
+    // Git 后端：远端未前进且文档零增删即为无增量同步（重复手动同步属正常成功路径，不再撞唯一约束）
+    if (advanced !== undefined) {
+      out.noop = advanced === false && out.docsUpserted === 0 && out.docsRemoved === 0;
+    }
 
     await db
-      .update(sources)
-      .set({ status: 'synced', lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
-      .where(eq(sources.id, sourceId));
+      .update(syncJobs)
+      .set({
+        status: 'succeeded',
+        commitHash: out.commitHash,
+        stats: { docsUpserted: out.docsUpserted, docsRemoved: out.docsRemoved, links: out.links, noop: out.noop },
+        finishedAt: new Date(),
+      })
+      .where(eq(syncJobs.id, jobRow.id));
+    await db
+      .update(projects)
+      .set({ storageStatus: 'synced', lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
     await db.insert(activities).values({
-      projectId: source.projectId,
+      projectId,
       verb: 'sync',
-      targetType: 'source',
-      targetId: source.id,
-      targetTitle: source.name,
-      meta: { trigger, ...out },
+      targetType: 'project',
+      targetId: projectId,
+      targetTitle: project.name,
+      meta: { trigger, backend: project.storageKind, ...out },
     });
-    await notifySyncStatus(source.projectId, sourceId, 'synced');
+    await notifySyncStatus(projectId, 'synced');
     return out;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // 失败不自动退避重试：状态置 error，由用户在界面再次手动触发
     await db
-      .update(sources)
-      .set({ status: 'error', lastError: msg.slice(0, 500), updatedAt: new Date() })
-      .where(eq(sources.id, sourceId));
+      .update(syncJobs)
+      .set({ status: 'failed', error: msg.slice(0, 500), finishedAt: new Date() })
+      .where(eq(syncJobs.id, jobRow.id));
+    await db
+      .update(projects)
+      .set({ storageStatus: 'error', lastError: msg.slice(0, 500), updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
     await db.insert(activities).values({
-      projectId: source.projectId,
+      projectId,
       verb: 'sync',
-      targetType: 'source',
-      targetId: source.id,
-      targetTitle: source.name,
-      meta: { trigger, error: msg.slice(0, 200) },
+      targetType: 'project',
+      targetId: projectId,
+      targetTitle: project.name,
+      meta: { trigger, backend: project.storageKind, error: msg.slice(0, 200) },
     });
-    await notifySyncStatus(source.projectId, sourceId, 'error');
-    // 同步失败通知项目全员（成功走 activities，控制通知音量；EXT-PLATFORM ADR-P3）
-    await notifyProjectMembers(source.projectId, 'sync.error', {
-      title: source.name,
-      message: `数据源「${source.name}」同步失败：${msg.slice(0, 120)}`,
-      link: `/projects/${source.projectId}/settings`,
+    await notifySyncStatus(projectId, 'error');
+    // 同步失败通知项目全员（成功走 activities，控制通知音量）
+    await notifyProjectMembers(projectId, 'sync.error', {
+      title: project.name,
+      message: `文档库「${project.name}」同步失败：${msg.slice(0, 120)}`,
+      link: `/projects/${projectId}/settings`,
     });
-    throw err; // 交回 pg-boss 按退避策略重试（SDD 6.5）
+    throw err;
   }
 }
 
 async function handleSync(job: Job): Promise<void> {
-  const data = job.data as { sourceId?: string; trigger?: string };
-  if (!data.sourceId) throw new Error('VALIDATION_FAILED');
-  const out = await syncSource(data.sourceId, data.trigger ?? 'manual');
-  log('sync finished', { jobId: job.id, sourceId: data.sourceId, ...out });
+  const data = job.data as { projectId?: string; trigger?: string };
+  if (!data.projectId) throw new Error('VALIDATION_FAILED: projectId required');
+  const out = await syncProject(data.projectId, data.trigger ?? 'manual');
+  log('sync finished', { jobId: job.id, projectId: data.projectId, ...out });
 }
 
 // ---------------------------------------------------------------------------
@@ -530,7 +581,7 @@ async function upsertImportedDoc(projectId: string, docPath: string, content: st
   const wordCount = content.length;
   await db
     .insert(documents)
-    .values({ projectId, sourceId: null, path: docPath, title, content, contentHash, status: 'synced', wordCount })
+    .values({ projectId, path: docPath, title, content, contentHash, status: 'synced', wordCount })
     .onConflictDoUpdate({
       target: [documents.projectId, documents.path],
       set: { title, content, contentHash, status: 'synced', wordCount, deletedAt: null, updatedAt: new Date() },

@@ -6,7 +6,7 @@
 | 创建日期 | 2026-09-06 |
 | 上游基线 | [PRD](./PRD.md)（R4，2026-09-06）；高保真原型 `prototype-docvault`（React 单页应用，交互细节参照） |
 | 阅读对象 | 架构评审、前后端工程师、AI 开发代理、DevOps、QA |
-| 修订记录 | R1（2026-09-06）：初版。R2（2026-09-06）：技术选型修订——按"如非必要勿增实体"收敛 Phase 1 为 4 容器最小实体集（Hono/Drizzle/pg-boss/Caddy，淘汰 Redis/MinIO/独立实时服务），附录市场调研依据；新增 ADR-8/9/10。R3（2026-09-06）：架构讨论决议三项——数据库方言边界（PG 起步 + 四接口，ADR-11）；存储双轨上移 Phase 1（S3 主 + NAS 回退，ADR-12）；REST/WS 阶段一即拆分（ADR-13）；部署实体 6 容器 |
+| 修订记录 | R1（2026-09-06）：初版。R2（2026-09-06）：技术选型修订——按"如非必要勿增实体"收敛 Phase 1 为 4 容器最小实体集（Hono/Drizzle/pg-boss/Caddy，淘汰 Redis/MinIO/独立实时服务），附录市场调研依据；新增 ADR-8/9/10。R3（2026-09-06）：架构讨论决议三项——数据库方言边界（PG 起步 + 四接口，ADR-11）；存储双轨上移 Phase 1（S3 主 + NAS 回退，ADR-12）；REST/WS 阶段一即拆分（ADR-13）；部署实体 6 容器。R4（2026-09-11）：移除独立「数据源」概念（ADR-14）——文档库（projects）内嵌存储后端（仅 `git`/`local`），「存储源」仅指用户级可复用连接配置（storage_connections）；删除 sources/push_tokens 表、开放推送 API 与 `/api/v1/sources` 全部路由；建 Git 库收敛为单次 `POST /api/v1/projects`；同步改为 `POST /api/v1/projects/:id/sync` |
 
 **证据标注约定**：全文设计决策与约束使用四类标注——`[Data-backed]`（来自 PRD/原型的可验证事实）、`[Research-backed]`（公开标准或行业实践，注明来源）、`[Expert judgment]`（工程推断）、`[Hypothesis]`（待验证假设）；无法核实的技术细节标注 `[To be confirmed]` 或 `[Unverified — requires human review]`。
 
@@ -25,7 +25,9 @@
 
 ### 1.2 目的与范围
 
-本设计覆盖：Web 管理平台（前端 + 服务端）、数据源同步引擎、发布管线、实时协同编辑、开放推送 API、多副本无状态部署。
+本设计覆盖：Web 管理平台（前端 + 服务端）、文档库存储后端与同步引擎（Git/本地两类，R4 重构后）、发布管线、实时协同编辑、多副本无状态部署。
+
+> R4 变更：独立「数据源」概念已移除（ADR-14），原开放推送 API 与 push_tokens 随之一并删除；详见 5.1 与 4.2 存储相关条目。
 
 本设计不覆盖：移动端、桌面端与离线模式的实现方案（仅给出架构预留，见 7.4）、AI 模型本身的训练与选型细节（仅定义适配器边界）、企业 OA/SSO 对接的具体协议（仅预留接口层）。
 
@@ -36,7 +38,7 @@
 | 项目与成员 | F05、F23、F28、F50–F52 |
 | 文档与版本 | F06–F09、F11–F13、F46–F48 |
 | 渲染与主题 | F14–F15、F37–F41 |
-| 数据源与同步 | F18–F22、F43、F20（开放推送 API） |
+| 存储后端与同步 | F18–F22、F43（R4：文档库内嵌 git/local 后端；F20 开放推送 API 已删除） |
 | AI 智能整理 | F26 |
 | 内容导入 | F27 |
 | 知识图谱 | F29–F32 |
@@ -48,7 +50,7 @@
 
 - **多副本无状态部署**（PRD 8.1 部署形态）：任一无状态副本可水平扩展，避免单点故障 `[Data-backed，PRD R3]`
 - **发布双地址形态**：子域名 `{slug}.ewiki.yfzx.cn` 与子路径 `ewiki.yfzx.cn/wiki/{slug}` `[Data-backed，PRD R4]`
-- **开放推送 API**：GitLab Runner 可自动推送更新 `[Data-backed，PRD R3]`
+- **Git 文档库双向链路**：平台内编辑自动 commit+push；远端外部更新经手动同步拉取消化（R4：原开放推送 API 已由 ADR-14 删除） `[Data-backed，PRD R3 → R4 修订]`
 - **实时协同编辑**：P1 交付，单文档并发上限建议 ≤ 10 人 `[Assumption，PRD 8.3]`
 - **本期不做商业化**：无计费/订阅模块 `[Data-backed，PRD 4.1]`
 - **数据库方言边界**：队列/锁/广播/检索经 JobQueue/LockService/EventBus/SearchService 四接口隔离，PostgreSQL 为 Phase 1 默认实现，国产库触发时切换方言实现 `[Data-backed：用户决策 R3]`
@@ -60,9 +62,9 @@
 
 | 术语 | 定义 |
 | --- | --- |
-| 源（Source） | 文档内容的来源系统：Git 仓库、本地文件夹、网页链接、数据库（10 种） |
-| 同步（Sync） | 从源拉取内容并转化为平台文档的任务，含冲突检测 |
-| 推送令牌（Push Token） | 开放推送 API 的按源发放的鉴权凭证 |
+| 存储后端 | 文档库（projects）1:1 内嵌的内容存储方式，取值仅 `git`（远端 Git 仓库）或 `local`（服务器本地文件夹）；随文档库创建而定，不可经 API 更换（R4/ADR-14） |
+| 存储源（连接配置） | 用户级可复用连接配置 `storage_connections`：持有 Git 主机地址与加密凭据（gitlab/gitea），可被同一用户的多个 Git 文档库引用，不跨用户共享 |
+| 同步（Sync） | 从 Git 文档库的远端仓库（或本地后端目录）拉取内容并消化为平台文档的手动任务；触发方式为平台内编辑自动提交（trigger=push）与手动同步（trigger=manual） |
 | 发布站点（Site） | 项目对外只读站点的发布配置与产物集合 |
 | 托管地址 | 平台持有的站点地址：子域名或子路径两种形态 |
 | 协同会话 | 多人通过 CRDT 文档同时编辑的实时会话 |
@@ -97,11 +99,8 @@ graph TB
         NAS[("NAS（回退）<br/>S3 不可用时降级")]
     end
     subgraph Ext["外部系统"]
-        GIT["Git 仓库 / GitLab"]
+        GIT["Git 仓库 / GitLab / Gitea"]
         LOC["本地文件夹（服务器卷）"]
-        WEBSRC["网页链接"]
-        DBS["业务数据库 ×10"]
-        RUNNER["GitLab Runner / CI"]
     end
     WEB -->|HTTPS REST| CDY
     WEB -->|WSS 事件与协同| CDY
@@ -115,13 +114,10 @@ graph TB
     WK --> S3
     WK --> GIT
     WK --> LOC
-    WK --> WEBSRC
-    WK --> DBS
-    RUNNER -->|开放推送 API| CDY
     CDY -.->|发布站点静态服务| S3
 ```
 
-**图示走读**：客户端只与 Caddy 对话，网关按路径分流——REST 转发 Server 副本，`/ws` 与 `/collab` 转发 Realtime 副本（按 docId 粘性路由保证同文档房间落同一实例）；GitLab Runner 经网关调用开放推送 API。三类副本全部无状态，经方言边界四接口（JobQueue/LockService/EventBus/SearchService，见 2.4）访问 PostgreSQL——队列、广播、锁、检索不因换库而扩散。存储双轨：StorageService 以 S3 为主，写失败降级 NAS 并打补偿标记、读 miss 回退 NAS，补偿任务负责回迁；发布产物由 Caddy 从 S3 直接静态服务。Phase 1 部署实体 **6 容器**（caddy/server/realtime/worker/postgres/minio）+ 既有 NAS 设施 `[Expert judgment]`。
+**图示走读**：客户端只与 Caddy 对话，网关按路径分流——REST 转发 Server 副本，`/ws` 与 `/collab` 转发 Realtime 副本（按 docId 粘性路由保证同文档房间落同一实例）。R4 后外部系统仅余 Git 仓库（经用户级存储源连接访问）与服务器本地卷，网页/数据库抓取与开放推送 API 已删除。三类副本全部无状态，经方言边界四接口（JobQueue/LockService/EventBus/SearchService，见 2.4）访问 PostgreSQL——队列、广播、锁、检索不因换库而扩散。存储双轨：StorageService 以 S3 为主，写失败降级 NAS 并打补偿标记、读 miss 回退 NAS，补偿任务负责回迁；发布产物由 Caddy 从 S3 直接静态服务。Phase 1 部署实体 **6 容器**（caddy/server/realtime/worker/postgres/minio）+ 既有 NAS 设施 `[Expert judgment]`。
 
 ### 2.3 组件职责与边界
 
@@ -130,7 +126,7 @@ graph TB
 | Caddy 网关 | TLS 终止、泛域名与子路径路由、静态前端资源与发布站点文件服务、负载均衡、WSS 升级、按 docId 粘性路由 | 无业务逻辑 | 各副本、S3 |
 | Server（无状态） | REST 资源 CRUD、鉴权与 RBAC 裁决、任务入队（pg-boss） | 不承载实时连接；不直接执行同步/发布等长任务 | PG、存储 |
 | Realtime（无状态） | WS 连接与房间订阅、事件广播（LISTEN/NOTIFY）、Yjs 协同会话与快照节流落库 | 不承载 REST；不做业务裁决 | PG、存储 |
-| Worker（无状态） | 源同步、冲突处理、发布构建、导入、AI 整理、导出、链接扫描（图谱数据） | 不直接响应客户端请求 | PG、存储、外部源 |
+| Worker（无状态） | 文档库同步（Git pull/本地目录消化）、发布构建、导入、AI 整理、导出、链接扫描（图谱数据） | 不直接响应客户端请求 | PG、存储、Git 远端（凭据取自存储源连接）/本地卷 |
 | PostgreSQL | 业务事实源；pg-boss 队列；LISTEN/NOTIFY 广播；advisory lock；全文检索——均经方言边界四接口访问 | 不存大文件（产物/附件走 S3/NAS） | — |
 | 存储（S3 主 / NAS 回退） | 站点产物版本目录、图片附件、ZIP 导出 | 不存 Y.Doc 快照（快照随 PG 主库） | — |
 
@@ -154,7 +150,7 @@ graph TB
 | ORM | Drizzle | SQL-first、零 codegen、零依赖；`fromDrizzle` 适配器实现"业务写入与任务入队同事务原子提交"；~20 表规模下类型推导成本可控 | `[Research-backed]` |
 | 队列/定时/死信 | pg-boss 12（Postgres 内） | 淘汰 Redis：与业务同库事务原子入队（消除双写）、重试/退避/cron/死信齐全、备份监控与业务同体 | `[Research-backed]` |
 | 跨副本广播 | PG LISTEN/NOTIFY | WS 事件与协同通知的低延迟广播，零新增实体 | `[Research-backed：pg-boss 同机制]` |
-| 源级互斥 | PG advisory lock | 同一源不并发同步 | `[Expert judgment]` |
+| 同步互斥 | pg-boss singletonKey（`sync:<projectId>:manual`，1 分钟窗口） | 同一文档库的手动同步不并发入队 | `[Expert judgment]` |
 | 实时服务 | 独立 realtime 服务（ws + Yjs，/ws 与 /collab） | REST/WS 阶段一即拆分（用户决策 R3）；realtime ×1~2，Caddy 按 docId 粘性路由，多副本房间迁移为 Phase 2 | `[Data-backed]` |
 | 协同持久化 | Y.Doc 快照 → PG bytea（节流） | 单文档 ≤1MB 假设下 PG 足够；Phase 2 经 StorageService 迁对象存储 | `[Assumption]` |
 | 文件存储 | StorageService 双适配器：S3 主（MinIO/云 OSS）+ NAS 故障回退 | 写 S3 失败落 NAS 并打补偿标记、读 miss 回退 NAS、补偿任务回迁（用户决策 R3） | `[Data-backed]` |
@@ -163,7 +159,7 @@ graph TB
 | 数据库方言边界 | JobQueue/LockService/EventBus/SearchService 四接口，PG 实现为默认 | 国产库硬性部署时切换方言：MySQL 系（OceanBase/TiDB/GaussDB）=自研 SKIP LOCKED 队列 + GET_LOCK + 事件表轮询 + ngram 检索；PG 系（人大金仓/openGauss）直兼容（用户决策 R3） | `[Data-backed]` |
 | 全文检索 | tsvector + pg_trgm | 不引入独立搜索引擎；预留 Meilisearch 路径 | `[Expert judgment]` |
 | 认证 | 自研最小 JWT（jose）+ refresh_tokens 表 | 勿增实体；better-auth 为备选 `[To be confirmed]` | `[Expert judgment]` |
-| 凭据加密 | AES-256-GCM，主密钥来自环境/KMS `[To be confirmed：KMS 选型]` | 数据源密码不落明文（PRD 8.2） | `[Expert judgment]` |
+| 凭据加密 | AES-256-GCM，主密钥来自环境/KMS `[To be confirmed：KMS 选型]` | 存储源（storage_connections）令牌不落明文（PRD 8.2，R4 后唯一加密凭据存放点） | `[Expert judgment]` |
 | 前端 | React 19 + Vite + Tailwind + TanStack Query + Zustand | 沿用原型栈，原型代码直接迁移；服务端状态与 UI 状态分别由 Query/Zustand 承载 | `[Data-backed]` |
 | 编辑器 | TipTap + y-prosemirror + Yjs | 所见即所得（F13）+ CRDT 协同（F17）+ 离线同源 | `[Research-backed]` |
 | AI 适配器 | AiProvider 接口 | 服务商与模型待定 | `[To be confirmed]` |
@@ -195,7 +191,7 @@ ewiki/
 └─ packages/editor # TipTap 编辑器封装 + y-prosemirror 绑定
 ```
 
-模块清单（server 内部限界上下文）：`auth`、`users`、`projects`、`members`、`documents`、`versions`、`sources`、`sync`、`publish`、`graph`、`ai`、`imports`、`notifications`、`search`、`open-api`（开放推送）。依赖方向单向：`open-api → sync → sources → documents → projects`，无环。realtime 服务包含 `realtime-gateway`（WS 连接/房间/广播）与 `collab`（Yjs 会话与快照）两个模块，与 server 共享领域层。
+模块清单（server 内部限界上下文）：`auth`、`users`、`projects`（含内嵌存储后端与手动同步入口）、`connections`（用户级存储源连接）、`members`、`documents`、`versions`、`sync`、`publish`、`graph`、`ai`、`imports`、`notifications`、`search`。依赖方向单向：`sync → projects → documents`、`projects → connections`，无环（R4：原 `sources`、`open-api` 模块已删除）。realtime 服务包含 `realtime-gateway`（WS 连接/房间/广播）与 `collab`（Yjs 会话与快照）两个模块，与 server 共享领域层。
 
 ---
 
@@ -206,11 +202,11 @@ ewiki/
 ```mermaid
 erDiagram
     USERS ||--o{ PROJECT_MEMBERS : joins
+    USERS ||--o{ STORAGE_CONNECTIONS : owns
+    STORAGE_CONNECTIONS ||--o{ PROJECTS : connects
     PROJECTS ||--o{ PROJECT_MEMBERS : has
-    PROJECTS ||--o{ SOURCES : binds
     PROJECTS ||--o{ DOCUMENTS : contains
     PROJECTS ||--o{ PUBLISH_SITES : publishes
-    SOURCES ||--o{ DOCUMENTS : feeds
     DOCUMENTS ||--o{ DOCUMENT_VERSIONS : history
     DOCUMENTS ||--o{ DOCUMENT_LINKS : links
     DOCUMENTS ||--o{ DOCUMENT_TAGS : tagged
@@ -218,8 +214,7 @@ erDiagram
     DOCUMENTS ||--o{ COMMENTS : discusses
     DOCUMENTS ||--o{ YDOC_SNAPSHOTS : collab
     PUBLISH_SITES ||--o{ PUBLISH_JOBS : runs
-    SOURCES ||--o{ PUSH_TOKENS : authenticates
-    SOURCES ||--o{ SYNC_JOBS : executes
+    PROJECTS ||--o{ SYNC_JOBS : executes
     PROJECTS ||--o{ IMPORT_JOBS : imports
     PROJECTS ||--o{ AI_CLASSIFY_RUNS : organizes
     PROJECTS ||--o{ ACTIVITIES : records
@@ -232,18 +227,20 @@ erDiagram
         string visibility
         string template
         uuid owner_id FK
+        string storage_kind
+        uuid storage_connection_id FK
+        string storage_status
     }
-    SOURCES {
+    STORAGE_CONNECTIONS {
         uuid id PK
-        uuid project_id FK
-        string type
-        jsonb config_encrypted
-        string status
+        uuid owner_id FK
+        string kind
+        string base_url
+        jsonb token_encrypted
     }
     DOCUMENTS {
         uuid id PK
         uuid project_id FK
-        uuid source_id FK
         string path
         string status
         text content
@@ -257,23 +254,22 @@ erDiagram
     }
 ```
 
-**图示走读**：`PROJECTS` 是聚合根；`SOURCES` 按项目绑定并喂养 `DOCUMENTS`（一个文档归属一个源，手动创建的文档源为空表示"平台原生"）；`DOCUMENT_VERSIONS` 保存不可变历史；`DOCUMENT_LINKS` 由链接扫描任务维护，是知识图谱（F29–F32）的数据来源，断链即 `broken=true` 的记录；`PUBLISH_SITES` 与 `PUBLISH_JOBS` 分离"配置"与"执行"；`PUSH_TOKENS` 支撑开放推送 API 的按源鉴权；协同状态经 `YDOC_SNAPSHOTS` 落地，会话历史不进关系表（见 5.3）。
+**图示走读**：`PROJECTS` 是聚合根，R4 后文档库自身持有存储后端（`storage_kind` 等 9 个内嵌列，见 3.2）：Git 后端经 `storage_connection_id` 引用用户自己的 `STORAGE_CONNECTIONS`（存储源连接配置），local 后端该列为 NULL；`DOCUMENTS` 只经 `project_id` 归属文档库（R4 删除 `source_id`）；`DOCUMENT_VERSIONS` 保存不可变历史；`DOCUMENT_LINKS` 由链接扫描任务维护，是知识图谱（F29–F32）的数据来源，断链即 `broken=true` 的记录；`PUBLISH_SITES` 与 `PUBLISH_JOBS` 分离"配置"与"执行"；`SYNC_JOBS` 归属文档库（手动同步与平台内编辑自动提交两类 trigger）；协同状态经 `YDOC_SNAPSHOTS` 落地，会话历史不进关系表（见 5.3）。
 
 ### 3.2 核心表定义
 
-约定：所有表含 `id uuid PK (gen_random_uuid())`、`created_at/updated_at timestamptz`；软删除用 `deleted_at`（仅 projects/documents/sources）。下列为业务字段。
+约定：所有表含 `id uuid PK (gen_random_uuid())`、`created_at/updated_at timestamptz`；软删除用 `deleted_at`（仅 projects/documents）。下列为业务字段。
 
 | 表 | 字段（类型，约束） | 说明 |
 | --- | --- | --- |
 | users | email text UNIQUE NOT NULL；name text；password_hash text；global_role text CHECK(admin/user) DEFAULT 'user'；avatar_url text；status text | 全局账号角色对应 PRD 2.1"管理员/普通用户"；企业 OA 对接预留 `sso_subject text NULL` |
 | refresh_tokens | user_id FK；token_hash text；expires_at timestamptz；revoked_at NULL | 刷新令牌旋转与吊销落库（Phase 1 以 PG 替代 Redis 黑名单） |
-| user_prefs | user_id UUID PK FK；theme text；appearance text；accent text；font_size int；prefs jsonb（通知矩阵、源默认、快捷键偏好） | PRD F41–F44 的用户级偏好，单表 JSONB（无跨表查询需求） |
-| projects | name text NOT NULL；description text；color text；visibility text CHECK(private/team/public)；template text；owner_id FK users；archived bool | slug 不在项目上——发布地址属于 publish_sites |
+| user_prefs | user_id UUID PK FK；theme text；appearance text；accent text；font_size int；prefs jsonb（通知矩阵、默认存储后端、快捷键偏好） | PRD F41–F44 的用户级偏好，单表 JSONB（无跨表查询需求） |
+| projects | name text NOT NULL；description text；color text；visibility text CHECK(private/team/public)；template text；owner_id FK users；archived bool；**存储后端 9 列（R4）**：storage_kind text CHECK(git/local) DEFAULT 'local'；storage_connection_id uuid NULL FK storage_connections；storage_config jsonb DEFAULT '{}'；default_branch text NULL；auto_sync bool DEFAULT false；interval_seconds int CHECK(1800/3600/21600/86400/0) DEFAULT 0；storage_status text CHECK(connected/synced/syncing/error) DEFAULT 'connected'；last_synced_at；last_error | slug 不在项目上——发布地址属于 publish_sites。存储后端随建库而定，不可经 PATCH 更换；auto_sync/interval_seconds 仅持久化偏好，当前无调度器，禁止任何文案声称定时同步已生效；local 后端 storage_connection_id MUST 为 NULL |
+| storage_connections | owner_id FK users NOT NULL；kind text CHECK(gitlab/gitea)；name text；base_url text；token_encrypted text（AES-256-GCM secretbox）；status text | R4 后的「存储源」：用户级可复用连接配置，可被同一用户多个 Git 文档库引用、不跨用户共享；删除时若被引用返回 409 |
 | project_members | project_id FK + user_id FK UNIQUE；role text CHECK(owner/maintainer/editor/guest)；invited_by FK；status text CHECK(active/pending) | 项目角色唯一事实源（PRD 8.4-4：移除原型回退逻辑） |
-| sources | project_id FK；type text CHECK(git/local/web/database)；name text；config_encrypted jsonb（**应用层 AES-256-GCM 加密后整体存储**，含认证字段）；default_branch text；auto_sync bool；interval_seconds int CHECK(1800/3600/21600/86400/0=manual)；status text CHECK(connected/synced/syncing/error)；last_synced_at；last_error text | 统一同步间隔枚举（PRD 8.4-3 决议）；config 明文字段（如仓库地址、分支）单列 `config_public jsonb` 便于展示 |
-| push_tokens | source_id FK；token_hash text（SHA-256）；scopes text[]；last_used_at；revoked_at NULL | 开放推送 API 凭证；明文只在创建时返回一次 |
-| sync_jobs | source_id FK；trigger text CHECK(manual/schedule/push)；commit_hash text NULL；status text CHECK(queued/running/succeeded/failed)；stats jsonb；error text；idempotency_key text UNIQUE | 推送 API 幂等键 = `{sourceId}:{commitHash}` |
-| documents | project_id FK；source_id FK NULL；path text NOT NULL；title text；content text（当前版本 Markdown）；content_hash text；status text CHECK(untracked/synced/modified/conflict)；word_count int；updated_by FK | UNIQUE(project_id, path)；全文检索列 `search tsvector GENERATED`（title+content） |
+| sync_jobs | project_id FK（R4：原 source_id 改挂 projects）；trigger text（manual=手动同步；schedule=预留，当前无调度器；push=平台内编辑后的自动提交）；commit_hash text NULL；status text CHECK(queued/running/succeeded/failed)；stats jsonb（docsUpserted/docsRemoved/links/noop）；error text；**不设 (project_id, commit_hash) 唯一约束**（无增量重复同步是正常成功路径，投递幂等由 singletonKey 承载） | 工作目录 `FS_ROOT/repos/<projectId>`；手动入队 singletonKey=`sync:<projectId>:manual`（1 分钟窗口） |
+| documents | project_id FK（R4 删除 source_id）；path text NOT NULL；title text；content text（当前版本 Markdown）；content_hash text；status text CHECK(untracked/synced/modified/conflict)；word_count int；updated_by FK | UNIQUE(project_id, path)；全文检索列 `search tsvector GENERATED`（title+content） |
 | document_versions | document_id FK；version_no int；commit_hash text NULL；author_id FK；author_names text[]（协同会话参与者）；message text；content text（整快照）；changed_summary jsonb | UNIQUE(document_id, version_no)；版本不可变（PRD F47 回滚=生成新版本） |
 | document_links | from_document_id FK；to_document_id FK NULL；external_url text NULL；broken bool | CHECK(恰一：to_document_id 或 external_url)；图谱数据源 |
 | document_tags / tags | tags(project_id, name UNIQUE)；document_tags(document_id, tag_id) PK 复合 | 标签 AND 筛选（F08）基于 join |
@@ -285,7 +281,7 @@ erDiagram
 | ai_classify_runs | project_id FK；scope text CHECK(all/inbox)；status；stats jsonb（scanned/folders_created/docs_relocated/tags_added）；started_by FK | F26 |
 | activities | project_id FK NULL（全局动态为 NULL）；actor_id FK；verb text CHECK(comment/sync/publish/edit/delete/create)；target_type text；target_id uuid；target_title text；meta jsonb | 驱动 F03/F49 与通知（PRD 8.4 决议：动词枚举与原型对齐） |
 | notifications | user_id FK；type text；payload jsonb；read_at NULL | 站内通知（F42 事件矩阵落库于 user_prefs） |
-| audit_logs | actor_id；action text；resource_type；resource_id；ip；meta jsonb | 覆盖：删除项目、角色变更、凭据变更、推送令牌管理（PRD 8.2） |
+| audit_logs | actor_id；action text；resource_type；resource_id；ip；meta jsonb | 覆盖：删除项目、角色变更、存储源连接管理（connection.create/update/delete）、建库（project.create）、手动同步（project.sync_requested）、Git 自动提交（git.auto_commit）（PRD 8.2） |
 
  starter packs 不建表——8 个预设包为代码内置种子数据（只读接口下发）`[Expert judgment]`。
 
@@ -293,14 +289,14 @@ erDiagram
 
 - **强一致（PG 事务）**：文档保存+版本写入、成员角色变更、发布配置变更；状态机迁移（6.3 PRD）由应用层守卫 + DB CHECK 双重约束。
 - **最终一致**：搜索索引（同事务更新 tsvector，重建任务兜底）、图谱链接（异步扫描任务）、动态/通知投递（队列，至多一次 + 前端幂等去重）。
-- **幂等键**：sync_jobs.idempotency_key、publish_jobs(site_id, content_hash)、写接口支持 `Idempotency-Key` 头。
+- **幂等/互斥**：手动同步以 pg-boss singletonKey（`sync:<projectId>:manual`，1 分钟窗口）去重；publish_jobs(site_id, content_hash)；写接口支持 `Idempotency-Key` 头。
 
 ### 3.4 索引策略
 
-- documents：`GIN(search)` 全文、`(project_id, status)`、`(project_id, path)` 唯一、`(source_id)`、`(updated_at DESC)`。
+- documents：`GIN(search)` 全文、`(project_id, status)`、`(project_id, path)` 唯一、`(updated_at DESC)`。
 - document_versions：`(document_id, version_no DESC)`。
 - activities：`(project_id, created_at DESC)`、`(verb)`。
-- sync_jobs / publish_jobs：`(status, created_at)`（Worker 扫描）、`idempotency_key` 唯一。
+- sync_jobs / publish_jobs：`(status, created_at)`（Worker 扫描）。sync_jobs 不设 commit_hash 唯一约束（无增量重复同步正常留痕），手动同步投递互斥由 pg-boss singletonKey 承载。
 - publish_sites：`slug` 唯一、`custom_domain` 唯一。
 `[Expert judgment]`
 
@@ -313,7 +309,7 @@ erDiagram
 | 约定 | 内容 |
 | --- | --- |
 | Base Path | `/api/v1`（破坏性变更升 `/v2`，旧版本保留 ≥ 6 个月弃用窗口 `[Assumption]`） |
-| 鉴权 | 管理接口：`Authorization: Bearer <accessToken>`；开放推送 API：`Authorization: EwikiPush <pushToken>` |
+| 鉴权 | 全部接口统一 `Authorization: Bearer <accessToken>`（R4：EwikiPush 开放推送鉴权随 ADR-14 删除） |
 | 令牌 | 访问令牌 JWT（15 分钟 `[Assumption]`，jose 签发）+ 刷新令牌（7 天，refresh_tokens 表旋转与吊销） |
 | 响应信封 | 成功直接返回资源；错误统一 `{ code, message, details?, requestId }` |
 | 分页 | `?page=&pageSize=`（默认 20，上限 100）→ `{ items, page, pageSize, total }` |
@@ -328,11 +324,12 @@ erDiagram
 | 401 | UNAUTHENTICATED / TOKEN_EXPIRED | 未认证/过期 |
 | 403 | FORBIDDEN | 角色不足（RBAC 矩阵见 6.3） |
 | 404 | NOT_FOUND | 资源不存在 |
-| 409 | CONFLICT / SLUG_TAKEN / DOMAIN_TAKEN / SOURCE_SYNCING / EDIT_CONFLICT / IN_COLLAB_SESSION | 状态冲突 |
+| 409 | CONFLICT / SLUG_TAKEN / DOMAIN_TAKEN / CONNECTION_IN_USE / EDIT_CONFLICT / IN_COLLAB_SESSION | 状态冲突（CONNECTION_IN_USE：删除被文档库引用的存储源连接） |
 | 422 | IMPORT_PARAMS_INVALID | 导入参数越限（>3 层或 >500 页） |
 | 429 | RATE_LIMITED | 限流 |
 | 500 | INTERNAL | 服务端错误 |
-| 502 / 504 | SOURCE_UNREACHABLE / SOURCE_TIMEOUT | 外部源不可达/超时 |
+| 400（建库/同步） | VALIDATION_FAILED / CONNECTION_INVALID / REPO_NOT_FOUND / LOCAL_BACKEND_NO_SYNC | 存储契约错误：请求体校验失败、连接校验失败、autoInit=false 且仓库不存在、对 local 后端触发同步（R4） |
+| 403（建库） | FORBIDDEN | 存储源连接不属于当前用户（不暴露存在性，R4） |
 
 ### 4.2 接口清单
 
@@ -344,11 +341,12 @@ erDiagram
 | A4 | GET /me · PATCH /me · POST /me/avatar | 个人资料 F40 | Bearer | avatar 限 JPG/PNG、256×256、≤2MB（服务端校验），超限 400 |
 | A5 | GET/PATCH /me/preferences | 偏好 F41–F44 | Bearer | partial merge 语义 |
 | P1 | GET /projects | 项目列表 | Bearer | 按可见性过滤（private 仅 Owner/Maintainer） |
-| P2 | POST /projects | 新建项目 F05 | Bearer | body `{name*, description, visibility, template, source?}` → 201 |
-| P3 | GET /projects/:id | 项目详情 | 成员或可见性规则 | 含聚合统计（文档数等） |
-| P4 | PATCH /projects/:id | 基本设置 F23 | Maintainer+ | visibility 变更写审计日志 |
+| P2 | POST /projects | 新建项目（可一次性开通 Git 存储后端）F05/F18 | Bearer | body `{name*, description, color?, visibility, template, storage?}`；storage 为判别联合：`{kind:'git', connectionId, repoName, defaultBranch?, autoInit?}` 或 `{kind:'local', path?}`，省略按 local → 201 `{project, docs, git?}`；Git 校验全部前置（连接非本人 403、连接无效 400 CONNECTION_INVALID、autoInit=false 且仓库不存在 400 REPO_NOT_FOUND），失败不留项目行（R4，单次建库收敛） |
+| P3 | GET /projects/:id · GET /projects/:id/overview | 项目详情/概览 | 成员或可见性规则 | overview 含全存储列 + backendKind + docCount/memberCount + storageStatus/lastError（同步状态观测口） |
+| P4 | PATCH /projects/:id | 基本设置 F23 | Maintainer+ | 可改 name/autoSync/intervalSeconds/defaultBranch；visibility 变更写审计日志；**不得**更换 storageKind/storageConnectionId（R4 不变量） |
 | P5 | DELETE /projects/:id | 删除项目 F28 | **Owner 仅** | 软删除 + 级联标记；二次确认由前端承担 |
-| P6 | POST /projects/init-from-starter | StarterPack 初始化 F10 | Bearer | body `{packKey, name, source{...}}` → 201 项目 |
+| PS | POST /projects/:id/sync | 立即同步（R4 取代原 /sources/:id/sync）F22 | Editor+（canWrite） | 仅 Git 后端：local → 400 LOCAL_BACKEND_NO_SYNC；入队 `{projectId, trigger:'manual'}`（singletonKey 1 分钟窗口），置 storageStatus=syncing，审计 project.sync_requested → **202 `{ok, projectId, status:'syncing'}`** |
+| C1 | GET/POST /connections · PATCH/DELETE /connections/:id | 存储源连接管理（用户级，R4） | Bearer（仅本人资源） | kind=gitlab/gitea；令牌 AES-256-GCM 加密存储、回显掩码；DELETE 被任意文档库引用时 409 CONNECTION_IN_USE（响应含引用方 projectId 列表） |
 | M1 | GET/POST /projects/:id/members · PATCH/DELETE /projects/:id/members/:userId | 成员管理 F50–F51 | Owner（变更）/ Maintainer+（查看邀请） | PATCH body `{role}`；Owner 不可被降级（403） |
 | D1 | GET /projects/:id/documents | 文档列表 F06–F09 | 查看角色 | query：`status[]`、`tags[]`（AND）、`updatedSince`、`q`、`scope=flat/project` |
 | D2 | POST /projects/:id/documents | 新建文档 F12 | Editor+ | body `{path*, title, content?}`；path 冲突 409 |
@@ -358,11 +356,7 @@ erDiagram
 | D6 | GET /documents/:id/versions | 版本时间线 F46 | 查看角色 | `?docId=&q=&author=` 聚合版见 V2 |
 | D7 | POST /documents/:id/rollback | 回滚 F47 | Editor+ | 生成新版本，body `{toVersion}` |
 | D8 | GET /documents/:id/links | 文档链接 | 查看角色 | 图谱局部数据 |
-| T1 | GET /projects/:id/tags | 标签 | 查看角色 | 筛选抽屉数据源 |
-| S1 | GET /sources · POST /sources | 源列表/创建 F18–F19 | Maintainer+（列表）· Maintainer+（创建） | POST 按 type 校验 config（分支图见 PRD 6.2.4）；敏感字段响应中永不出现在 config_public |
-| S2 | PATCH/DELETE /sources/:id | 源编辑/删除 F22 | Maintainer+ | 认证字段留空=不修改；回显掩码 |
-| S3 | POST /sources/:id/sync | 立即同步 F22 | Maintainer+ | → 202 `{jobId}`；syncing 中重复触发 409 SOURCE_SYNCING |
-| O1 | POST /open/sources/:sourceId/push | **开放推送 API** | EwikiPush 令牌 | 详见 4.3 |
+| T1 | GET /projects/:id/tags | 标签 | 查看角色 | 筛选抽屉数据来源 |
 | G1 | GET /projects/:id/graph | 图谱 F29 | 查看角色 | `?view=explore/orphans/hubs`；返回 nodes/edges/stats；规模超限 200+`truncated:true` 降级 |
 | AI1 | GET /projects/:id/ai-runs · POST /projects/:id/ai-runs | AI 整理 F26 | Maintainer+ | POST body `{scope}` → 202 `{runId}`；运行中再触发 409 |
 | I1 | GET/POST /projects/:id/import-jobs | 导入 F27 | Maintainer+ | POST body `{importer, params}`；爬取越限 422 |
@@ -378,34 +372,29 @@ erDiagram
 
 ### 4.3 核心接口详细契约
 
-#### O1 开放推送 API（PRD F20 / R3）
+#### P2 新建文档库（R4：单次建库并开通 Git 后端，ADR-14）
 
 | Field | Value |
 | --- | --- |
-| Operation | `POST /api/v1/open/sources/{sourceId}/push` |
-| Purpose | GitLab Runner/CI 在流水线中通知平台拉取最新提交并触发同步 |
-| Auth | `Authorization: EwikiPush <pushToken>`；令牌按源发放，SHA-256 落库（`push_tokens`），可吊销/轮换 |
-| 防重放 | 头 `X-Ewiki-Timestamp`（Unix 秒，与服务端偏差 ≤ 300s）+ `X-Ewiki-Signature = HMAC-SHA256(token, timestamp + body)` |
-| Path 参数 | `sourceId`（UUID，须为 git 类型源） |
-| Request body | `{ "branch": "main"（可选，默认源配置分支）, "commitHash": "a1b2c3"（可选，幂等与拉取定位） }` |
-| Success | `202 Accepted`；body `{ "jobId": "uuid", "deduped": false }`；重复 commitHash 返回 `200` + `deduped: true` |
-| Error codes | 401 TOKEN_INVALID / TOKEN_REVOKED；403 SOURCE_TYPE_MISMATCH（非 git 源）；404；409 SOURCE_SYNCING；429；502 SOURCE_UNREACHABLE |
-| 幂等 | `sync_jobs.idempotency_key = sourceId:commitHash` 唯一约束兜底 |
+| Operation | `POST /api/v1/projects` |
+| Purpose | 一次请求完成文档库创建；Git 后端在同一请求内完成连接校验、仓库建/关联、模板种子文档与首次提交推送，取代 R3 的「建库 + 建数据源」两步 |
+| Request body | `{ "name": "...", "description": "...", "template": "team-wiki", "storage": { "kind": "git", "connectionId": "uuid", "repoName": "team-wiki", "defaultBranch": "main", "autoInit": true } }`；local 后端为 `storage: { "kind": "local", "path": "可选目录" }` 或省略 storage |
+| 前置校验（全部先于建库） | connectionId 必须属于当前用户，否则 **403**（不暴露存在性）；连接校验失败 **400 CONNECTION_INVALID**；`autoInit:false` 且远端仓库不存在 **400 REPO_NOT_FOUND**；zod 判别联合校验失败 **400 VALIDATION_FAILED**（直填 git url/token 不再被接受） |
+| Success | `201`；`{ project, docs, git }`，project 含 9 个存储列；git = `{ repo, created, committed, commitHash?, message? }`；local 后端无 git 字段；空库首推成功后 storageStatus=synced 并写 sync_jobs(trigger=push) |
+| 工作副本 | worker 与自动提交统一使用 `FS_ROOT/repos/<projectId>`（FS_ROOT 默认 ./data） |
 
-GitLab CI 配置示例：
+> R4 删除项：开放推送 API（`POST /open/sources/:id/push`）、EwikiPush 令牌、push_tokens 表、HMAC 防重放与 GitLab CI 推送示例全部移除，无兼容端点；远端仓库的外部更新经 `POST /projects/:id/sync` 手动拉取消化。
 
-```yaml
-publish-docs:
-  stage: deploy
-  script:
-    - >-
-      curl -sf -X POST "https://api.ewiki.yfzx.cn/api/v1/open/sources/${EWIKI_SOURCE_ID}/push"
-      -H "Authorization: EwikiPush ${EWIKI_PUSH_TOKEN}"
-      -H "X-Ewiki-Timestamp: $(date +%s)"
-      -H "X-Ewiki-Signature: $(printf "%s%s" "$(date +%s)" "$CI_COMMIT_SHA" | openssl dgst -sha256 -hmac "$EWIKI_PUSH_TOKEN" -binary | xxd -p -c 64)"
-      -H "Content-Type: application/json"
-      -d "{\"branch\":\"$CI_COMMIT_BRANCH\",\"commitHash\":\"$CI_COMMIT_SHA\"}"
-```
+#### PS 立即同步（R4）
+
+| Field | Value |
+| --- | --- |
+| Operation | `POST /api/v1/projects/{projectId}/sync` |
+| Auth | Bearer；项目 canWrite（Editor+） |
+| Request body | 空 |
+| Success | `202`；正常入队返回 `{ ok: true, projectId, status: 'syncing', deduped: false }`；入队载荷 `{ projectId, trigger: 'manual' }`，pg-boss singletonKey `sync:<projectId>:manual`（singletonMinutes=1，按分钟对齐时间桶节流）。落在同一时间桶内的重复触发，服务端复算 pg-boss 部分唯一索引（`pgboss.job` 同 name+singletonKey+singleton_on 且 state<>'cancelled'）命中后返回 `{ status: 'deduped', deduped: true }`，且不翻转 storageStatus（send 会被静默丢弃，无作业消化、无 NOTIFY，避免卡在 syncing） |
+| 副作用 | 置 storageStatus=syncing；审计 project.sync_requested；worker 消化成功后写 sync_jobs（stats: docsUpserted/docsRemoved/links/noop；远端无增量且文档零增删时 noop=true，仍为成功）、storageStatus=synced、activity verb=sync，并经 pg_notify 广播 `sync.status_changed`（载荷 `{projectId, status}`，房间 `project:<projectId>`）；失败置 error 并通知全体项目成员 |
+| Error codes | 400 LOCAL_BACKEND_NO_SYNC（local 后端无需同步）；403（非成员/只读）；404（项目不存在） |
 
 #### D4 保存文档（非协同路径）
 
@@ -430,16 +419,6 @@ publish-docs:
 | Error codes | 400（未配置发布站点）/ 403 / 409 PUBLISH_RUNNING / 429 |
 | 幂等 | `Idempotency-Key` 头；服务端以 `(siteId, contentHash)` 去重 |
 
-#### S3 立即同步
-
-| Field | Value |
-| --- | --- |
-| Operation | `POST /api/v1/sources/{id}/sync` |
-| Auth | Bearer；Maintainer+ |
-| Request body | 空（触发配置分支最新内容） |
-| Success | `202 { jobId }`；进行中重复调用 `409 SOURCE_SYNCING` |
-| 副作用 | 入队 sync_jobs（trigger=manual）；完成/失败经 WS `sync.status_changed` 与通知（失败进 F42 矩阵） |
-
 #### AI1 / I1（任务型接口统一模式）
 
 POST → `202 { runId | jobId }`；GET 列表含 status/progress/stats；同任务运行中再提交 `409`；失败保留 error 可重试（POST 同参重试生成新任务）。AI 运行的模型调用经适配器接口 `AiProvider.generate(prompt, context)`，具体服务商 `[To be confirmed]`。
@@ -459,7 +438,7 @@ POST → `202 { runId | jobId }`；GET 列表含 status/progress/stats；同任�
 | --- | --- | --- |
 | activity.created | actor、verb、target | F03/F49 |
 | document.updated | docId、status、by | F12 树刷新 |
-| sync.status_changed | sourceId、status、error? | F18/F42 |
+| sync.status_changed | projectId、status、error?（房间 project:\<projectId\>，R4 载荷改挂文档库） | F18/F42 |
 | publish.finished | siteId、version、address | F36 |
 | notification.new | 通知对象 | F42 |
 | presence.updated | docId、users[]（光标/选区/姓名） | F17 |
@@ -468,41 +447,44 @@ POST → `202 { runId | jobId }`；GET 列表含 status/progress/stats；同任�
 
 ### 4.5 版本管理策略
 
-URL 主版本（/v1）；向后兼容变更（新增可选字段/新端点）原位发布；破坏性变更升 `/v2` 并行运行 ≥ 6 个月 `[Assumption]`；开放推送 API 另有独立令牌生命周期，不随主版本强制升级。
+URL 主版本（/v1）；向后兼容变更（新增可选字段/新端点）原位发布；破坏性变更升 `/v2` 并行运行 ≥ 6 个月 `[Assumption]`。R4 为例外：经 ADR-14 决议的一次性破坏性发布，`/api/v1/sources*` 与开放推送 API 直接删除，不设兼容层。
 
 ---
 
 ## 5 关键流程设计
 
-### 5.1 源同步与冲突处理（F18–F22 / F43 / O1）
+### 5.1 文档库同步与内容消化（F18–F22 / F43；R4 重构，ADR-14）
+
+R4 后同步单元是文档库自身：存储后端（git/local）内嵌于 projects，不再有独立数据源实体，也无定时调度器与开放推送触发。两类触发：
+
+- **手动同步（trigger=manual）**：`POST /projects/:id/sync`，仅 Git 后端接受（local 返回 400 LOCAL_BACKEND_NO_SYNC）；pg-boss singletonKey 1 分钟窗口去重。
+- **自动提交（trigger=push）**：平台内新建/更新/删除文档时，Git 后端在保存副作用内对工作副本 `commit + push` 并留痕 sync_jobs；提交失败不回滚文档保存（审计 git.push_failed）。
 
 ```mermaid
 sequenceDiagram
-    participant T as 触发方(定时/手动/推送API)
+    participant U as 用户(手动同步)
+    participant S as Server
     participant Q as 任务队列（pg-boss/PG）
     participant W as Sync Worker
-    participant SRC as 外部源
+    participant GIT as Git 远端 / 本地目录
     participant PG as PostgreSQL
     participant WS as Server(WS 推送)
 
-    T->>Q: 入队 sync_job（幂等键 sourceId:commitHash）
-    Q->>W: 消费（advisory lock 源级互斥）
-    W->>SRC: 拉取内容（git fetch / 目录扫描 / 抓取 / 查询）
-    SRC-->>W: 内容 + 内容哈希
-    W->>PG: 按 path 匹配文档，diff content_hash
-    alt 新文档
-        W->>PG: insert(status=untracked)
-    else 远端有改 & 本地无改
-        W->>PG: update content（status=synced）
-    else 远端有改 & 本地有改
-        W->>PG: update(status=conflict)
-    end
-    W->>PG: 写 sync_jobs 结果 + activities
-    W->>WS: publish sync.status_changed（LISTEN/NOTIFY）
-    WS-->>客户端: 事件推送 / 失败进通知矩阵
+    U->>S: POST /projects/:id/sync
+    S->>S: canWrite 校验；非 Git 后端 → 400
+    S->>Q: send('sync', {projectId, trigger:'manual'})
+    S-->>U: 202 {ok, projectId, status:'syncing'}
+    Q->>W: 消费（singletonKey 去重）
+    W->>PG: sync_jobs(running) + projects.storage_status=syncing
+    W->>GIT: ensureWorkdir(repos/<projectId>)；有提交则 pull 取 commitHash
+    GIT-->>W: 工作副本文件树
+    W->>PG: 按 path upsert 文档；软删除消失文档；重建 document_links
+    W->>PG: sync_jobs(succeeded, stats) + storage_status=synced + activity(sync)
+    W->>WS: pg_notify sync.status_changed {projectId, status}
+    WS-->>客户端: 事件推送 / 失败置 error 并通知全体成员
 ```
 
-**走读**：三种触发（定时、手动、开放推送 API）全部收敛到同一队列任务；源级 `advisory lock` 保证同一源不并发同步（PRD 6.2.4）。冲突判定依据"本地 content_hash 与拉取结果是否分叉"：无分叉直接快进；分叉置 `conflict` 并按项目冲突策略（保留我的/以远端为准/每次询问）执行——`每次询问` 时暂停该文档迁移，待对比面板裁决后写回。链接扫描作为同步收尾步骤重建 `document_links`，供图谱消费。
+**走读**：手动同步对 Git 工作副本执行 pull（本地后端直接消化配置目录或 `FS_ROOT/local-library/<projectId>`），随后按相对路径将文件树消化为 documents——新增/更新执行 upsert，副本中消失的文档软删除，收尾重建 `document_links` 供图谱消费。状态经 `storage_status`（connected/synced/syncing/error）与 overview 接口对外可观测。冲突状态机（untracked/synced/modified/conflict）仍保留于 documents.status，平台内修改与远端更新分叉的裁决策略沿用 PRD F43。当前无定时调度：`auto_sync`/`interval_seconds` 只持久化偏好，任何文案不得声称定时同步已生效。
 
 ### 5.2 发布管线（F33–F36 / R4 双地址）
 
@@ -591,7 +573,7 @@ sequenceDiagram
 | API P95 延迟（写） | ≤ 500ms | `[Hypothesis]` |
 | WS 事件端到端 | ≤ 1s | `[Hypothesis]` |
 | 千文档整站发布 | ≤ 60s | `[Hypothesis]` |
-| 千文档单源同步 | ≤ 5min | `[Hypothesis]` |
+| 千文档单库同步 | ≤ 5min | `[Hypothesis]` |
 | 协同并发 | ≤ 10 人/文档 | `[Data-backed，PRD 8.3]` |
 
 策略：读多写少接口走 PG 索引 + TanStack Query 客户端缓存；同步/发布批量分片；图谱超 5,000 节点时服务端预聚合社区与枢纽字段 `[Hypothesis：阈值待压测]`。
@@ -631,10 +613,9 @@ graph TB
 
 ### 6.3 安全设计
 
-- **RBAC 落地**：守卫按"全局角色（管理员）+ 项目角色"双层裁决，矩阵与 PRD 2.2 一致；差异点明确：删除项目/角色变更=Owner；源管理与 AI/导入/发布=Maintainer+；编辑=Editor+；Guest 仅读。API 层强制，前端仅做展示裁剪。
-- **凭据加密**：`sources.config_encrypted` 应用层 AES-256-GCM；主密钥来自环境/KMS `[To be confirmed：KMS 选型]`；任何接口不回明文。
-- **推送令牌**：SHA-256 存储、创建时一次性返回明文、支持吊销与轮换、HMAC 防重放（4.3 O1）。
-- **审计日志**：删除项目、角色变更、凭据与令牌操作全量落 `audit_logs`。
+- **RBAC 落地**：守卫按"全局角色（管理员）+ 项目角色"双层裁决，矩阵与 PRD 2.2 一致；差异点明确：删除项目/角色变更=Owner；存储源连接为用户级资源（仅本人可读写，建库引用他人连接返回 403）；AI/导入/发布=Maintainer+；编辑与手动同步=canWrite（Editor+）；Guest 仅读。API 层强制，前端仅做展示裁剪。
+- **凭据加密**：存储源令牌唯一存放点为 `storage_connections.token_encrypted`（AES-256-GCM secretbox）；主密钥来自环境/KMS `[To be confirmed：KMS 选型]`；任何接口不回明文，项目侧无任何令牌副本（R4）。
+- **审计日志**：删除项目、角色变更、存储源连接全生命周期（connection.create/update/delete）、建库（project.create）、手动同步（project.sync_requested）、Git 自动提交（git.auto_commit）全量落 `audit_logs`。
 - **公开站点**：静态产物只读、无平台会话 Cookie 注入；子路径形态下站点与平台同域，站点产物禁用平台凭据读取。
 - **传输**：全链路 TLS；WSS 同源策略 + 房间 RBAC 校验。
 
@@ -647,9 +628,9 @@ graph TB
 | 类别 | 策略 |
 | --- | --- |
 | 用户输入错误 | 400 + 字段级 details，不重试 |
-| 外部源错误 | 同步任务指数退避重试 5 次（pg-boss）+ 死信队列；连续失败置 source=error 并触发"同步失败"通知；恢复后自动回归 |
-| 外部源超时 | 连接 10s、单页抓取 10s、git fetch 10min 上限 |
-| 推送 API | 幂等键去重；签名/时间戳校验失败 401，不重试 |
+| 同步错误 | 手动同步失败写 sync_jobs=failed 与 projects.storage_status=error/last_error，通知全体项目成员；不自动退避重试，由用户再次手动触发（R4 现行行为） |
+| Git 远端超时 | git fetch/pull 设置超时上限；建库阶段连接/仓库校验失败直接 400/403，不留项目行 |
+| 自动提交失败 | 文档保存不回滚；effects.git 记录失败（ok=false, error），审计 git.push_failed，不阻塞写路径 |
 | 发布失败 | 产物残留于 v{N} 目录但不切换 current，线上版本不受影响；失败原因可重试 |
 | 协同断线 | 客户端 IndexedDB 保留增量，重连 CRDT 自动合并；极端冲突回退 PRD 6.3 冲突状态机 |
 | 基础设施 | PG 不可用 → /readyz 失败摘流；队列与业务同库，任务随库持久化不丢失 |
@@ -664,7 +645,7 @@ graph TB
 | ADR-2 | Yjs（CRDT）协同 | OT（ShareDB 类） | 离线优先与端侧合并契合远期桌面端；免去中心序服务器 | 采纳 |
 | ADR-3 | PostgreSQL 一体化：事实源 + 全文检索 + 队列/广播/锁（pg-boss、LISTEN/NOTIFY、advisory lock） | 独立搜索引擎 + Redis | 首年规模下运维实体最少（ADR-8），预留升级路径 | 采纳（R2 扩展） |
 | ADR-4 | 发布 = 版本目录 + current 指针 | 直接覆盖写 | 原子性与回滚零成本 | 采纳 |
-| ADR-5 | 推送 API = 通知 + 平台拉取 | Runner 直传文件包 | 复用已有 git 凭据与拉取管线，令牌不接触仓库内容 | 采纳 `[Expert judgment]` |
+| ADR-5 | 推送 API = 通知 + 平台拉取 | Runner 直传文件包 | 复用已有 git 凭据与拉取管线，令牌不接触仓库内容 | **R4 被 ADR-14 取代（开放推送 API 与 push_tokens 已删除）** |
 | ADR-6 | 双地址形态并存 | 单一形态 | PRD R4 要求；网关层成本可控 | 采纳，实施细节层 2 细化 |
 | ADR-7 | 桌面端预留：内容层（Yjs/本地库）与传输层解耦 | — | 离线模式复用 CRDT 本地持久化（y-indexeddb） | 规划 |
 | ADR-8 | Phase 1 实体收敛：Hono/Drizzle/pg-boss/Caddy，PG 承担队列/广播/锁（R3 修订：6 容器，见 ADR-12/13） | 原方案 7 组件（含 Redis/独立实时服务） | 市场调研显示 Postgres 原生队列 2026 成为主流收敛方向，pg-boss 12 高频维护；每个有状态组件都是部署/备份/监控/排障成本；Phase 2 触发条件见 2.4 | 采纳（R2；R3 修订） |
@@ -673,6 +654,7 @@ graph TB
 | ADR-11 | 数据库方言边界：JobQueue/LockService/EventBus/SearchService 四接口，PG 起步 | 直接 MySQL-first / 双方言并行 | 国产库为保留可能而非硬要求（用户决策 R3）；MySQL 系与 PG 系均有国产对应（OceanBase/TiDB/GaussDB 与人大金仓/openGauss）；切换成本锁死在实现层 | 采纳（R3） |
 | ADR-12 | 存储双轨：S3 主 + NAS 故障回退 + 补偿回迁 | 单一主存储 / 按类型分流 | 用户决策 R3：S3 缺失时业务不中断；StorageService 抽象使增量成本约 1-2 天 | 采纳（R3） |
 | ADR-13 | REST/WS 阶段一即拆分（realtime 独立服务，Caddy 按 docId 粘性路由） | 同进程合并 | 用户决策 R3：协同连接与 REST 隔离；realtime 模块已独立，拆分增量成本约 1 天 | 采纳（R3） |
+| ADR-14 | 移除数据源概念：文档库内嵌 git/local 存储后端，「存储源」收敛为用户级连接配置（storage_connections）；删除 sources/push_tokens、开放推送 API、web/database 类型 | 保留 sources 多源绑定 / 连接并入项目 / 保留 web/database 占位 | sources 与项目事实 1:1 构成重复概念；web/database 同步从未实现；Git 凭据早已在用户级连接表。一次性破坏性发布、零兼容层。详见 `.archcore/remove-source-concept.adr.md` | 采纳（R4，2026-09-11） |
 
 ---
 
@@ -682,16 +664,16 @@ graph TB
 | --- | --- | --- |
 | 1 协同编辑细节 | CRDT 选 Yjs；并发 ≤10/文档；断线本地编辑+重连合并；版本归属=会话保存（参与者列表）；Guest 观战 `[To be confirmed]`；评论锚点结构遗留 | 部分决议 |
 | 2 双轨角色 | `users.global_role`（admin/user）+ `project_members.role`；OA 对接预留 `sso_subject` 与 OIDC 接口层 | 已决议（协议待定 `[To be confirmed]`） |
-| 3 同步间隔口径 | 统一枚举 30m/1h/6h/24h/manual（sources.interval_seconds CHECK） | 已决议 |
+| 3 同步间隔口径 | 统一枚举 30m/1h/6h/24h/manual（R4 上移为 projects.interval_seconds CHECK）；当前仅持久化偏好、无调度器，定时同步以后续独立契约启用 | 已决议（R4 修订：暂不调度） |
 | 4 成员归属 | `project_members` 为唯一事实源，移除原型回退逻辑 | 已决议 |
 | 5 /team 悬空入口 | "邀请成员"引导至当前上下文项目成员页；全局团队页（管理员）预留 `/team` 管理页 `[To be confirmed]` | 建议方案 |
-| 6 权限细节 | 删除项目=Owner；角色变更=Owner；源/AI/导入/发布=Maintainer+（4.2 清单已标注） | 已决议 |
+| 6 权限细节 | 删除项目=Owner；角色变更=Owner；存储源连接=用户本人（建库引用他人连接 403）；手动同步/AI/导入/发布=canWrite 或 Maintainer+（4.2 清单已标注，R4 修订） | 已决议（R4 修订） |
 | 7 图谱规模 | ≤5,000 节点全量，超限服务端预聚合+截断响应（`truncated`） | 决议（阈值 `[Hypothesis]` 待压测） |
 | 8 发布细节 | slug/自定义域名唯一约束；时区=调度按项目所属用户时区 `[To be confirmed]`；原子发布=指针切换；"记录与跳转"=发布配置页域名清单+跳转入口 | 部分决议 |
 | 9 快捷键映射 | Windows：Ctrl=N/S/K/P/B/J/Z；Ctrl+Shift=P/Z；Ctrl+Alt=C（与 macOS 一一对应） | 已决议 |
 | 10 指标基线 | 埋点事件=同步完成/失败、AI 建议采纳/回滚、冲突解决时长、发布完成、协同会话数；基线值待运营确认 | 设计就绪 |
 | 11 排期 | 不在设计范围 | — |
 | 12 竞品补全 | 不在设计范围 | — |
-| 13 开放推送 API | 契约见 4.3（O1）：EwikiPush 令牌 + HMAC 防重放 + commitHash 幂等 | 已决议 |
+| 13 开放推送 API | R4 经 ADR-14 删除（端点、push_tokens、EwikiPush 令牌均不存在）；远端外部更新改由手动同步 `POST /projects/:id/sync` 拉取消化 | 已撤销（R4） |
 | 14 桌面端 | ADR-7：内容层解耦预留，本期不实现 | 规划 |
 

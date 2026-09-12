@@ -4,7 +4,7 @@ import { apiFetch } from './client';
 // ---------------------------------------------------------------------------
 // 项目内角色/权限共享 hook
 //
-// 数据源：GET /api/v1/projects/:id/members 响应中的 myRole（后端 projectAccess 推导：
+// 数据来源：GET /api/v1/projects/:id/members 响应中的 myRole（后端 projectAccess 推导：
 //   - owner/maintainer/editor/guest = project_members 显式成员
 //   - null = 非成员的隐式只读读者（经 team/public 可见性访问）
 //   - 全局 admin 兜底 maintainer）
@@ -23,7 +23,7 @@ export interface ProjectRoleInfo {
   myRole: string | null;
   /** 可编辑文档/创建文档/触发同步（owner/maintainer/editor） */
   canWrite: boolean;
-  /** 可管理：重命名/删除项目、数据源配置、成员管理、发布配置（owner/maintainer） */
+  /** 可管理：重命名/删除项目、同步偏好、成员管理、发布配置（owner/maintainer） */
   canManage: boolean;
 }
 

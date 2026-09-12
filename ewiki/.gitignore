@@ -4,5 +4,11 @@ dist/
 .env
 .env.production
 data/
+data-nas/
+data-nas2/
+logs/
 coverage/
 .DS_Store
+.write-test*
+
+*.log

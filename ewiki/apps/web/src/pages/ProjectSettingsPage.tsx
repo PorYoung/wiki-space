@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   ArrowRight,
   ChevronRight,
-  Database,
   Folder,
   GitBranch,
   Globe,
@@ -34,35 +33,26 @@ interface ProjectOverview {
   visibility: string;
   template: string | null;
   ownerId: string;
+  backendKind?: 'git' | 'local' | null;
+  storageKind?: 'git' | 'local';
+  storageConfig?: Record<string, unknown> | null;
+  storageStatus?: string | null;
+  defaultBranch?: string | null;
+  autoSync?: boolean;
+  intervalSeconds?: number;
+  lastSyncedAt?: string | null;
+  lastError?: string | null;
   docCount: number;
-  sourceCount: number;
   memberCount: number;
   createdAt: string;
   updatedAt: string | null;
 }
 
-interface SourceItem {
-  id: string;
-  projectId: string;
-  type: string;
-  name: string;
-  configPublic: Record<string, unknown>;
-  defaultBranch: string | null;
-  autoSync: boolean;
-  intervalSeconds: number;
-  status: string;
-  lastSyncedAt: string | null;
-  lastError: string | null;
-}
-
-// configPublic → 展示地址（git→url / local→path，其余 url|host 兜底；与 SourcesPage.sourceUrl 同规则）
-function sourceUrlOf(s: SourceItem): string {
-  const pub = (s.configPublic ?? {}) as Record<string, string | undefined>;
-  if (s.type === 'git') return pub.url ?? '—';
-  if (s.type === 'local') return pub.path ?? '—';
-  if (pub.url) return pub.url;
-  if (pub.host) return `${pub.host}${pub.port ? ':' + pub.port : ''}`;
-  return '—';
+// storageConfig → 展示地址（git→url / local→path）
+function storageLocationOf(p: ProjectOverview): string {
+  const cfg = (p.storageConfig ?? {}) as Record<string, string | undefined>;
+  if ((p.storageKind ?? p.backendKind) === 'git') return cfg.url ?? '—';
+  return cfg.path ?? '平台分配目录';
 }
 
 // ---------------------------------------------------------------------------
@@ -87,18 +77,17 @@ const VISIBILITY_META: Record<string, { label: string; desc: string }> = {
   public: { label: '公开', desc: '任何人可查看' },
 };
 
-const SOURCE_TYPE_META: Record<string, { label: string; icon: typeof HardDrive }> = {
-  local: { label: '本地文件夹', icon: HardDrive },
+const BACKEND_META: Record<string, { label: string; icon: typeof HardDrive }> = {
+  local: { label: '本地存储', icon: HardDrive },
   git: { label: 'Git 仓库', icon: GitBranch },
-  github: { label: 'GitHub', icon: GitBranch },
-  gitlab: { label: 'GitLab', icon: GitBranch },
 };
 
-const SOURCE_STATUS_META: Record<string, { label: string; dot: string }> = {
-  active: { label: '正常', dot: 'bg-emerald-500' },
+// 状态与 shared StorageStatus 枚举一致：connected/synced/syncing/error
+const STORAGE_STATUS_META: Record<string, { label: string; dot: string }> = {
+  connected: { label: '已连接', dot: 'bg-emerald-500' },
+  synced: { label: '已同步', dot: 'bg-emerald-500' },
   syncing: { label: '同步中', dot: 'bg-amber-500' },
   error: { label: '异常', dot: 'bg-rose-500' },
-  paused: { label: '已暂停', dot: 'bg-neutral-400' },
 };
 
 // ---------------------------------------------------------------------------
@@ -255,257 +244,225 @@ function BasicInfoSection({ project, projectId, canManage }: { project: ProjectO
   );
 }
 
-// ---- 数据源 ----
-function SourcesSection({ sources, projectId, canWrite }: { sources: SourceItem[]; projectId: string; canWrite: boolean }): React.ReactElement {
+// ---- 存储源（只读：后端在建库时确定，不支持事后更换） ----
+function StorageSection({ project, projectLoading }: { project: ProjectOverview | undefined; projectLoading: boolean }): React.ReactElement {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const showToast = useShowToast();
-  const [syncingId, setSyncingId] = useState<string | null>(null);
-
-  // 真实同步触发（PLAN 5.1.4：修正旧实现点击跳转 /sources 的语义错位）
-  const syncMutation = useMutation({
-    mutationFn: (id: string) => apiFetch<unknown>(`/api/v1/sources/${id}/sync`, { method: 'POST' }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['sources'] });
-      showToast('同步已触发');
-    },
-    onError: () => showToast('同步触发失败，请重试'),
-  });
-
-  async function handleSync(id: string): Promise<void> {
-    if (syncingId) return;
-    setSyncingId(id);
-    try {
-      await syncMutation.mutateAsync(id);
-    } finally {
-      setSyncingId(null);
-    }
-  }
+  const kind = project?.storageKind ?? project?.backendKind ?? 'local';
+  const meta = BACKEND_META[kind] ?? BACKEND_META.local;
+  const BackendIcon = meta.icon;
+  const status = STORAGE_STATUS_META[project?.storageStatus ?? 'connected'] ?? STORAGE_STATUS_META.connected;
 
   return (
     <section className="card p-6">
       <SectionHeader
-        icon={<Database size={15} />}
-        title="数据源"
-        desc="已绑定的 Git / 本地 / 云盘数据源，点击查看详情或手动同步"
+        icon={<HardDrive size={15} />}
+        title="存储源"
+        desc="本文档库的存储后端，在创建文档库时确定，暂不支持事后更换"
       />
 
-      {sources.length === 0 ? (
-        <div className="py-10 text-center text-neutral-400">
-          <HardDrive size={32} className="mx-auto mb-2 text-neutral-300" />
-          <p className="text-sm">还没有绑定任何数据源</p>
-          {canWrite && (
-            <button
-              type="button"
-              className="btn-secondary !h-8 !text-xs mt-3"
-              onClick={() => navigate('/sources')}
-              title="前往全局数据源管理添加"
-            >
-              <Plus /> 前往添加数据源
-            </button>
-          )}
+      {projectLoading ? (
+        <div className="space-y-2">
+          <div className="skeleton h-10 w-full rounded" />
+          <div className="skeleton h-10 w-full rounded" />
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border" style={{ borderColor: 'var(--border-soft)' }}>
-          <div className="divide-y" style={{ borderColor: 'var(--border-soft)' }}>
-            {sources.map((s) => {
-              const meta = SOURCE_TYPE_META[s.type] ?? { label: s.type, icon: Folder };
-              const status = SOURCE_STATUS_META[s.status] ?? SOURCE_STATUS_META.active;
-              const TypeIcon = meta.icon;
-              return (
-                <div key={s.id} className="flex items-center gap-3 px-4 py-3 hover:bg-neutral-50/70 transition">
-                  <div className="w-9 h-9 rounded-lg bg-neutral-100 flex items-center justify-center shrink-0 text-neutral-600">
-                    <TypeIcon size={16} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-neutral-900 truncate">{s.name}</span>
-                      <span className={`shrink-0 inline-flex items-center gap-1 h-5 px-2 rounded-full text-[10px] font-medium ${
-                        s.status === 'active' ? 'bg-emerald-50 text-emerald-700'
-                        : s.status === 'syncing' ? 'bg-amber-50 text-amber-700'
-                        : s.status === 'error' ? 'bg-rose-50 text-rose-700'
-                        : 'bg-neutral-100 text-neutral-600'
-                      }`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
-                        {status.label}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 mt-0.5 text-[11px] text-neutral-500">
-                      <span>{meta.label}</span>
-                      {s.defaultBranch && <span className="font-mono">{s.defaultBranch}</span>}
-                      <span className="flex items-center gap-1"><RefreshCw size={10} /> 上次 {relativeTime(s.lastSyncedAt)}</span>
-                    </div>
-                    {/* 仓库地址 / 本地路径展示（GET /sources 已下发 configPublic，PLAN 5.1.4） */}
-                    <div className="mt-0.5 truncate font-mono text-[11px] text-neutral-400" title={sourceUrlOf(s)}>
-                      {sourceUrlOf(s)}
-                    </div>
-                    {s.lastError && (
-                      <div className="mt-1 text-[11px] text-rose-600 truncate">⚠ {s.lastError}</div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {canWrite && (
-                      <button
-                        type="button"
-                        className="w-7 h-7 rounded-md inline-flex items-center justify-center text-neutral-400 hover:text-primary-600 hover:bg-primary-50 transition disabled:opacity-60"
-                        title="立即同步"
-                        disabled={syncingId === s.id}
-                        onClick={() => void handleSync(s.id)}
-                      >
-                        <RefreshCw size={13} className={syncingId === s.id ? 'animate-spin text-primary-500' : ''} />
-                      </button>
-                    )}
-                    <ChevronRight size={14} className="text-neutral-300" />
-                  </div>
+        <>
+          <div className="overflow-hidden rounded-lg border" style={{ borderColor: 'var(--border-soft)' }}>
+            <div className="flex items-center gap-3 px-4 py-3">
+              <div className="w-9 h-9 rounded-lg bg-neutral-100 flex items-center justify-center shrink-0 text-neutral-600">
+                <BackendIcon size={16} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-neutral-900 truncate">{meta.label}</span>
+                  <span className="shrink-0 inline-flex items-center gap-1 h-5 px-2 rounded-full text-[10px] font-medium bg-neutral-100 text-neutral-600">
+                    <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
+                    {status.label}
+                  </span>
                 </div>
-              );
-            })}
+                <div className="flex items-center gap-3 mt-0.5 text-[11px] text-neutral-500">
+                  {project?.defaultBranch && <span className="font-mono">分支 {project.defaultBranch}</span>}
+                  <span className="flex items-center gap-1"><RefreshCw size={10} /> 上次同步 {relativeTime(project?.lastSyncedAt)}</span>
+                </div>
+                {/* 仓库地址 / 本地路径展示（overview 已展开 project.storageConfig） */}
+                <div className="mt-0.5 truncate font-mono text-[11px] text-neutral-400" title={storageLocationOf(project!)}>
+                  {storageLocationOf(project!)}
+                </div>
+                {project?.lastError && (
+                  <div className="mt-1 text-[11px] text-rose-600 truncate">⚠ {project.lastError}</div>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
-      )}
 
-      {/* 前往全局数据源管理提示卡（PLAN 5.1.4，对齐原型 ProjectSettings.jsx:303-315） */}
-      <div className="mt-4 rounded-lg border p-4" style={{ borderColor: 'var(--border-soft)', background: 'var(--bg-subtle)' }}>
-        <div className="text-xs text-neutral-600 mb-2">
-          💡 需要更详细的数据源配置（认证 Token、分支、同步间隔等）？
-        </div>
-        <button
-          type="button"
-          onClick={() => navigate('/sources')}
-          className="btn-secondary !h-7 !px-2.5 !text-xs"
-        >
-          前往全局数据源管理
-          <ChevronRight size={13} />
-        </button>
-      </div>
+          {/* 存储源连接在用户级「存储源」页管理 */}
+          <div className="mt-4 rounded-lg border p-4" style={{ borderColor: 'var(--border-soft)', background: 'var(--bg-subtle)' }}>
+            <div className="text-xs text-neutral-600 mb-2">
+              💡 GitLab / Gitea 连接凭据与访问地址在用户级「存储源」页统一管理。
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/connections')}
+              className="btn-secondary !h-7 !px-2.5 !text-xs"
+            >
+              管理存储源连接
+              <ChevronRight size={13} />
+            </button>
+          </div>
+        </>
+      )}
     </section>
   );
 }
 
-// ---- 同步设置（PLAN 5.1.2） ----
-function SyncSettingsSection({ sources, canWrite, canManage }: { sources: SourceItem[]; canWrite: boolean; canManage: boolean }): React.ReactElement {
+// ---- 同步设置（仅 Git 后端；本地存储无需同步） ----
+function SyncSettingsSection({ project, projectId, projectLoading, canWrite, canManage }: {
+  project: ProjectOverview | undefined;
+  projectId: string;
+  projectLoading: boolean;
+  canWrite: boolean;
+  canManage: boolean;
+}): React.ReactElement {
   const queryClient = useQueryClient();
   const showToast = useShowToast();
-  // 项目的同步设置作用于其主数据源（业务上一个项目通常只绑一个源）
-  const source = sources[0] ?? null;
   const [syncing, setSyncing] = useState(false);
+  const isGit = (project?.storageKind ?? project?.backendKind) === 'git';
+  const autoSync = project?.autoSync ?? false;
+  const intervalSeconds = project?.intervalSeconds ?? 0;
+
+  const invalidateOverview = (): void => {
+    void queryClient.invalidateQueries({ queryKey: ['project-overview', projectId] });
+  };
 
   const patchMutation = useMutation({
     mutationFn: (patch: { autoSync?: boolean; intervalSeconds?: number }) =>
-      apiFetch<unknown>(`/api/v1/sources/${source?.id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+      apiFetch<unknown>(`/api/v1/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify(patch) }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['sources'] });
-      showToast('同步设置已更新');
+      invalidateOverview();
+      showToast('同步偏好已保存');
     },
     onError: () => showToast('保存失败，请重试'),
   });
 
   const syncNow = useMutation({
-    mutationFn: () => apiFetch<unknown>(`/api/v1/sources/${source?.id}/sync`, { method: 'POST' }),
+    mutationFn: () => apiFetch<{ ok: boolean }>(`/api/v1/projects/${projectId}/sync`, { method: 'POST' }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['sources'] });
-      showToast('同步已触发');
+      invalidateOverview();
+      showToast('同步任务已入队');
+      // worker 消费有延迟，稍后再刷新一次状态
+      setTimeout(invalidateOverview, 2500);
     },
     onError: () => showToast('同步触发失败，请重试'),
   });
 
-  if (!source) {
-    return (
-      <section className="card p-6">
-        <SectionHeader icon={<RefreshCw size={15} />} title="同步设置" desc="控制文档的自动同步行为" />
-        <div className="py-10 text-center text-neutral-400">
-          <HardDrive size={32} className="mx-auto mb-2 text-neutral-300" />
-          <p className="text-sm">尚未绑定数据源，无法配置同步</p>
-          <p className="text-xs mt-1">请先在「数据源」页绑定 Git / 本地源，或通过 Library 的 StarterPack 向导创建</p>
-        </div>
-      </section>
-    );
-  }
-
-  // 间隔四档（对齐原型 ProjectSettings.jsx:343-362）；选择档位即视为启用自动同步
+  // 间隔四档（与 shared SyncInterval 字面量一致）；选择档位即视为启用自动同步
   const INTERVALS: Array<{ key: string; label: string; seconds: number }> = [
-    { key: '30m', label: '30 分钟', seconds: 30 * 60 },
-    { key: '1h', label: '1 小时', seconds: 60 * 60 },
-    { key: '6h', label: '6 小时', seconds: 6 * 60 * 60 },
-    { key: '24h', label: '每天', seconds: 24 * 60 * 60 },
+    { key: '30m', label: '30 分钟', seconds: 1800 },
+    { key: '1h', label: '1 小时', seconds: 3600 },
+    { key: '6h', label: '6 小时', seconds: 21600 },
+    { key: '24h', label: '每天', seconds: 86400 },
   ];
+  const activeInterval = INTERVALS.find((o) => o.seconds === intervalSeconds);
 
   return (
     <section className="card p-6 space-y-5">
-      <SectionHeader icon={<RefreshCw size={15} />} title="同步设置" desc={`${source.name} · 控制文档的自动同步行为`} />
+      <SectionHeader
+        icon={<RefreshCw size={15} />}
+        title="同步设置"
+        desc={isGit ? '从 Git 远端拉取最新文档并重建索引' : '控制文档的同步行为'}
+      />
 
-      {/* 启用自动同步 —— 修改数据源配置为管理操作（后端 PUT sources 403 兜底） */}
-      <label className={`flex items-center justify-between gap-3 p-4 rounded-lg border transition ${canManage ? 'cursor-pointer hover:bg-neutral-50' : 'opacity-60 cursor-not-allowed'}`}
-        style={{ borderColor: 'var(--border-soft)' }}>
-        <span>
-          <span className="block text-sm font-medium text-neutral-800">启用自动同步</span>
-          <span className="block text-xs text-neutral-500 mt-0.5">根据设定的间隔自动拉取最新内容并重建索引</span>
-        </span>
-        <input
-          type="checkbox"
-          className="h-4 w-4 accent-primary-500"
-          checked={source.autoSync}
-          disabled={!canManage || patchMutation.isPending}
-          onChange={(e) =>
-            patchMutation.mutate({
-              autoSync: e.target.checked,
-              intervalSeconds: e.target.checked ? (source.intervalSeconds > 0 ? source.intervalSeconds : 3600) : 0,
-            })
-          }
-        />
-      </label>
-
-      {/* 同步间隔四档 */}
-      <div>
-        <label className="block text-xs font-medium text-neutral-700 mb-2">同步间隔</label>
-        <div className="grid grid-cols-4 gap-2">
-          {INTERVALS.map((o) => {
-            const active = source.autoSync && source.intervalSeconds === o.seconds;
-            return (
-              <button
-                key={o.key}
-                type="button"
-                disabled={!canManage || patchMutation.isPending}
-                onClick={() => patchMutation.mutate({ autoSync: true, intervalSeconds: o.seconds })}
-                className={`py-2 rounded-md text-xs font-medium border transition ${
-                  active
-                    ? 'border-primary-400 bg-primary-50 text-primary-700'
-                    : 'border-[var(--border-soft)] text-[var(--text-secondary)] hover:bg-neutral-50'
-                }`}
-              >
-                {o.label}
-              </button>
-            );
-          })}
+      {projectLoading ? (
+        <div className="space-y-2">
+          <div className="skeleton h-10 w-full rounded" />
+          <div className="skeleton h-10 w-full rounded" />
         </div>
-        <div className="text-[11px] text-neutral-400 mt-1.5">
-          当前：{source.autoSync ? `每 ${source.intervalSeconds / 3600} 小时` : '手动同步'}
+      ) : !isGit ? (
+        <div className="py-10 text-center text-neutral-400">
+          <HardDrive size={32} className="mx-auto mb-2 text-neutral-300" />
+          <p className="text-sm">本地存储后端无需同步</p>
+          <p className="text-xs mt-1">文档直接落盘到平台目录；需要从 Git 远端同步请创建 Git 文档库</p>
         </div>
-      </div>
+      ) : (
+        <>
+          {/* 自动同步偏好：当前调度器未启用，仅持久化偏好，实际同步仍需手动触发 */}
+          <div className="rounded-lg border p-3 text-[11px] text-amber-700 bg-amber-50/70 border-amber-200">
+            当前版本尚未启用定时调度器：以下自动同步设置仅保存为偏好，实际内容更新仍需手动触发同步。
+          </div>
 
-      {/* 立即同步一次（触发同步为编辑权限操作） */}
-      <div className="pt-2 border-t" style={{ borderColor: 'var(--border-soft)' }}>
-        {canWrite ? (
-          <button
-            type="button"
-            className="btn-primary !h-8 !text-xs"
-            disabled={syncing || syncNow.isPending}
-            onClick={async () => {
-              setSyncing(true);
-              try {
-                await syncNow.mutateAsync();
-              } finally {
-                setSyncing(false);
+          <label className={`flex items-center justify-between gap-3 p-4 rounded-lg border transition ${canManage ? 'cursor-pointer hover:bg-neutral-50' : 'opacity-60 cursor-not-allowed'}`}
+            style={{ borderColor: 'var(--border-soft)' }}>
+            <span>
+              <span className="block text-sm font-medium text-neutral-800">启用自动同步</span>
+              <span className="block text-xs text-neutral-500 mt-0.5">调度器启用后，将按设定间隔自动拉取最新内容</span>
+            </span>
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-primary-500"
+              checked={autoSync}
+              disabled={!canManage || patchMutation.isPending}
+              onChange={(e) =>
+                patchMutation.mutate({
+                  autoSync: e.target.checked,
+                  intervalSeconds: e.target.checked ? (intervalSeconds > 0 ? intervalSeconds : 3600) : 0,
+                })
               }
-            }}
-          >
-            <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
-            {syncing ? '同步中…' : '立即同步一次'}
-          </button>
-        ) : (
-          <span className="text-[11px] text-neutral-400">只读身份无法触发同步</span>
-        )}
-      </div>
+            />
+          </label>
+
+          {/* 同步间隔四档 */}
+          <div>
+            <label className="block text-xs font-medium text-neutral-700 mb-2">同步间隔（偏好）</label>
+            <div className="grid grid-cols-4 gap-2">
+              {INTERVALS.map((o) => {
+                const active = autoSync && intervalSeconds === o.seconds;
+                return (
+                  <button
+                    key={o.key}
+                    type="button"
+                    disabled={!canManage || patchMutation.isPending}
+                    onClick={() => patchMutation.mutate({ autoSync: true, intervalSeconds: o.seconds })}
+                    className={`py-2 rounded-md text-xs font-medium border transition ${
+                      active
+                        ? 'border-primary-400 bg-primary-50 text-primary-700'
+                        : 'border-[var(--border-soft)] text-[var(--text-secondary)] hover:bg-neutral-50'
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-[11px] text-neutral-400 mt-1.5">
+              当前：{autoSync ? `每 ${activeInterval?.label ?? `${intervalSeconds / 3600} 小时`}` : '手动同步'} · 上次 {relativeTime(project?.lastSyncedAt)}
+            </div>
+          </div>
+
+          {/* 立即同步一次（触发同步为编辑权限操作） */}
+          <div className="pt-2 border-t" style={{ borderColor: 'var(--border-soft)' }}>
+            {canWrite ? (
+              <button
+                type="button"
+                className="btn-primary !h-8 !text-xs"
+                disabled={syncing || syncNow.isPending}
+                onClick={async () => {
+                  setSyncing(true);
+                  try {
+                    await syncNow.mutateAsync();
+                  } finally {
+                    setSyncing(false);
+                  }
+                }}
+              >
+                <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+                {syncing ? '同步中…' : '立即同步一次'}
+              </button>
+            ) : (
+              <span className="text-[11px] text-neutral-400">只读身份无法触发同步</span>
+            )}
+          </div>
+        </>
+      )}
     </section>
   );
 }
@@ -812,7 +769,7 @@ export function ProjectSettingsPage(): React.ReactElement {
   // 项目内角色：设置页各区块按 canManage（改配置/删项目）/ canWrite（同步/AI/导入）收口
   const { canWrite, canManage } = useProjectRole(projectId);
   const [activeTab, setActiveTab] = useState<
-    'basic' | 'sources' | 'sync' | 'ai' | 'import' | 'danger'
+    'basic' | 'storage' | 'sync' | 'ai' | 'import' | 'danger'
   >('basic');
 
   const { data: project, isLoading: projectLoading } = useQuery<ProjectOverview>({
@@ -821,18 +778,9 @@ export function ProjectSettingsPage(): React.ReactElement {
     enabled: !!projectId,
   });
 
-  const { data: allSourcesData } = useQuery<{ items: SourceItem[]; total: number }>({
-    queryKey: ['sources'],
-    queryFn: () => apiFetch<{ items: SourceItem[]; total: number }>('/api/v1/sources'),
-    enabled: !!projectId,
-  });
-
-  // 前端按 projectId 过滤 — 后端 sourcesRoute 暂不支持 projectId 查询参数
-  const sources = (allSourcesData?.items ?? []).filter((s) => s.projectId === projectId);
-
   const tabs: Array<{ key: typeof activeTab; label: string; icon: React.ReactElement }> = [
     { key: 'basic', label: '基本信息', icon: <Settings2 size={13} /> },
-    { key: 'sources', label: '数据源', icon: <Database size={13} /> },
+    { key: 'storage', label: '存储源', icon: <HardDrive size={13} /> },
     { key: 'sync', label: '同步设置', icon: <RefreshCw size={13} /> },
     { key: 'ai', label: 'AI 整理', icon: <Sparkles size={13} /> },
     { key: 'import', label: '外部导入', icon: <Import size={13} /> },
@@ -864,10 +812,9 @@ export function ProjectSettingsPage(): React.ReactElement {
         </div>
 
         {/* Stats row */}
-        <div className="grid grid-cols-3 gap-3 mb-6">
+        <div className="grid grid-cols-2 gap-3 mb-6">
           {[
             { label: '文档', value: project?.docCount ?? '—' },
-            { label: '数据源', value: project?.sourceCount ?? '—' },
             { label: '成员', value: project?.memberCount ?? '—' },
           ].map((s) => (
             <div key={s.label} className="card p-4 text-center">
@@ -921,8 +868,16 @@ export function ProjectSettingsPage(): React.ReactElement {
               )
             )}
 
-            {activeTab === 'sources' && <SourcesSection sources={sources} projectId={projectId!} canWrite={canWrite} />}
-            {activeTab === 'sync' && <SyncSettingsSection sources={sources} canWrite={canWrite} canManage={canManage} />}
+            {activeTab === 'storage' && <StorageSection project={project} projectLoading={projectLoading} />}
+            {activeTab === 'sync' && (
+              <SyncSettingsSection
+                project={project}
+                projectId={projectId!}
+                projectLoading={projectLoading}
+                canWrite={canWrite}
+                canManage={canManage}
+              />
+            )}
             {activeTab === 'ai' && <AiClassifySection projectId={projectId!} canWrite={canWrite} />}
             {activeTab === 'import' && <ExternalImportSection projectId={projectId!} canWrite={canWrite} />}
             {activeTab === 'danger' && <DangerZoneSection projectId={projectId!} projectName={project?.name} canManage={canManage} />}
@@ -930,14 +885,5 @@ export function ProjectSettingsPage(): React.ReactElement {
         </div>
       </div>
     </div>
-  );
-}
-
-// ---- Local Plus icon (避免未使用 import 警告) ----
-function Plus(): React.ReactElement {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
   );
 }

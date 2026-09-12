@@ -47,4 +47,4 @@ packages/editor # TipTap 封装（占位）
 - **分享与协作**：项目成员四角色分享；版本冲突 409 保护 + WS 实时互见。
 - **发布站点**：五套模板发布为平台子路径 `/sites/<slug>/`（匿名可访问），产物写入用户 NAS 目录。
 - **系统管理**：用户管理、数据库/存储基础设施状态、NAS 根目录运行时切换、审计台账（仅管理员）。
-- **验收**：`node scripts/e2e-platform.mjs`（51 项断言）；文档见 `docs/deploy.md`、`docs/backup-rollback.md`、`docs/acceptance-record.md`、`docs/acceptance-report.html`。
+- **验收**：`node scripts/e2e-platform.mjs`（53 项断言）；文档见 `docs/deploy.md`、`docs/backup-rollback.md`、`docs/acceptance-record.md`、`docs/acceptance-report.html`。

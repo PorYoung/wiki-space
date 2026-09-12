@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -12,15 +13,14 @@ import {
   documents,
   projectMembers,
   projects,
-  sources,
   users,
 } from './db/schema.js';
 
-/** 幂等种子：管理员账号 + 示例项目 + local source + 内嵌 Markdown 示例文档 + 一次 sync
+/** 幂等种子：管理员账号 + 示例项目（本地存储后端）+ 内嵌 Markdown 示例文档
  *
  * 幂等策略：
  *   - admin@ewiki.local 存在 → 跳过创建
- *   - 同名项目存在 → 复用并检查 source / documents 完整性
+ *   - 同名项目存在 → 复用并检查本地存储配置 / documents 完整性
  *   - 文档 upsert 走 select-then-update/insert（跨 PostgreSQL 兼容的幂等模式）
  *
  * 执行: pnpm --filter @ewiki/server run seed
@@ -41,7 +41,7 @@ const SAMPLE_DOCS: Array<{ relPath: string; title: string; md: string }> = [
 
 ## 核心能力
 
-- 📥 **多源同步** — Git / 本地文件夹 / 网页抓取 / 数据库只读快照
+- 📥 **存储后端** — Git 远端仓库 / 本地文件夹，文档库开箱即用
 - ✍️ **实时协同编辑** — Yjs CRDT + TipTap 富文本
 - 🕸️ **知识图谱** — 自动识别文档链接关系，发现断链与孤立节点
 - 🚀 **一键发布** — 子域名 / 子路径双形态，Caddy on-demand TLS
@@ -50,7 +50,7 @@ const SAMPLE_DOCS: Array<{ relPath: string; title: string; md: string }> = [
 ## 快速开始
 
 \`\`\`bash
-# 克隆本地 source（ewiki 自身就是一个 Git 源）
+# ewiki 自身就是一个 Git 仓库
 pnpm install
 
 # 启动后端 + 前端
@@ -109,17 +109,19 @@ untracked → synced → modified → conflict → synced → deleted
     title: '数据库设计',
     md: `# 数据库设计
 
-所有表 **id 统一 UUID**（Postgres \`pgcrypto\` 默认值），时间戳统一 \`timestamptz\`，软删除仅 projects / documents / sources。
+所有表 **id 统一 UUID**（Postgres \`pgcrypto\` 默认值），时间戳统一 \`timestamptz\`，软删除仅 projects / documents。
 
 ## 实体关系
 
 \`\`\`
 projects ──1:N──▶ project_members ──N:1──▶ users
    │
-   ├──1:N──▶ sources ──1:N──▶ documents ──1:N──▶ document_versions
-   │                                    ├──1:N──▶ document_links
-   │                                    ├──N:M──▶ tags (document_tags)
-   │                                    └──1:N──▶ comments
+   ├──1:N──▶ documents ──1:N──▶ document_versions
+   │                    ├──1:N──▶ document_links
+   │                    ├──N:M──▶ tags (document_tags)
+   │                    └──1:N──▶ comments
+   ├──N:1──▶ storage_connections（Git 凭据，用户级）
+   ├──1:N──▶ sync_jobs
    ├──1:N──▶ publish_sites ──1:N──▶ publish_jobs
    └──1:N──▶ activities
 \`\`\`
@@ -194,7 +196,7 @@ pnpm --filter @ewiki/web run dev        # :5173
 
 ## 下一步
 
-- 配置一个 Git 源同步你的仓库
+- 连接一个 Git 存储源，把文档库建在你的仓库上
 - 试试"发布"功能，把知识库变成一个公开网站
 - 开启"AI 智能整理"让它帮你自动分类
 `,
@@ -229,8 +231,8 @@ services:
 
 ### 文档消失
 
-1. 检查对应 source 的 \`status\` 是否 \`synced\`
-2. 如果是 \`untracked\` → 源已删除（软删除），恢复需重新创建 source
+1. 检查对应项目的 \`storage_status\` 是否 \`synced\`
+2. 如果文档 \`deleted_at\` 非空 → 文档已软删除，可手工恢复该行
 3. 运行 \`SELECT * FROM documents WHERE deleted_at IS NOT NULL;\` 排查
 
 ### pg-boss 队列积压
@@ -264,9 +266,9 @@ Caddy on-demand TLS 需要：
 
 ## 同步卡死
 
-1. 访问 \`/api/v1/sources?projectId=xxx\` 看 source.status 和 lastError
+1. 访问 \`GET /api/v1/projects/:id/overview\` 看 storageStatus 和 lastError
 2. 如果是 \`syncing\` 超过 3 分钟 → worker 可能崩了
-3. 手动重试：\`POST /api/v1/sources/:id/sync\`（幂等，同分钟去重）
+3. 手动重试：\`POST /api/v1/projects/:id/sync\`（幂等，同分钟去重；仅 Git 后端支持）
 
 ## 发布失败
 
@@ -329,6 +331,8 @@ async function ensureProject(ownerId: string): Promise<string> {
       description: '平台自带示例项目（种子）',
       visibility: 'team',
       ownerId,
+      storageKind: 'local',
+      storageStatus: 'synced',
     })
     .returning();
   await db.insert(projectMembers).values({
@@ -341,35 +345,37 @@ async function ensureProject(ownerId: string): Promise<string> {
   return project!.id;
 }
 
-async function ensureSource(projectId: string, fsRoot: string): Promise<string> {
-  const [existing] = await db
+async function ensureLocalStorage(projectId: string, fsRoot: string): Promise<string> {
+  const dir = path.resolve(fsRoot, 'local-library', projectId);
+  const [project] = await db
     .select()
-    .from(sources)
-    .where(and(eq(sources.projectId, projectId), eq(sources.type, 'local'), isNull(sources.deletedAt)))
+    .from(projects)
+    .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
     .limit(1);
-  if (existing) {
-    console.log(`[seed] source exists: ${existing.name}`);
-    return existing.id;
+  if (project?.storageKind === 'git') {
+    throw new Error(`[seed] 种子项目 ${projectId} 已绑定 Git 后端，拒绝覆盖为本地存储`);
   }
-  const dir = path.resolve(fsRoot, 'seed-source', projectId);
-  const [source] = await db
-    .insert(sources)
-    .values({
-      projectId,
-      type: 'local',
-      name: '种子文档源',
-      configPublic: { path: dir },
-      autoSync: false,
-      intervalSeconds: 0,
-      status: 'connected',
+  const config = (project?.storageConfig ?? null) as { path?: string } | null;
+  if (project?.storageKind === 'local' && typeof config?.path === 'string') {
+    console.log(`[seed] local storage exists: ${config.path}`);
+    return config.path;
+  }
+  await db
+    .update(projects)
+    .set({
+      storageKind: 'local',
+      storageConnectionId: null,
+      storageConfig: { path: dir },
+      storageStatus: 'synced',
+      updatedAt: new Date(),
     })
-    .returning();
-  console.log(`[seed] created source: ${source!.id}`);
-  return source!.id;
+    .where(eq(projects.id, projectId));
+  console.log(`[seed] ensured local storage: ${dir}`);
+  return dir;
 }
 
 async function writeSampleMarkdown(fsRoot: string, projectId: string): Promise<void> {
-  const root = path.resolve(fsRoot, 'seed-source', projectId);
+  const root = path.resolve(fsRoot, 'local-library', projectId);
   for (const doc of SAMPLE_DOCS) {
     const abs = path.resolve(root, doc.relPath);
     await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -378,11 +384,7 @@ async function writeSampleMarkdown(fsRoot: string, projectId: string): Promise<v
   }
 }
 
-async function harvestDocsFromDir(
-  sourceId: string,
-  projectId: string,
-  dir: string,
-): Promise<void> {
+async function harvestDocsFromDir(projectId: string, dir: string): Promise<void> {
   // 简易版：递归 walk *.md → onConflict upsert
   async function walk(d: string): Promise<string[]> {
     const result: string[] = [];
@@ -419,7 +421,6 @@ async function harvestDocsFromDir(
     } else {
       await db.insert(documents).values({
         projectId,
-        sourceId,
         path: rel,
         title,
         content,
@@ -441,11 +442,11 @@ async function main(): Promise<void> {
   const projectId = await ensureProject(adminId);
 
   const fsRoot = process.env.FS_ROOT ?? './data';
-  await fs.mkdir(path.resolve(fsRoot, 'seed-source', projectId), { recursive: true });
-  const sourceId = await ensureSource(projectId, fsRoot);
+  const localDir = await ensureLocalStorage(projectId, fsRoot);
+  await fs.mkdir(localDir, { recursive: true });
 
   await writeSampleMarkdown(fsRoot, projectId);
-  await harvestDocsFromDir(sourceId, projectId, path.resolve(fsRoot, 'seed-source', projectId));
+  await harvestDocsFromDir(projectId, localDir);
 
   // 为每个文档插入一份初始版本快照（version_no = 1）
   const allDocs = await db

@@ -28,11 +28,11 @@ interface ProjectOverview {
   id: string;
   name: string;
   description?: string | null;
-  sourceType?: string | null;
+  backendKind?: 'git' | 'local' | null;
+  storageStatus?: string | null;
   visibility?: string | null;
   accent?: string | null;
   docCount: number;
-  sourceCount: number;
   memberCount: number;
 }
 
@@ -72,13 +72,10 @@ const TABS = [
   { to: 'settings', label: '设置', icon: UserCog },
 ];
 
-// 数据源类型徽章：key 对齐 db schema sources.type（git | local | web | database）——
-// 旧表里的 'web-link' 是错误 key，网页源项目恒 fallback「未知」；配色对齐 SourcesPage SOURCE_TYPE_META。
-const SOURCE_TYPE_TAG: Record<string, { cls: string; label: string }> = {
+// 存储后端徽章：项目行内嵌 storage_kind（git | local）
+const BACKEND_TYPE_TAG: Record<string, { cls: string; label: string }> = {
   git: { cls: 'tag-primary', label: 'Git 仓库' },
-  local: { cls: 'tag-neutral', label: '本地源' },
-  web: { cls: 'tag-neutral', label: '网页链接' },
-  database: { cls: 'tag-success', label: '数据库' },
+  local: { cls: 'tag-neutral', label: '本地存储' },
 };
 
 function relativeTime(iso: string | null | undefined): string {
@@ -210,7 +207,6 @@ function ProjectRightSidebar({ overview, members, activities, compact, onToggle 
             <div className="grid grid-cols-2 gap-2">
               <StatTile label="文档" value={overview?.docCount ?? 0} icon={FileText} tone="primary" />
               <StatTile label="成员" value={overview?.memberCount ?? members.length} icon={Users} tone="emerald" />
-              <StatTile label="源" value={overview?.sourceCount ?? 0} icon={FolderKanban} tone="sky" />
               <StatTile label="动态" value={activities.length} icon={ActivityIcon} tone="violet" />
             </div>
           </section>
@@ -601,9 +597,8 @@ export function ProjectLayout(): React.ReactElement {
   }
 
   const accent = overview.accent ?? '#6366f1';
-  // 无数据源 / 未知类型时不渲染标签（空状态优于「未知」占位——零信息徽章只制造噪音），
-  // 服务端 overview 已从首个数据源动态推导 sourceType（routes.ts），此处只做兜底隐藏
-  const sourceMeta = SOURCE_TYPE_TAG[overview.sourceType ?? ''];
+  // 存储后端类型直接取项目行 storage_kind；未知值不渲染标签
+  const backendMeta = BACKEND_TYPE_TAG[overview.backendKind ?? ''];
 
   const outletContext: ProjectOutletContext = { showToast };
 
@@ -612,7 +607,7 @@ export function ProjectLayout(): React.ReactElement {
       {/* ===== Header ===== */}
       <header className="z-20 flex h-14 shrink-0 items-center gap-3 border-b px-5"
         style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-soft)' }}>
-        {/* 项目身份区：字母色块 + 名称切换器 + sourceType tag */}
+        {/* 项目身份区：字母色块 + 名称切换器 + 存储后端 tag */}
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
           style={{ background: accent }}>
           <span className="text-sm font-bold text-white">{(overview.name || '?').trim().charAt(0)}</span>
@@ -657,7 +652,7 @@ export function ProjectLayout(): React.ReactElement {
           )}
         </div>
 
-        {sourceMeta && <span className={`tag shrink-0 ${sourceMeta.cls}`}>{sourceMeta.label}</span>}
+        {backendMeta && <span className={`tag shrink-0 ${backendMeta.cls}`}>{backendMeta.label}</span>}
 
         {/* 水平 tabs —— 设置页全为写操作（保存配置/同步/AI/导入/删除），只读用户无可用功能，隐藏入口 */}
         <nav className="ml-2 flex items-center gap-0.5">

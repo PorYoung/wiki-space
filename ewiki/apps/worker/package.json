@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ewiki/db": "workspace:*",
+    "@ewiki/git": "workspace:*",
     "@ewiki/render": "workspace:*",
     "@ewiki/shared": "workspace:*",
     "dotenv": "^17.4.2",

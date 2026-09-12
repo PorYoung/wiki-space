@@ -2,8 +2,8 @@
 // 平台化扩展路由（本期 10 项基础需求）：
 //   1. 系统管理（admin）：用户管理 / 数据库状态 / 存储基础设施 / 审计台账
 //   2. 注册 + 注册即得个人示例知识库（LDAP 预留接口）
-//   3. 存储配置：GitLab / Gitea 连接配置 CRUD + 连通性验证
-//   4. 新建文档库向导：模板或空库 × 云文档或 Git 仓库（自动建仓/关联）
+//   3. 存储源：GitLab / Gitea 连接配置 CRUD + 连通性验证
+//   4. 新建文档库向导：模板列表（Git 开通已收敛进 POST /api/v1/projects，见 routes.ts）
 //   5. 文档副作用：NAS 落盘镜像 + Git 自动提交推送（供 routes.ts 文档路由调用）
 //   6. 发布站点公开访问：/sites/:slug/*（子路径，无需登录）
 // ---------------------------------------------------------------------------
@@ -11,6 +11,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { and, desc, eq, gte, ilike, isNull, lte, or, sql } from 'drizzle-orm';
@@ -23,7 +24,6 @@ import {
   projects,
   publishSites,
   refreshTokens,
-  sources,
   storageConnections,
   syncJobs,
   users,
@@ -33,20 +33,14 @@ import { safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
 import { db } from '../db/client.js';
 import { hashPassword, generateRefreshToken, hashToken, signAccessToken } from '../auth/utils.js';
 import { ldapAutoLogin } from '../lib/ldap.js';
-import {
-  ensureRepo,
-  findRepo,
-  validateConnection,
-  GitHostError,
-  type ConnLike,
-} from '../lib/git-host.js';
-import { commitAndPush, ensureWorkdir, seedWorkdirFiles } from '../lib/git-push.js';
-import { getLibraryTemplate, LIBRARY_TEMPLATES, type TemplateDoc } from '../lib/library-templates.js';
+import { commitAndPush, ensureWorkdir, validateConnection, type ConnLike } from '@ewiki/git';
+import { getLibraryTemplate, LIBRARY_TEMPLATES } from '../lib/library-templates.js';
 import { ensureWritableDir, getNasRoot, getReposRoot, mirrorDoc, NAS_ROOT_SETTING_KEY } from '../lib/nas.js';
 import { denyIfNot } from '../lib/permissions.js';
+import type { Context } from 'hono';
 import type { AppDeps } from './app.js';
 
-type C = any; // Hono context（ContextVariableMap 已在 app.ts 扩充）
+type C = Context; // ContextVariableMap 已在 app.ts 扩充（userId/globalRole/requestId）
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -122,31 +116,49 @@ export async function docStorageEffects(
     out.mirrorError = e instanceof Error ? e.message : String(e);
   }
 
-  // 2) Git 自动提交（仅「新建文档库向导」创建的 git 源，configPublic.autoCommit === true）
-  const [source] = await db
-    .select()
-    .from(sources)
-    .where(and(eq(sources.projectId, project.id), eq(sources.type, 'git'), isNull(sources.deletedAt)))
+  // 2) Git 自动提交（仅 Git 存储后端，且 storageConfig.autoCommit === true）
+  const [projRow] = await db
+    .select({
+      id: projects.id,
+      storageKind: projects.storageKind,
+      storageConfig: projects.storageConfig,
+      storageConnectionId: projects.storageConnectionId,
+      defaultBranch: projects.defaultBranch,
+    })
+    .from(projects)
+    .where(and(eq(projects.id, project.id), isNull(projects.deletedAt)))
     .limit(1);
-  const pub = (source?.configPublic ?? {}) as Record<string, unknown>;
-  if (!source || pub.autoCommit !== true) return out;
+  const cfg = ((projRow?.storageConfig as Record<string, unknown> | null) ?? {}) as Record<string, unknown>;
+  if (!projRow || projRow.storageKind !== 'git' || cfg.autoCommit !== true || !projRow.storageConnectionId) {
+    return out;
+  }
   out.git.attempted = true;
+
+  const [connRow] = await db
+    .select({ tokenEncrypted: storageConnections.tokenEncrypted })
+    .from(storageConnections)
+    .where(eq(storageConnections.id, projRow.storageConnectionId))
+    .limit(1);
+  if (!connRow) {
+    out.git = { attempted: true, ok: false, pushed: false, error: '存储连接配置已删除' };
+    return out;
+  }
 
   try {
     const conn: ConnLike = {
-      kind: String(pub.kind ?? 'gitlab'),
-      baseUrl: String(pub.host ?? ''),
-      tokenEncrypted: String(source.configEncrypted ?? ''),
-      defaultNamespace: (pub.namespace as string) ?? null,
+      kind: String(cfg.kind ?? 'gitlab'),
+      baseUrl: String(cfg.host ?? ''),
+      tokenEncrypted: connRow.tokenEncrypted,
+      defaultNamespace: (cfg.namespace as string) ?? null,
     };
-    const login = String(pub.namespace ?? 'owner');
+    const login = String(cfg.namespace ?? 'owner');
     const { workdir } = await ensureWorkdir(
       getReposRoot(deps.config),
-      source.id,
+      project.id,
       conn,
-      String(pub.url ?? ''),
+      String(cfg.url ?? ''),
       login,
-      String(source.defaultBranch ?? 'main'),
+      String(projRow.defaultBranch ?? 'main'),
     );
     const message =
       content === null
@@ -161,11 +173,11 @@ export async function docStorageEffects(
     out.git = { attempted: true, ok: result.ok, pushed: result.pushed, noop: result.noop, commitHash: result.commitHash, error: result.error };
     if (result.ok) {
       await db
-        .update(sources)
-        .set({ status: 'synced', lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
-        .where(eq(sources.id, source.id));
+        .update(projects)
+        .set({ storageStatus: 'synced', lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
+        .where(eq(projects.id, project.id));
       await db.insert(syncJobs).values({
-        sourceId: source.id,
+        projectId: project.id,
         trigger: 'push',
         commitHash: result.commitHash ?? null,
         status: 'succeeded',
@@ -175,17 +187,17 @@ export async function docStorageEffects(
       await audit(db, {
         actorId: actor.id,
         action: 'git.auto_commit',
-        resourceType: 'source',
-        resourceId: source.id,
-        meta: { project: project.id, path: docPath, commit: result.commitHash, pushed: result.pushed, noop: result.noop ?? false },
+        resourceType: 'project',
+        resourceId: project.id,
+        meta: { path: docPath, commit: result.commitHash, pushed: result.pushed, noop: result.noop ?? false },
       });
     } else {
       await db
-        .update(sources)
-        .set({ status: 'error', lastError: result.error?.slice(0, 500) ?? 'push failed', updatedAt: new Date() })
-        .where(eq(sources.id, source.id));
+        .update(projects)
+        .set({ storageStatus: 'error', lastError: result.error?.slice(0, 500) ?? 'push failed', updatedAt: new Date() })
+        .where(eq(projects.id, project.id));
       await db.insert(syncJobs).values({
-        sourceId: source.id,
+        projectId: project.id,
         trigger: 'push',
         commitHash: result.commitHash ?? null,
         status: 'failed',
@@ -195,24 +207,24 @@ export async function docStorageEffects(
       await audit(db, {
         actorId: actor.id,
         action: 'git.push_failed',
-        resourceType: 'source',
-        resourceId: source.id,
-        meta: { project: project.id, path: docPath, error: result.error },
+        resourceType: 'project',
+        resourceId: project.id,
+        meta: { path: docPath, error: result.error },
       });
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     out.git = { attempted: true, ok: false, pushed: false, error: msg };
     await db
-      .update(sources)
-      .set({ status: 'error', lastError: msg.slice(0, 500), updatedAt: new Date() })
-      .where(eq(sources.id, source.id));
+      .update(projects)
+      .set({ storageStatus: 'error', lastError: msg.slice(0, 500), updatedAt: new Date() })
+      .where(eq(projects.id, project.id));
     await audit(db, {
       actorId: actor.id,
       action: 'git.push_failed',
-      resourceType: 'source',
-      resourceId: source.id,
-      meta: { project: project.id, path: docPath, error: msg },
+      resourceType: 'project',
+      resourceId: project.id,
+      meta: { path: docPath, error: msg },
     });
   }
   return out;
@@ -260,7 +272,6 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
     for (const doc of tpl.docs) {
       await db.insert(documents).values({
         projectId: project.id,
-        sourceId: null,
         path: doc.path,
         title: firstHeading(doc.content),
         content: doc.content,
@@ -456,167 +467,30 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
     const [row] = await db.select().from(storageConnections).where(eq(storageConnections.id, c.req.param('id')!)).limit(1);
     if (!row) throw new HTTPException(404, { message: 'NOT_FOUND' });
     denyIfNot(row.ownerId === uid || c.get('globalRole') === 'admin');
+    const referenced = await db
+      .select({ projectId: projects.id })
+      .from(projects)
+      .where(and(eq(projects.storageConnectionId, row.id), isNull(projects.deletedAt)));
+    if (referenced.length > 0) {
+      await audit(db, {
+        actorId: uid,
+        action: 'connection.delete_blocked',
+        resourceType: 'storage_connection',
+        resourceId: row.id,
+        meta: { projectIds: referenced.map((r) => r.projectId) },
+      });
+      return c.json(
+        {
+          code: 'CONNECTION_IN_USE',
+          message: '该存储源仍被文档库引用，无法删除',
+          projectIds: referenced.map((r) => r.projectId),
+        },
+        409,
+      );
+    }
     await db.delete(storageConnections).where(eq(storageConnections.id, row.id));
     await audit(db, { actorId: uid, action: 'connection.delete', resourceType: 'storage_connection', resourceId: row.id, meta: { name: row.name } });
     return c.json({ ok: true });
-  });
-
-  // ---- 新建文档库向导（需求 5/7）：模板或空库 × 云文档或 Git 仓库 ----
-  app.post('/api/v1/projects/with-storage', async (c: C) => {
-    const uid = userId(c);
-    const me = await actorOf(uid);
-    const body = (await c.req.json()) as {
-      name?: string;
-      description?: string;
-      visibility?: 'private' | 'team' | 'public';
-      template?: string; // 'empty' | 富模板 id | starter-pack id
-      storageType?: 'cloud' | 'git';
-      git?: { connectionId?: string; repoName?: string; autoInit?: boolean };
-    };
-    const name = (body.name ?? '').trim();
-    if (!name) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 请填写知识库名称' });
-    const storageType = body.storageType ?? 'cloud';
-    const templateId = body.template ?? 'empty';
-
-    // 模板解析：富模板 > starter-pack 骨架占位 > 空
-    const { STARTER_PACKS } = await import('./routes-starter.js');
-    const rich = getLibraryTemplate(templateId);
-    const pack = STARTER_PACKS.find((p) => p.id === templateId);
-    let docs: TemplateDoc[] = [];
-    if (rich) docs = rich.docs;
-    else if (pack) {
-      docs = pack.tree.map((p) => ({
-        path: p,
-        content: `# ${path.basename(p).replace(/\.(md|markdown)$/i, '')}\n\n${pack.description}。\n\n> 本文档由模板「${pack.name}」初始化生成，点击编辑开始撰写。`,
-      }));
-    }
-
-    const [project] = await db
-      .insert(projects)
-      .values({ name, description: body.description ?? (rich?.description ?? pack?.description ?? null), visibility: body.visibility ?? 'private', template: templateId === 'empty' ? null : templateId, ownerId: uid })
-      .returning();
-    await db.insert(projectMembers).values({ projectId: project.id, userId: uid, role: 'owner' });
-    await audit(db, { actorId: uid, action: 'project.create', resourceType: 'project', resourceId: project.id, meta: { storageType, template: templateId, name } });
-
-    // 文档初始化 + NAS 镜像
-    for (const doc of docs) {
-      await db.insert(documents).values({
-        projectId: project.id,
-        sourceId: null,
-        path: doc.path,
-        title: firstHeading(doc.content),
-        content: doc.content,
-        contentHash: sha256(doc.content),
-        status: 'untracked',
-        wordCount: doc.content.length,
-        updatedBy: uid,
-      });
-    }
-    const nasRoot = await getNasRoot(config);
-    for (const doc of docs) {
-      await mirrorDoc(nasRoot, { username: me.name, projectName: project.name, projectId: project.id }, doc.path, doc.content).catch(() => undefined);
-    }
-    await db.insert(activities).values({
-      projectId: project.id,
-      actorId: uid,
-      verb: 'create',
-      targetType: 'project',
-      targetId: project.id,
-      targetTitle: project.name,
-      meta: { storageType, template: templateId, docs: docs.length },
-    });
-
-    if (storageType === 'cloud') {
-      return c.json({ project, storageType, docs: docs.length }, 201);
-    }
-
-    // ---- Git 仓库存储源 ----
-    const gitBody = body.git ?? {};
-    const repoName = (gitBody.repoName ?? '').trim();
-    if (!/^[A-Za-z0-9_.-]{1,100}$/.test(repoName)) {
-      throw new HTTPException(400, { message: 'VALIDATION_FAILED: 仓库名称仅支持字母/数字/._-（1-100 位）' });
-    }
-    const [conn] = await db.select().from(storageConnections).where(eq(storageConnections.id, gitBody.connectionId ?? '')).limit(1);
-    if (!conn) throw new HTTPException(404, { message: 'CONNECTION_NOT_FOUND: 请选择已添加的连接配置' });
-    denyIfNot(conn.ownerId === uid || c.get('globalRole') === 'admin', '无权使用该连接配置');
-
-    const autoInit = gitBody.autoInit !== false; // 默认自动初始化
-    const connLike: ConnLike = { kind: conn.kind, baseUrl: conn.baseUrl, tokenEncrypted: conn.tokenEncrypted, defaultNamespace: conn.defaultNamespace };
-    const v = await validateConnection(connLike);
-    if (!v.ok) throw new HTTPException(400, { message: `连接验证失败：${v.message}` });
-
-    let repo;
-    let created = false;
-    try {
-      if (!autoInit) {
-        const found = await findRepo(connLike, repoName, v.login!);
-        if (!found.found || !found.repo) {
-          throw new HTTPException(404, { message: '仓库不存在（自动初始化未开启）：请先在 Git 服务端创建仓库，或开启自动初始化' });
-        }
-        repo = found.repo;
-      } else {
-        const r = await ensureRepo(connLike, repoName, v.login!);
-        repo = r.repo;
-        created = r.created;
-      }
-    } catch (e) {
-      if (e instanceof GitHostError) {
-        throw new HTTPException(e.status === 409 ? 409 : 400, { message: `仓库创建/关联失败：${e.message}` });
-      }
-      throw e;
-    }
-    if (!repo) throw new HTTPException(500, { message: '仓库信息获取失败' });
-
-    const [source] = await db
-      .insert(sources)
-      .values({
-        projectId: project.id,
-        type: 'git',
-        name: `${repoName}（Git · ${created ? '新建' : '已关联'}）`,
-        configPublic: {
-          url: repo.cloneUrl,
-          host: conn.baseUrl,
-          kind: conn.kind,
-          namespace: v.login,
-          repoName,
-          autoCommit: true,
-          connectionId: conn.id,
-        },
-        configEncrypted: conn.tokenEncrypted,
-        defaultBranch: repo.defaultBranch || 'main',
-        autoSync: false,
-        intervalSeconds: 0,
-        status: 'connected',
-      })
-      .returning();
-
-    // 工作副本准备 + 模板初始化 / 已有内容导入
-    let gitMessage = created ? `仓库不存在，已自动初始化并完成首次提交` : '仓库已存在，已关联现有仓库';
-    try {
-      const { workdir, hadCommits } = await ensureWorkdir(getReposRoot(config), source.id, connLike, repo.cloneUrl, v.login!, repo.defaultBranch || 'main');
-      if (!hadCommits) {
-        // 空仓库：写入模板并做首次提交推送
-        if (docs.length > 0) {
-          await seedWorkdirFiles(workdir, docs);
-          await commitAndPush(workdir, docs.map((d) => ({ path: d.path, op: 'upsert' as const, content: d.content })), { name: me.name, email: me.email }, 'chore: 初始化知识库模板');
-          await audit(db, { actorId: uid, action: 'git.init', resourceType: 'source', resourceId: source.id, meta: { repo: repo.fullPath, docs: docs.length, created } });
-        } else {
-          await seedWorkdirFiles(workdir, [{ path: 'README.md', content: `# ${name}\n\n由 ewiki 知识平台自动初始化。` }]);
-          await commitAndPush(workdir, [{ path: 'README.md', op: 'upsert', content: `# ${name}\n\n由 ewiki 知识平台自动初始化。` }], { name: me.name, email: me.email }, 'chore: 初始化仓库');
-          await audit(db, { actorId: uid, action: 'git.init', resourceType: 'source', resourceId: source.id, meta: { repo: repo.fullPath, docs: 0, created } });
-        }
-      } else if (docs.length > 0) {
-        // 已有内容的仓库：保留远端内容，模板文档只在平台侧预置（不覆盖远端）
-        gitMessage = '仓库已存在且有内容，已关联；模板文档仅在平台侧预置，未覆盖远端文件';
-      }
-      await db.update(sources).set({ status: 'connected', lastSyncedAt: new Date(), updatedAt: new Date() }).where(eq(sources.id, source.id));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      await db.update(sources).set({ status: 'error', lastError: msg.slice(0, 500), updatedAt: new Date() }).where(eq(sources.id, source.id));
-      throw new HTTPException(502, { message: `仓库初始化失败：${msg.slice(0, 200)}` });
-    }
-
-    return c.json({ project, storageType, docs: docs.length, source, git: { created, repo: repo.fullPath, branch: repo.defaultBranch || 'main', webUrl: repo.webUrl, message: gitMessage } }, 201);
   });
 
   // ---- 系统管理（需求 1） ----
@@ -705,7 +579,7 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
       sql`select version() as version, pg_database_size(current_database()) as bytes`,
     )) as unknown as Array<{ version: string; bytes: string }>;
     const tableRows: Array<{ table: string; rows: number }> = [];
-    for (const t of ['users', 'projects', 'documents', 'document_versions', 'sources', 'sync_jobs', 'storage_connections', 'publish_sites', 'publish_jobs', 'audit_logs', 'activities', 'notifications']) {
+    for (const t of ['users', 'projects', 'documents', 'document_versions', 'sync_jobs', 'storage_connections', 'publish_sites', 'publish_jobs', 'audit_logs', 'activities', 'notifications']) {
       const [r] = (await db.execute(sql`select count(*)::int as c from ${sql.raw(`"${t}"`)}`)) as unknown as Array<{ c: number }>;
       tableRows.push({ table: t, rows: Number(r?.c ?? 0) });
     }
@@ -904,4 +778,47 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
     const rest = c.req.path.replace(new RegExp(`^/sites/${encodeURIComponent(slug)}/?`), '');
     return serveSiteFile(c, slug, rest);
   });
+
+  // ---- 发布页 vendor 资源（同源，内网/气隙可用）：KaTeX 样式/字体 + mermaid ESM ----
+  // 渲染管线按需在发布页注入 /assets/vendor/{katex,mermaid}/...，此处自 node_modules dist 目录供出。
+  const requireResolve = createRequire(import.meta.url);
+  const VENDOR_DIST: Record<string, string> = {};
+  for (const pkg of ['katex', 'mermaid']) {
+    try {
+      VENDOR_DIST[pkg] = path.join(path.dirname(requireResolve.resolve(`${pkg}/package.json`)), 'dist');
+    } catch {
+      /* 包缺失时该 vendor 路由恒 404 */
+    }
+  }
+  const VENDOR_MIME: Record<string, string> = {
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json',
+    '.woff2': 'font/woff2',
+    '.woff': 'font/woff',
+    '.ttf': 'font/ttf',
+  };
+  const serveVendor = (pkg: string) => async (c: C): Promise<Response> => {
+    const dist = VENDOR_DIST[pkg];
+    if (!dist) return new Response(null, { status: 404 });
+    let rel: string;
+    try {
+      rel = decodeURIComponent(c.req.path.slice(`/assets/vendor/${pkg}/`.length));
+    } catch {
+      return new Response(null, { status: 404 });
+    }
+    let abs: string;
+    try {
+      abs = safeJoin(dist, rel);
+    } catch {
+      return new Response(null, { status: 404 });
+    }
+    const buf = await fs.readFile(abs).catch(() => null);
+    if (!buf) return new Response(null, { status: 404 });
+    const mime = VENDOR_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream';
+    return new Response(buf, { status: 200, headers: { 'Content-Type': mime, 'Cache-Control': 'public, max-age=86400' } });
+  };
+  app.get('/assets/vendor/katex/*', serveVendor('katex'));
+  app.get('/assets/vendor/mermaid/*', serveVendor('mermaid'));
 }

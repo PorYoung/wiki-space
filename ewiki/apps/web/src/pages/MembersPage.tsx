@@ -541,7 +541,7 @@ export function MembersPage(): React.ReactElement {
                 >
                   <option value="guest">访客 — 只能查看</option>
                   <option value="editor">编辑者 — 可编辑文档</option>
-                  <option value="maintainer">维护者 — 可管理文档与数据源</option>
+                  <option value="maintainer">维护者 — 可管理文档与同步</option>
                 </select>
               </div>
             </div>

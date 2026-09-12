@@ -5,7 +5,7 @@
 export type QueueName = 'sync' | 'publish' | 'ai-classify' | 'import' | 'export' | 'compensate';
 
 export interface JobEnqueueOptions {
-  /** 幂等键：同键任务去重（如 sync = sourceId:commitHash，SDD 4.3 O1） */
+  /** 幂等键：同键任务去重（如 sync = projectId:commitHash，SDD 4.3 O1） */
   idempotencyKey?: string;
   delayMs?: number;
 }

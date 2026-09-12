@@ -1,5 +1,7 @@
+import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   integer,
   jsonb,
   pgTable,
@@ -9,7 +11,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-// 约定（SDD 3.2）：所有表含 id/created_at/updated_at；软删除仅 projects/documents/sources。
+// 约定（SDD 3.2）：所有表含 id/created_at/updated_at；软删除仅 projects/documents。
 // 领域枚举用 text + CHECK 表达（Drizzle 侧由 packages/shared 枚举守卫）。
 
 const ts = (name: string) => timestamp(name, { withTimezone: true });
@@ -50,21 +52,47 @@ export const userPrefs = pgTable('user_prefs', {
   prefs: jsonb('prefs').notNull().default({}),
 });
 
-export const projects = pgTable('projects', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: text('name').notNull(),
-  description: text('description'),
-  color: text('color'),
-  visibility: text('visibility').notNull().default('private'), // private | team | public
-  template: text('template'),
-  ownerId: uuid('owner_id')
-    .notNull()
-    .references(() => users.id),
-  archived: boolean('archived').notNull().default(false),
-  deletedAt: ts('deleted_at'),
-  createdAt: ts('created_at').notNull().defaultNow(),
-  updatedAt: ts('updated_at').notNull().defaultNow(),
-});
+export const projects = pgTable(
+  'projects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    description: text('description'),
+    color: text('color'),
+    visibility: text('visibility').notNull().default('private'), // private | team | public
+    template: text('template'),
+    // ---- 内嵌存储后端（git | local），1:1 从属于文档库，无独立 CRUD ----
+    storageKind: text('storage_kind').notNull().default('local'), // git | local
+    storageConnectionId: uuid('storage_connection_id').references(
+      () => storageConnections.id,
+    ),
+    storageConfig: jsonb('storage_config').notNull().default({}), // git: {url,host,kind,namespace,repoName,autoCommit,path?}；local: {path?}
+    defaultBranch: text('default_branch'),
+    autoSync: boolean('auto_sync').notNull().default(false),
+    intervalSeconds: integer('interval_seconds').notNull().default(0), // 1800/3600/21600/86400/0（仅持久化偏好，无调度器）
+    storageStatus: text('storage_status').notNull().default('connected'), // connected | synced | syncing | error
+    lastSyncedAt: ts('last_synced_at'),
+    lastError: text('last_error'),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    archived: boolean('archived').notNull().default(false),
+    deletedAt: ts('deleted_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    check('projects_storage_kind_check', sql`${t.storageKind} IN ('git','local')`),
+    check(
+      'projects_storage_status_check',
+      sql`${t.storageStatus} IN ('connected','synced','syncing','error')`,
+    ),
+    check(
+      'projects_storage_connection_check',
+      sql`(${t.storageKind} = 'local') = (${t.storageConnectionId} IS NULL)`,
+    ),
+  ],
+);
 
 export const projectMembers = pgTable(
   'project_members',
@@ -84,52 +112,23 @@ export const projectMembers = pgTable(
   (t) => [unique('project_members_project_user_uq').on(t.projectId, t.userId)],
 );
 
-export const sources = pgTable('sources', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  projectId: uuid('project_id')
-    .notNull()
-    .references(() => projects.id),
-  type: text('type').notNull(), // git | local | web | database
-  name: text('name').notNull(),
-  configPublic: jsonb('config_public').notNull().default({}),
-  configEncrypted: jsonb('config_encrypted'), // AES-256-GCM 加密后整体存储（SDD 6.3）
-  defaultBranch: text('default_branch'),
-  autoSync: boolean('auto_sync').notNull().default(false),
-  intervalSeconds: integer('interval_seconds').notNull().default(0), // 1800/3600/21600/86400/0
-  status: text('status').notNull().default('connected'), // connected | synced | syncing | error
-  lastSyncedAt: ts('last_synced_at'),
-  lastError: text('last_error'),
-  deletedAt: ts('deleted_at'),
-  createdAt: ts('created_at').notNull().defaultNow(),
-  updatedAt: ts('updated_at').notNull().defaultNow(),
-});
-
-export const pushTokens = pgTable('push_tokens', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  sourceId: uuid('source_id')
-    .notNull()
-    .references(() => sources.id),
-  tokenHash: text('token_hash').notNull(), // SHA-256（SDD 4.3 O1）
-  scopes: text('scopes').array().notNull().default(['push']),
-  lastUsedAt: ts('last_used_at'),
-  revokedAt: ts('revoked_at'),
-  createdAt: ts('created_at').notNull().defaultNow(),
-});
-
-export const syncJobs = pgTable('sync_jobs', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  sourceId: uuid('source_id')
-    .notNull()
-    .references(() => sources.id),
-  trigger: text('trigger').notNull(), // manual | schedule | push
-  commitHash: text('commit_hash'),
-  status: text('status').notNull().default('queued'), // queued | running | succeeded | failed
-  stats: jsonb('stats'),
-  error: text('error'),
-  idempotencyKey: text('idempotency_key').unique(), // sourceId:commitHash（SDD 4.3 O1）
-  createdAt: ts('created_at').notNull().defaultNow(),
-  finishedAt: ts('finished_at'),
-});
+export const syncJobs = pgTable(
+  'sync_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id),
+    trigger: text('trigger').notNull(), // manual | schedule（预留，当前无调度器）| push
+    commitHash: text('commit_hash'),
+    status: text('status').notNull().default('queued'), // queued | running | succeeded | failed
+    stats: jsonb('stats'),
+    error: text('error'),
+    idempotencyKey: text('idempotency_key'), // 历史保留列；投递幂等由 pg-boss singletonKey 承载，DB 不再设唯一约束
+    createdAt: ts('created_at').notNull().defaultNow(),
+    finishedAt: ts('finished_at'),
+  },
+);
 
 export const documents = pgTable(
   'documents',
@@ -138,7 +137,6 @@ export const documents = pgTable(
     projectId: uuid('project_id')
       .notNull()
       .references(() => projects.id),
-    sourceId: uuid('source_id').references(() => sources.id),
     path: text('path').notNull(),
     title: text('title'),
     content: text('content'),

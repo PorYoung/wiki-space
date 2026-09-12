@@ -10,11 +10,14 @@ export type ProjectRole = z.infer<typeof ProjectRole>;
 export const GlobalRole = z.enum(['admin', 'user']);
 export type GlobalRole = z.infer<typeof GlobalRole>;
 
-export const SourceType = z.enum(['git', 'local', 'web', 'database']);
-export type SourceType = z.infer<typeof SourceType>;
+export const StorageBackendKind = z.enum(['git', 'local']);
+export type StorageBackendKind = z.infer<typeof StorageBackendKind>;
 
-export const SourceStatus = z.enum(['connected', 'synced', 'syncing', 'error']);
-export type SourceStatus = z.infer<typeof SourceStatus>;
+export const StorageStatus = z.enum(['connected', 'synced', 'syncing', 'error']);
+export type StorageStatus = z.infer<typeof StorageStatus>;
+
+export const StorageConnectionKind = z.enum(['gitlab', 'gitea']);
+export type StorageConnectionKind = z.infer<typeof StorageConnectionKind>;
 
 export const DocumentStatus = z.enum(['untracked', 'synced', 'modified', 'conflict']);
 export type DocumentStatus = z.infer<typeof DocumentStatus>;
@@ -58,16 +61,63 @@ export const ProjectSchema = z.object({
   color: z.string().nullable(),
   visibility: Visibility,
   template: z.string().nullable(),
+  storageKind: StorageBackendKind,
+  storageConnectionId: z.string().uuid().nullable(),
+  storageConfig: z.record(z.unknown()),
+  defaultBranch: z.string().nullable(),
+  autoSync: z.boolean(),
+  intervalSeconds: z.number().int().nonnegative(),
+  storageStatus: StorageStatus,
+  lastSyncedAt: z.string().datetime().nullable(),
+  lastError: z.string().nullable(),
   docCount: z.number().int().nonnegative().optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime().optional(),
 });
 export type Project = z.infer<typeof ProjectSchema>;
 
+// ---- 文档库存储后端：新建/更新请求体 ----
+export const ProjectStorageInputSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('git'),
+    connectionId: z.string().uuid(),
+    repoName: z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/),
+    defaultBranch: z.string().min(1).optional(),
+    autoInit: z.boolean().optional(),
+  }),
+  z.object({
+    kind: z.literal('local'),
+    path: z.string().min(1).optional(),
+  }),
+]);
+export type ProjectStorageInput = z.infer<typeof ProjectStorageInputSchema>;
+
+export const CreateProjectSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().nullable().optional(),
+  color: z.string().nullable().optional(),
+  visibility: Visibility.optional(),
+  template: z.string().nullable().optional(),
+  storage: ProjectStorageInputSchema.optional(),
+});
+export type CreateProjectBody = z.infer<typeof CreateProjectSchema>;
+
+export const UpdateProjectSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    description: z.string().nullable().optional(),
+    color: z.string().nullable().optional(),
+    visibility: Visibility.optional(),
+    autoSync: z.boolean().optional(),
+    intervalSeconds: SyncInterval.optional(),
+    defaultBranch: z.string().min(1).nullable().optional(),
+  })
+  .strict();
+export type UpdateProjectBody = z.infer<typeof UpdateProjectSchema>;
+
 export const DocumentSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
-  sourceId: z.string().uuid().nullable(),
   path: z.string().min(1),
   title: z.string().nullable(),
   status: DocumentStatus,
@@ -76,21 +126,6 @@ export const DocumentSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 export type Document = z.infer<typeof DocumentSchema>;
-
-export const SourceSchema = z.object({
-  id: z.string().uuid(),
-  projectId: z.string().uuid(),
-  type: SourceType,
-  name: z.string(),
-  configPublic: z.record(z.unknown()).default({}),
-  defaultBranch: z.string().nullable(),
-  autoSync: z.boolean(),
-  intervalSeconds: SyncInterval,
-  status: SourceStatus,
-  lastSyncedAt: z.string().datetime().nullable(),
-  lastError: z.string().nullable(),
-});
-export type Source = z.infer<typeof SourceSchema>;
 
 export const ActivitySchema = z.object({
   id: z.string().uuid(),

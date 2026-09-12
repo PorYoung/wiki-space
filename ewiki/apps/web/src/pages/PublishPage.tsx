@@ -258,9 +258,9 @@ function PublishWizard({ projectId, initialTemplateId, onClose }: {
   const [publishedAt, setPublishedAt] = useState<Date | null>(null);
 
   // ---- 真实数据：项目概览（默认 slug 来源）+ 文档列表（Step1 选择） ----
-  const { data: overview } = useQuery<{ id: string; name: string; sourceType?: string | null }>({
+  const { data: overview } = useQuery<{ id: string; name: string }>({
     queryKey: ['project-overview', projectId],
-    queryFn: () => apiFetch<{ id: string; name: string; sourceType?: string | null }>(
+    queryFn: () => apiFetch<{ id: string; name: string }>(
       `/api/v1/projects/${projectId}/overview`,
     ),
     enabled: !!projectId,

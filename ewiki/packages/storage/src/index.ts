@@ -5,7 +5,7 @@
 // 由 server 侧读取后以显式 root 参数传入本包函数）：
 //   <root>/users/<username>/projects/<projSlug>-<id8>/   云文档镜像（与平台内结构一一对应）
 //   <root>/users/<username>/sites/<slug>/                发布站点（current.json + vN/）
-//   <root>/repos/<sourceId>/                             Git 工作副本（server 推送用）
+//   <root>/repos/<projectId>/                            Git 工作副本（server 推送用）
 // ---------------------------------------------------------------------------
 
 import path from 'node:path';
@@ -65,8 +65,8 @@ export function reposRoot(root: string): string {
   return path.join(root, 'repos');
 }
 
-export function repoWorkDir(root: string, sourceId: string): string {
-  return path.join(reposRoot(root), sourceId);
+export function repoWorkDir(root: string, projectId: string): string {
+  return path.join(reposRoot(root), projectId);
 }
 
 /** rel 路径安全拼接：禁止 .. 逃逸与绝对路径注入（PATH_ESCAPED） */

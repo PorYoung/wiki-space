@@ -55,7 +55,7 @@ async function loginOrRegister(email, name) {
   throw new Error(`loginOrRegister failed for ${email}: ${r.status} ${JSON.stringify(r.json)}`);
 }
 
-async function gitea(path, method = 'GET') {
+async function gitea(path, _method = 'GET') {
   const res = await fetch(`${GITEA}${path}`, {
     headers: { Authorization: `Bearer ${GITEA_TOKEN}`, 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(30_000),
@@ -66,6 +66,47 @@ async function gitea(path, method = 'GET') {
   } catch {
     return { status: res.status, json: { raw: text.slice(0, 200) } };
   }
+}
+
+// 直接在 Gitea 远端仓库写入一个文件（模拟仓库外部更新），用于验证平台手动同步的拉取消化链路
+async function giteaCreateFile(repo, filePath, content, message) {
+  const res = await fetch(`${GITEA}/api/v1/repos/${GITEA_USER}/${repo}/contents/${encodeURIComponent(filePath)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${GITEA_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, content: Buffer.from(content, 'utf8').toString('base64'), branch: 'main' }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await res.text();
+  try {
+    return { status: res.status, json: JSON.parse(text) };
+  } catch {
+    return { status: res.status, json: { raw: text.slice(0, 200) } };
+  }
+}
+
+// 轮询项目概览的存储状态，等待手动同步把 storageStatus 从 syncing 收敛到 synced
+async function pollOverview(projectId, token, { timeoutMs = 30_000, intervalMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  do {
+    last = await req(`/api/v1/projects/${projectId}/overview`, { token });
+    if (last.json?.storageStatus === 'synced' || last.json?.storageStatus === 'error') return last;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  } while (Date.now() < deadline);
+  return last;
+}
+
+// Gitea 对全新仓库的首次 push 存在约 0.5~1s 的提交可见性窗口（commits API 短暂返回空），
+// 针对外部服务的断言按最终一致性轮询，避免时序抖动导致误报。
+async function giteaPoll(path, { timeoutMs = 10_000, intervalMs = 300, check } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  do {
+    last = await gitea(path);
+    if (check(last)) return last;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  } while (Date.now() < deadline);
+  return last;
 }
 
 function exists(p) {
@@ -101,6 +142,7 @@ async function main() {
     const alice = await loginOrRegister('alice-e2e@ewiki.local', 'Alice');
     ctx.alice = alice.token;
     ctx.aliceId = alice.userId;
+    ctx.aliceRegistered = alice.registered === true;
     const list = await req('/api/v1/projects', { token: ctx.alice });
     const sample = (list.json.items ?? []).find((p) => p.template === 'personal-sample' && p.ownerId === ctx.aliceId);
     record('P1a', '注册成功并可登录', !!ctx.alice, `registered=${alice.registered}`);
@@ -134,16 +176,21 @@ async function main() {
     record('P3', '越权读取被拦截（403 且不泄露数据）', denied.status === 403, `status=${denied.status} body=${JSON.stringify(denied.json).slice(0, 120)}`);
   }
 
-  // [P4] 云文档库：模板创建 + 落盘 + 增删查改
+  // [P4] 本地文档库：模板创建 + 落盘 + 增删查改（默认存储后端 local）
   const runId = Date.now().toString(36);
   {
-    const created = await req('/api/v1/projects/with-storage', {
+    const created = await req('/api/v1/projects', {
       token: ctx.alice,
       method: 'POST',
-      body: { name: `产品蓝图-${runId}`, description: 'e2e 云文档库', template: 'project-space', storageType: 'cloud' },
+      body: { name: `产品蓝图-${runId}`, description: 'e2e 本地文档库', template: 'project-space', storage: { kind: 'local' } },
     });
     ctx.projectPrefix = '产品蓝图';
-    record('P4a', '新建云文档库（模板 project-space）', created.status === 201 && created.json.docs >= 4, JSON.stringify(created.json).slice(0, 160));
+    record(
+      'P4a',
+      '新建本地文档库（模板 project-space，后端 local）',
+      created.status === 201 && created.json.docs >= 4 && created.json.project?.storageKind === 'local',
+      JSON.stringify(created.json).slice(0, 160),
+    );
     ctx.cloudId = created.json?.project?.id;
 
     const mirrorDir = findProjectDir('Alice', created.json.project.name, ctx.cloudId);
@@ -199,30 +246,63 @@ async function main() {
 
     const invalid = await req('/api/v1/connections', { token: ctx.alice, method: 'POST', body: { name: 'x', kind: 'ftp', baseUrl: GITEA, token: 't' } });
     record('P5c', '非 Git 类型连接被拒（仅支持 GitLab/Gitea）', invalid.status === 400, JSON.stringify(invalid.json).slice(0, 120));
+
+    // bob 也建立一个本人连接，供越权建库用例引用（真实存在但不属于 alice）
+    const bobConn = await req('/api/v1/connections', {
+      token: ctx.bob,
+      method: 'POST',
+      body: { name: 'bob 的 Gitea', kind: 'gitea', baseUrl: GITEA, token: GITEA_TOKEN },
+    });
+    ctx.bobConnId = bobConn.json?.id;
   }
 
-  // [P6] Git 仓库库：自动初始化 + 自动提交
+  // [P5d/e] Git 文档库建库契约（需求 6/7）：必须基于用户级存储源连接 + 仓库名称；
+  //   不允许直填 Git 地址/令牌（storage 判别联合仅接受 connectionId/repoName）
+  {
+    // 直填 Git 地址：storage.kind=git 但缺少 connectionId/repoName → zod 校验 400
+    const legacy = await req('/api/v1/projects', {
+      token: ctx.alice,
+      method: 'POST',
+      body: { name: 'legacy-url-lib', storage: { kind: 'git', url: `${GITEA}/wikibot/legacy-e2e.git`, token: GITEA_TOKEN } },
+    });
+    record('P5d', '直填 Git 地址/令牌建 Git 库被拒（400，需存储源连接）', legacy.status === 400, JSON.stringify(legacy.json).slice(0, 140));
+
+    // 引用不存在（或不属本人）的存储源连接 → 403 且不暴露存在性
+    const foreign = await req('/api/v1/projects', {
+      token: ctx.alice,
+      method: 'POST',
+      body: { name: 'foreign-conn-lib', storage: { kind: 'git', connectionId: ctx.bobConnId, repoName: `x-${runId}` } },
+    });
+    record('P5e', '引用非本人存储源连接建库被拒（403）', foreign.status === 403, JSON.stringify(foreign.json).slice(0, 120));
+  }
+
+  // [P6] Git 文档库：单次建库（连接 + 仓库名）+ 工作副本 + 平台内自动提交推送 + 手动同步拉取消化
   {
     const gitRepo = `ewiki-e2e-wiki-${runId}`;
     ctx.gitRepo = gitRepo;
-    const created = await req('/api/v1/projects/with-storage', {
+    const created = await req('/api/v1/projects', {
       token: ctx.alice,
       method: 'POST',
       body: {
-        name: `项目空间 Wiki-${runId}`, template: 'team-wiki', storageType: 'git',
-        git: { connectionId: ctx.connId, repoName: gitRepo, autoInit: true },
+        name: `项目空间 Wiki-${runId}`, template: 'team-wiki',
+        storage: { kind: 'git', connectionId: ctx.connId, repoName: gitRepo, autoInit: true },
       },
     });
     const git = created.json?.git;
-    record('P6a', 'Git 仓库自动初始化/关联', created.status === 201 && !!git?.repo, git ? `${git.repo} created=${git.created} ${git.message}` : JSON.stringify(created.json).slice(0, 200));
+    record(
+      'P6a',
+      'Git 文档库单次建库并自动初始化/关联',
+      created.status === 201 && created.json.project?.storageKind === 'git' && !!git?.repo,
+      git ? `${git.repo} created=${git.created} ${git.message ?? ''}` : JSON.stringify(created.json).slice(0, 200),
+    );
     ctx.gitId = created.json?.project?.id;
 
     const repo = await gitea(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}`);
     record('P6b', 'Git 服务端已存在该仓库', repo.status === 200, repo.json?.full_name ?? JSON.stringify(repo.json).slice(0, 100));
 
+    // 工作副本按项目 id 收敛：<server cwd>/data/repos/<projectId>/.git
     const workdir = 'D:/works/wiki-space/ewiki/apps/server/data/repos';
-    const srcId = created.json?.source?.id;
-    record('P6c', '平台已克隆工作副本', !!srcId && exists(path.join(workdir, srcId, '.git')), srcId ? `repos/${srcId}` : 'no source');
+    record('P6c', '平台已按项目 id 克隆工作副本', !!ctx.gitId && exists(path.join(workdir, ctx.gitId, '.git')), ctx.gitId ? `repos/${ctx.gitId}` : 'no project');
 
     // 新建文档 → 自动提交
     const gitDoc = await req(`/api/v1/projects/${ctx.gitId}/documents`, {
@@ -234,9 +314,12 @@ async function main() {
     const pushed = gitDoc.json?.effects?.git;
     record('P6d', '平台内新建文档自动提交并推送', pushed?.attempted && pushed?.ok && pushed?.pushed, `commit=${pushed?.commitHash?.slice(0, 10)} err=${pushed?.error ?? '-'}`);
 
-    const commits = await gitea(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/commits`);
+    const commits = await giteaPoll(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/commits`, {
+      check: (r) => r.status === 200 && Array.isArray(r.json) && r.json.length > 0
+        && JSON.stringify(r.json).includes('docs(') && JSON.stringify(r.json).includes('Alice'),
+    });
     const msg = JSON.stringify(commits.json ?? []);
-    record('P6e', 'Git 服务端可查到提交历史', commits.status === 200 && msg.includes('docs(') && msg.includes('Alice'), `commits=${commits.json?.length ?? 0}`);
+    record('P6e', 'Git 服务端可查到提交历史', commits.status === 200 && msg.includes('docs(') && msg.includes('Alice'), `commits=${Array.isArray(commits.json) ? commits.json.length : 0}`);
 
     // 更新文档 → 自动提交新版本
     const upd = await req(`/api/v1/documents/${ctx.gitDocId}`, {
@@ -247,18 +330,86 @@ async function main() {
     const updGit = upd.json?.effects?.git;
     record('P6f', '更新文档自动提交推送', updGit?.attempted && updGit?.pushed, `commit=${updGit?.commitHash?.slice(0, 10)}`);
 
-    const raw = await gitea(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/raw/%E5%86%B3%E7%AD%96%E8%AE%B0%E5%BD%95/e2e-check.md?ref=main`);
+    const raw = await giteaPoll(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/raw/%E5%86%B3%E7%AD%96%E8%AE%B0%E5%BD%95/e2e-check.md?ref=main`, {
+      check: (r) => r.status === 200 && String(r.json.raw ?? r.json).includes('第二版'),
+    });
     record('P6g', 'Git 服务端文件内容与平台一致', raw.status === 200 && String(raw.json.raw ?? raw.json).includes('第二版'), `status=${raw.status}`);
 
-    const noInit = await req('/api/v1/projects/with-storage', {
+    // autoInit:false 且仓库不存在 → 400 REPO_NOT_FOUND（旧实现为 404，新契约在校验阶段统一 400）
+    const noInit = await req('/api/v1/projects', {
       token: ctx.alice,
       method: 'POST',
       body: {
-        name: '不存在的仓库库', storageType: 'git',
-        git: { connectionId: ctx.connId, repoName: `ewiki-e2e-missing-${runId}`, autoInit: false },
+        name: '不存在的仓库库',
+        storage: { kind: 'git', connectionId: ctx.connId, repoName: `ewiki-e2e-missing-${runId}`, autoInit: false },
       },
     });
-    record('P6h', '关闭自动初始化且仓库不存在 → 明确 404', noInit.status === 404, JSON.stringify(noInit.json).slice(0, 140));
+    record(
+      'P6h',
+      '关闭自动初始化且仓库不存在 → 明确 400 REPO_NOT_FOUND',
+      noInit.status === 400 && /REPO_NOT_FOUND/.test(JSON.stringify(noInit.json)),
+      JSON.stringify(noInit.json).slice(0, 140),
+    );
+
+    // ---- 手动同步：POST /api/v1/projects/:id/sync（仅 Git，需写权限） ----
+    // 先在 Gitea 远端直接写入一篇平台侧尚不存在的文档，模拟仓库外部更新
+    const remoteRel = `同步落地/remote-${runId}.md`;
+    const remoteMarker = `REMOTE-SYNC-MARKER-${runId}`;
+    const giteaWrite = await giteaCreateFile(ctx.gitRepo, remoteRel, `# 远端更新\n\n${remoteMarker}`, `docs: e2e 远端新增 ${remoteRel}`);
+    record('P6i', '远端仓库外部写入成功（为手动同步制造增量）', giteaWrite.status === 201, `status=${giteaWrite.status}`);
+
+    const sync = await req(`/api/v1/projects/${ctx.gitId}/sync`, { token: ctx.alice, method: 'POST' });
+    record(
+      'P6j',
+      '手动同步入队（202 syncing）',
+      sync.status === 202 && sync.json?.ok === true && sync.json?.status === 'syncing' && sync.json?.projectId === ctx.gitId,
+      JSON.stringify(sync.json).slice(0, 140),
+    );
+
+    // worker 拉取消化：overview 收敛 synced，且平台文档列表出现远端新增文档
+    const settled = await pollOverview(ctx.gitId, ctx.alice);
+    let ingested = false;
+    if (settled.json?.storageStatus === 'synced') {
+      const list = await req(`/api/v1/projects/${ctx.gitId}/documents`, { token: ctx.alice });
+      ingested = (list.json.items ?? []).some((d) => d.path === remoteRel);
+    }
+    record(
+      'P6k',
+      '手动同步拉取远端并消化为平台文档（storageStatus=synced）',
+      settled.json?.storageStatus === 'synced' && ingested,
+      `status=${settled.json?.storageStatus} ingested=${ingested} lastError=${settled.json?.lastError ?? '-'}`,
+    );
+
+    // 本地后端不支持同步 → 400 LOCAL_BACKEND_NO_SYNC
+    const localSync = await req(`/api/v1/projects/${ctx.cloudId}/sync`, { token: ctx.alice, method: 'POST' });
+    record(
+      'P6l',
+      '本地后端手动同步被拒（400 LOCAL_BACKEND_NO_SYNC）',
+      localSync.status === 400 && /LOCAL_BACKEND_NO_SYNC/.test(JSON.stringify(localSync.json)),
+      `status=${localSync.status}`,
+    );
+
+    // 只读成员（carol 尚不是该 Git 库成员，直接用 carol 令牌）触发同步 → 403
+    const guestSync = await req(`/api/v1/projects/${ctx.gitId}/sync`, { token: ctx.carol, method: 'POST' });
+    record('P6m', '无写权限用户触发同步被拒（403）', guestSync.status === 403, `status=${guestSync.status}`);
+
+    // 无增量重复同步：刚 synced 立即再次手动触发。
+    //  - 若与首次触发落在同一 singleton 分钟桶：pg-boss 静默丢弃，响应 202 deduped=true/status=deduped，
+    //    项目状态保持 synced，不允许卡在 syncing；
+    //  - 若恰好跨过分钟桶边界：新作业真实执行（零增量 noop），最终仍须收敛 synced 且无 lastError。
+    const repeatSync = await req(`/api/v1/projects/${ctx.gitId}/sync`, { token: ctx.alice, method: 'POST' });
+    const respOk =
+      repeatSync.status === 202 &&
+      (repeatSync.json?.deduped === true
+        ? repeatSync.json?.status === 'deduped'
+        : repeatSync.json?.status === 'syncing');
+    const afterRepeat = await pollOverview(ctx.gitId, ctx.alice);
+    record(
+      'P6n',
+      '重复手动同步幂等（202；同分钟桶去重或新作业 noop，状态均不卡 syncing，同 commit 不报错）',
+      respOk && afterRepeat.json?.storageStatus === 'synced' && !afterRepeat.json?.lastError,
+      `http=${repeatSync.status} resp=${JSON.stringify(repeatSync.json).slice(0, 120)} after=${afterRepeat.json?.storageStatus}`,
+    );
   }
 
   // [P7] 分享与协作
@@ -275,7 +426,6 @@ async function main() {
     let bobEditOk = false;
     let bobVersion = 0;
     if (bobDoc) {
-      const detail = await req(`/api/v1/documents/${bobDoc.id}`, { token: ctx.bob });
       const versions = await req(`/api/v1/documents/${bobDoc.id}/versions`, { token: ctx.bob });
       const latest = versions.json.items?.[0]?.versionNo ?? 0;
       const save = await req(`/api/v1/documents/${bobDoc.id}`, {
@@ -388,9 +538,11 @@ async function main() {
 
     const audit = await req('/api/v1/admin/audit?limit=200', { token: ctx.admin });
     const actions = new Set((audit.json.items ?? []).map((a) => a.action));
-    const expected = ['user.register', 'project.create', 'connection.create', 'git.auto_commit', 'project.share_grant', 'publish_site.create', 'admin.user_disable'];
+    // user.register 仅在本轮确有新注册时才产生（重跑套件老用户走登录分支，不写该台账）
+    const expected = [...(ctx.aliceRegistered ? ['user.register'] : []), 'project.create', 'connection.create', 'git.auto_commit', 'project.sync_requested', 'project.share_grant', 'publish_site.create', 'admin.user_disable'];
     const missing = expected.filter((a) => !actions.has(a));
-    record('P9k', '关键操作审计台账（注册/建库/连接/自动提交/分享/发布/禁用）', missing.length === 0, missing.length ? `缺少: ${missing.join(',')}` : `${audit.json.items?.length} 条台账齐全`);
+    const suffix = ctx.aliceRegistered ? '' : '（本轮为登录复跑，豁免 user.register）';
+    record('P9k', `关键操作审计台账（注册/建库/连接/自动提交/手动同步/分享/发布/禁用）${suffix}`, missing.length === 0, missing.length ? `缺少: ${missing.join(',')}` : `${audit.json.items?.length} 条台账齐全`);
   }
 
   const passed = results.filter((r) => r.pass).length;

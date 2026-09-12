@@ -22,6 +22,20 @@
       "when": 1788961965800,
       "tag": "0002_lumpy_joystick",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789134324929,
+      "tag": "0003_puzzling_slayback",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789140953046,
+      "tag": "0004_regular_morph",
+      "breakpoints": true
     }
   ]
 }

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ewiki/shared": "workspace:*",
+    "dotenv": "^17.4.2",
     "jose": "^5.9.0",
     "lib0": "^0.2.99",
     "postgres": "^3.4.5",

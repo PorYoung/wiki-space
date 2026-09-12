@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, XCircle, RefreshCw, Trash2, Plus, HardDrive } from 'lucide-react';
 import { apiFetch } from '../lib/api/client';
 
-/** 存储配置（本期需求 6）：GitLab 连接配置管理 + Gitea 兼容演示；验证连通性 */
+/** 存储源：用户级 GitLab / Gitea 连接配置管理；验证连通性，供新建 Git 文档库时选择 */
 
 interface ConnectionItem {
   id: string;
@@ -69,7 +69,7 @@ export function StorageConnectionsPage(): React.ReactElement {
             <HardDrive size={20} />
           </div>
           <div>
-            <h1 className="text-lg font-bold">存储配置</h1>
+            <h1 className="text-lg font-bold">存储源</h1>
             <p className="text-xs" style={{ color: 'var(--text-muted, #64748b)' }}>
               管理 Git 托管服务连接；新建「Git 仓库」文档库时将使用这些配置
             </p>

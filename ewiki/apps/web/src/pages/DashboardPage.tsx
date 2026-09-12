@@ -1,11 +1,10 @@
-import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, FolderOpen, FileText, Users, TrendingUp, Clock, ChevronRight,
-  Plus, BookOpen, RefreshCw, AlertCircle, X, HardDrive, GitFork, GitBranch, Check, Database,
+  Plus, BookOpen, RefreshCw, AlertCircle, GitBranch,
 } from 'lucide-react';
-import { apiFetch, EwikiApiError } from '../lib/api/client';
+import { apiFetch, fetchAllDocuments } from '../lib/api/client';
 import type { Activity, Document, Project, User } from '@ewiki/shared';
 
 // 迁移自 prototype Dashboard.jsx（TS 化 + 真实 API：F01–F05）
@@ -109,204 +108,11 @@ function ActivityItemSkeleton(): React.ReactElement {
     </div>
   );
 }
-
-const PROJECT_SOURCE_OPTIONS = [
-  { key: 'local', label: '本地文件夹', desc: '从本地磁盘读取 Markdown 文档', icon: HardDrive },
-  { key: 'git', label: 'Git 仓库', desc: '绑定 GitLab / GitHub 仓库自动同步', icon: GitFork },
-  // 第 3 源类型（原型 Dashboard.jsx:540-544）：选中时展示已有数据源列表；
-  // TODO: 数据源改绑 projectId 端点未实现，创建时暂不自动关联
-  { key: 'sources', label: '使用已有数据源', desc: '从已连接的数据源创建项目', icon: Database },
-] as const;
-
-type ProjectSourceKey = (typeof PROJECT_SOURCE_OPTIONS)[number]['key'];
-
-// 已连接数据源只读列表（「使用已有数据源」选项用；真实 GET /api/v1/sources）
-function ExistingSourcesList(): React.ReactElement {
-  const { data } = useQuery<{ items: Array<{ id: string; name: string; type: string; status: string }> }>({
-    queryKey: ['sources'],
-    queryFn: () => apiFetch<{ items: Array<{ id: string; name: string; type: string; status: string }> }>('/api/v1/sources'),
-  });
-  const sources = data?.items ?? [];
-  if (sources.length === 0) {
-    return <p className="text-xs text-neutral-400 py-2">暂无已连接的数据源，可前往「数据源」页添加。</p>;
-  }
-  return (
-    <div className="divide-y rounded-lg border max-h-32 overflow-y-auto scrollbar-thin" style={{ borderColor: 'var(--border-soft)' }}>
-      {sources.slice(0, 8).map((s) => (
-        <div key={s.id} className="flex items-center gap-2 px-3 py-2">
-          <span className="tag tag-neutral !text-[10px] uppercase">{s.type}</span>
-          <span className="text-xs text-neutral-700 truncate">{s.name}</span>
-          <span className={`ml-auto shrink-0 ${s.status === 'error' ? 'tag tag-danger' : 'tag tag-success'}`}>
-            {s.status === 'error' ? '异常' : '已连接'}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// 项目图标底色 8 色（对齐原型 Dashboard.jsx:546-549）：值为 Tailwind 浅底类名，
-// 存入 project.color 字段（PATCH /projects/:id 支持；POST 不接收 color，故创建后补一次 PATCH）
-const PROJECT_COLORS = [
-  'bg-violet-100', 'bg-sky-100', 'bg-rose-100', 'bg-amber-100',
-  'bg-emerald-100', 'bg-indigo-100', 'bg-teal-100', 'bg-orange-100',
-];
-
-function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (p: Project) => void }): React.ReactElement {
-  const queryClient = useQueryClient();
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [sourceType, setSourceType] = useState<ProjectSourceKey>('git');
-  const [url, setUrl] = useState('');
-  const [color, setColor] = useState<string>(PROJECT_COLORS[0]!);
-  const [error, setError] = useState<string | null>(null);
-
-  const create = useMutation({
-    mutationFn: async (): Promise<Project> => {
-      const project = await apiFetch<Project>('/api/v1/projects', {
-        method: 'POST',
-        body: JSON.stringify({ name: name.trim(), description: description.trim() || null, visibility: 'team' }),
-      });
-      // POST 建项目后补 PATCH 落库颜色（POST 不接收 color，见后端 POST /projects）
-      await apiFetch<Project>(`/api/v1/projects/${project.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ color }),
-      });
-      if (url.trim()) {
-        await apiFetch(`/api/v1/sources`, {
-          method: 'POST',
-          body: JSON.stringify({
-            projectId: project.id,
-            type: sourceType,
-            name: `${project.name} 主源`,
-            configPublic: { url: url.trim() },
-            defaultBranch: sourceType === 'git' ? 'main' : null,
-          }),
-        });
-      }
-      return { ...project, color };
-    },
-    onSuccess: (project) => {
-      void queryClient.invalidateQueries({ queryKey: ['projects'] });
-      onCreated(project);
-      onClose();
-    },
-    onError: (err: EwikiApiError) => setError(err.message),
-  });
-
-  const SourceIcon = PROJECT_SOURCE_OPTIONS.find((o) => o.key === sourceType)?.icon ?? GitFork;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm animate-fade-up"
-      onClick={onClose}>
-      <div className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border shadow-xl"
-        style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-soft)' }}
-        onClick={(e) => e.stopPropagation()}>
-        <div className="flex shrink-0 items-center justify-between border-b px-5 py-4" style={{ borderColor: 'var(--border-soft)' }}>
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-50 text-primary-600">
-              <FolderOpen size={18} />
-            </div>
-            <div>
-              <h3 className="font-semibold">新建文档库</h3>
-              <p className="text-xs" style={{ color: 'var(--text-muted, #64748b)' }}>创建一个新的知识库或文档项目</p>
-            </div>
-          </div>
-          <button type="button" className="btn-ghost !p-2" onClick={onClose} aria-label="关闭"><X size={18} /></button>
-        </div>
-
-        <form onSubmit={(e) => { e.preventDefault(); void create.mutateAsync(); }} className="flex-1 overflow-y-auto scrollbar-thin">
-          <div className="space-y-4 p-5">
-            <div>
-              <label className="mb-1.5 block text-sm font-medium">项目名称 <span className="text-danger">*</span></label>
-              <input type="text" className="input" placeholder="例如：EdgeAgent Platform" value={name}
-                onChange={(e) => setName(e.target.value)} autoFocus required />
-            </div>
-            <div>
-              <label className="mb-1.5 block text-sm font-medium">描述</label>
-              <input type="text" className="input" placeholder="简短描述这个项目的用途"
-                value={description} onChange={(e) => setDescription(e.target.value)} />
-            </div>
-            <div>
-              <label className="mb-2 block text-sm font-medium">数据源类型</label>
-              <div className="grid grid-cols-3 gap-2">
-                {PROJECT_SOURCE_OPTIONS.map((opt) => {
-                  const Icon = opt.icon;
-                  const active = sourceType === opt.key;
-                  return (
-                    <button type="button" key={opt.key} onClick={() => setSourceType(opt.key)}
-                      className={`rounded-lg border p-2.5 text-left transition-all ${
-                        active
-                          ? 'border-primary-400 bg-primary-50 ring-2 ring-primary-200'
-                          : 'border-[var(--border-soft)] bg-[var(--bg-surface)]'
-                      }`}>
-                      <Icon size={16} className={active ? 'text-primary-600' : 'text-[var(--text-muted,#64748b)]'} />
-                      <div className="mt-1 text-[12px] font-medium">{opt.label}</div>
-                      <div className="mt-0.5 text-[10px] leading-tight" style={{ color: 'var(--text-muted, #64748b)' }}>{opt.desc}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            {sourceType === 'sources' ? (
-              /* 「使用已有数据源」：展示已连接数据源（TODO: 改绑端点未实现，先只读展示） */
-              <div>
-                <label className="mb-1.5 block text-sm font-medium">选择已有数据源</label>
-                <ExistingSourcesList />
-                <p className="mt-1 text-[11px] text-neutral-400">
-                  创建后可在项目设置中关联该数据源（自动关联端点开发中）
-                </p>
-              </div>
-            ) : (
-              <div>
-                <label className="mb-1.5 block text-sm font-medium">
-                  {sourceType === 'local' ? '文件夹路径' : '仓库地址'} <span className="text-danger ml-0.5">*</span>
-                </label>
-                <div className="relative">
-                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400"><SourceIcon size={14} /></div>
-                  <input type="text" className="input pl-9 font-mono" value={url} onChange={(e) => setUrl(e.target.value)} required
-                    placeholder={sourceType === 'local' ? 'D:/works/MyVault' : 'https://gitlab.com/user/repo.git'} />
-                </div>
-              </div>
-            )}
-            {/* 项目颜色（对齐原型 :692-709） */}
-            <div>
-              <label className="mb-2 block text-sm font-medium">项目颜色</label>
-              <div className="flex gap-2">
-                {PROJECT_COLORS.map((c) => (
-                  <button type="button" key={c} onClick={() => setColor(c)}
-                    aria-label={`颜色 ${c}`}
-                    className={`h-8 w-8 rounded-lg transition-all ${c} ${color === c ? 'scale-110 ring-2 ring-offset-2 ring-primary-400' : 'hover:scale-105'}`}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t px-5 py-3"
-            style={{ borderColor: 'var(--border-soft)', background: 'var(--bg-surface)' }}>
-            {error && <span className="mr-auto text-sm text-danger">{error}</span>}
-            <button type="button" className="btn-secondary" onClick={onClose}>取消</button>
-            <button type="submit" className="btn-primary" disabled={create.isPending || !name.trim()}>
-              {create.isPending ? '创建中…' : '创建项目'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
+// 新建文档库统一入口（平台化需求 5/7）：跳转 /projects/new 完整向导 —— 模板或空库 × 云文档/Git 仓库；
+// Git 需选择「存储配置」连接 + 仓库名称，支持仓库不存在时自动初始化。原页内简版弹窗（直填仓库地址模式）已下线。
 
 export function DashboardPage(): React.ReactElement {
   const navigate = useNavigate();
-  const [showNewProject, setShowNewProject] = useState(false);
-  // 本页在 ProjectLayout 之外，无全局 Toast 上下文 → 页内局部成功提示（对齐原型 :472-488）
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showToast = (msg: string): void => {
-    setToast(msg);
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2000);
-  };
 
   const { data: projData, isLoading: projectsLoading } = useQuery({
     queryKey: ['projects'],
@@ -314,7 +120,7 @@ export function DashboardPage(): React.ReactElement {
   });
   const { data: docData, isLoading: docsLoading } = useQuery({
     queryKey: ['documents'],
-    queryFn: () => apiFetch<{ items: Document[] }>('/api/v1/documents'),
+    queryFn: () => fetchAllDocuments<Document>(),
   });
   const { data: teamData, isLoading: teamLoading } = useQuery({
     queryKey: ['team'],
@@ -327,7 +133,7 @@ export function DashboardPage(): React.ReactElement {
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: () => apiFetch<User>('/api/v1/me') });
 
   const projects = projData?.items ?? [];
-  const documents = docData?.items ?? [];
+  const documents = docData ?? [];
   const activities = actData?.items ?? [];
   const team = teamData?.items ?? [];
 
@@ -408,10 +214,10 @@ export function DashboardPage(): React.ReactElement {
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <button type="button" className="btn-primary" onClick={() => setShowNewProject(true)}>
+              <button type="button" className="btn-primary" onClick={() => navigate('/projects/new')}>
                 <Plus size={16} /> 新建文档库
               </button>
-              <Link to="/sources" className="btn-secondary"><RefreshCw size={16} /> 从 Git 导入</Link>
+              <Link to="/projects/new" className="btn-secondary"><GitBranch size={16} /> 新建 Git 文档库</Link>
             </div>
           </div>
         </div>
@@ -549,24 +355,6 @@ export function DashboardPage(): React.ReactElement {
             })}
           </div>
         </section>
-      )}
-
-      {showNewProject && (
-        <NewProjectModal
-          onClose={() => setShowNewProject(false)}
-          onCreated={(p) => showToast(`已创建项目「${p.name}」`)}
-        />
-      )}
-
-      {/* 创建成功 Toast（对齐原型 :480-488；配色走令牌以适配深色模式） */}
-      {toast && (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 animate-fade-up">
-          <div className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium shadow-lg"
-            style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-soft)', color: 'var(--text-primary)' }}>
-            <Check size={16} className="text-emerald-500" />
-            {toast}
-          </div>
-        </div>
       )}
     </div>
   );

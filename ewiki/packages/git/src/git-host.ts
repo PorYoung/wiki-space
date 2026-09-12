@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
-// Git 托管服务连接器（需求 6/7）：GitLab 为第一方言（接口按 GitLab REST v4 实现），
+// Git 托管服务连接器：GitLab 为第一方言（接口按 GitLab REST v4 实现），
 // Gitea 为兼容演示方言（本地测试环境提供）。两类实例共用同一条
 // 「连接验证 → 查找仓库 → 缺失自动初始化 → token 内嵌克隆/推送」管线。
+// 本包由 server（建库/保存推送）与 worker（同步消化）共用，不归属任一 app。
 // ---------------------------------------------------------------------------
 
 import { decryptJson } from '@ewiki/db';
@@ -48,7 +49,7 @@ async function hostReq(
   method: 'GET' | 'POST',
   path: string,
   body?: Record<string, unknown>,
-): Promise<{ status: number; json: any }> {
+): Promise<{ status: number; json: unknown }> {
   const token = connToken(conn);
   let res: Response;
   try {
@@ -61,10 +62,10 @@ async function hostReq(
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(15_000),
     });
-  } catch (e) {
+  } catch {
     throw new GitHostError(502, 'HOST_UNREACHABLE', `无法连接到 Git 服务（${apiBase(conn)}），请检查地址与网络`);
   }
-  let json: any = null;
+  let json: unknown = null;
   try {
     json = await res.json();
   } catch {
@@ -73,7 +74,12 @@ async function hostReq(
   return { status: res.status, json };
 }
 
-function mapHttpError(status: number, kind: string): GitHostError {
+/** 托管平台 REST 响应统一按松散字典读取（字段随方言/版本不同） */
+function asRecord(json: unknown): Record<string, unknown> | null {
+  return json && typeof json === 'object' ? (json as Record<string, unknown>) : null;
+}
+
+function mapHttpError(status: number, _kind: string): GitHostError {
   if (status === 401 || status === 403) {
     return new GitHostError(400, 'BAD_CREDENTIAL', '访问令牌无效或权限不足（401/403），请检查 Token');
   }
@@ -95,8 +101,9 @@ export async function validateConnection(conn: ConnLike): Promise<{
 }> {
   try {
     const { status, json } = await hostReq(conn, 'GET', '/user');
-    if (status !== 200 || !json?.username) return { ok: false, message: mapHttpError(status, conn.kind).message };
-    return { ok: true, login: String(json.username), name: String(json.name ?? json.username) };
+    const rec = asRecord(json);
+    if (status !== 200 || !rec?.username) return { ok: false, message: mapHttpError(status, conn.kind).message };
+    return { ok: true, login: String(rec.username), name: String(rec.name ?? rec.username) };
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }
@@ -112,14 +119,15 @@ export async function findRepo(
   const fullPath = `${ns}/${repoName}`;
   if (conn.kind === 'gitea') {
     const { status, json } = await hostReq(conn, 'GET', `/repos/${ns}/${repoName}`);
-    if (status === 200 && json) {
+    const rec = asRecord(json);
+    if (status === 200 && rec) {
       return {
         found: true,
         repo: {
           fullPath,
-          cloneUrl: String(json.clone_url ?? ''),
-          defaultBranch: String(json.default_branch ?? 'main'),
-          webUrl: String(json.html_url ?? json.clone_url ?? ''),
+          cloneUrl: String(rec.clone_url ?? ''),
+          defaultBranch: String(rec.default_branch ?? 'main'),
+          webUrl: String(rec.html_url ?? rec.clone_url ?? ''),
         },
       };
     }
@@ -127,14 +135,15 @@ export async function findRepo(
     throw mapHttpError(status, conn.kind);
   }
   const { status, json } = await hostReq(conn, 'GET', `/projects/${encodeURIComponent(fullPath)}`);
-  if (status === 200 && json) {
+  const rec = asRecord(json);
+  if (status === 200 && rec) {
     return {
       found: true,
       repo: {
         fullPath,
-        cloneUrl: String(json.http_url_to_repo ?? `${normBaseUrl(conn.baseUrl)}/${fullPath}.git`),
-        defaultBranch: String(json.default_branch ?? 'main'),
-        webUrl: String(json.web_url ?? ''),
+        cloneUrl: String(rec.http_url_to_repo ?? `${normBaseUrl(conn.baseUrl)}/${fullPath}.git`),
+        defaultBranch: String(rec.default_branch ?? 'main'),
+        webUrl: String(rec.web_url ?? ''),
       },
     };
   }
@@ -142,7 +151,7 @@ export async function findRepo(
   throw mapHttpError(status, conn.kind);
 }
 
-/** 创建仓库（不存在时自动初始化，需求 7）。返回 created=false 表示已存在并关联。 */
+/** 创建仓库（不存在时自动初始化）。返回 created=false 表示已存在并关联。 */
 export async function ensureRepo(
   conn: ConnLike,
   repoName: string,
@@ -165,14 +174,15 @@ export async function ensureRepo(
       default_branch: 'main',
       description: '由 ewiki 知识平台自动初始化',
     });
-    if (status === 201 && json) {
+    const rec = asRecord(json);
+    if (status === 201 && rec) {
       return {
         created: true,
         repo: {
           fullPath: `${ns}/${repoName}`,
-          cloneUrl: String(json.clone_url ?? ''),
-          defaultBranch: String(json.default_branch ?? 'main'),
-          webUrl: String(json.html_url ?? json.clone_url ?? ''),
+          cloneUrl: String(rec.clone_url ?? ''),
+          defaultBranch: String(rec.default_branch ?? 'main'),
+          webUrl: String(rec.html_url ?? rec.clone_url ?? ''),
         },
       };
     }
@@ -192,25 +202,26 @@ export async function ensureRepo(
   };
   if (ns && ns !== fallbackNamespace) {
     const nsRes = await hostReq(conn, 'GET', `/namespaces?search=${encodeURIComponent(ns)}`);
-    const hit = Array.isArray(nsRes.json)
-      ? nsRes.json.find((n: any) => n.path === ns || n.name === ns || n.full_path === ns)
-      : null;
+    const list = Array.isArray(nsRes.json) ? (nsRes.json as Array<Record<string, unknown>>) : [];
+    const hit = list.find((n) => n.path === ns || n.name === ns || n.full_path === ns);
     if (hit) body.namespace_id = hit.id;
     else throw new GitHostError(400, 'NAMESPACE_NOT_FOUND', `命名空间不存在或不可见：${ns}`);
   }
   const { status, json } = await hostReq(conn, 'POST', '/projects', body);
-  if (status === 201 && json) {
+  const rec = asRecord(json);
+  if (status === 201 && rec) {
     return {
       created: true,
       repo: {
-        fullPath: String(json.path_with_namespace ?? `${ns}/${repoName}`),
-        cloneUrl: String(json.http_url_to_repo ?? ''),
-        defaultBranch: String(json.default_branch ?? 'main'),
-        webUrl: String(json.web_url ?? ''),
+        fullPath: String(rec.path_with_namespace ?? `${ns}/${repoName}`),
+        cloneUrl: String(rec.http_url_to_repo ?? ''),
+        defaultBranch: String(rec.default_branch ?? 'main'),
+        webUrl: String(rec.web_url ?? ''),
       },
     };
   }
-  const msg = typeof json?.message === 'string' ? json.message : JSON.stringify(json?.message ?? '');
+  const rawMessage = rec?.message;
+  const msg = typeof rawMessage === 'string' ? rawMessage : JSON.stringify(rawMessage ?? '');
   if (status === 400 && /already been taken|has already/.test(msg)) {
     throw new GitHostError(409, 'REPO_NAME_TAKEN', `仓库名称已被占用：${msg}`);
   }

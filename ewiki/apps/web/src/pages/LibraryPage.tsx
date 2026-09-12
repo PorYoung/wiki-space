@@ -2,14 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import {
-  ArrowRight, ChevronLeft, ChevronRight, Clock, Database, ExternalLink, EyeOff,
+  ArrowRight, ChevronLeft, ChevronRight, Clock, ExternalLink, EyeOff,
   FileText, Filter, FolderKanban, FolderOpen, FolderPlus, GitBranch, Globe, Grid3X3, HardDrive,
-  LayoutGrid, List, Lock, RotateCcw, Search, SlidersHorizontal, Tag, Users, Wand2, X,
+  LayoutGrid, List, Lock, RotateCcw, Search, SlidersHorizontal, Tag, Users, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
-import { StarterPackWizardModal } from '../components/StarterPackWizardModal';
-import { apiFetch } from '../lib/api/client';
+import { apiFetch, fetchAllDocuments } from '../lib/api/client';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,7 +19,7 @@ type DocStatus = 'untracked' | 'synced' | 'modified' | 'conflict';
 type ViewMode = 'grid' | 'list';
 type BrowseMode = 'flat' | 'project';
 type Scope = 'mine' | 'explore';
-type SourceType = 'git' | 'local' | 'database' | 'web';
+type BackendKind = 'git' | 'local';
 
 interface Project {
   id: string;
@@ -30,6 +29,7 @@ interface Project {
   visibility: Visibility;
   template?: string | null;
   ownerId?: string;
+  storageKind?: BackendKind;
   updatedAt?: string;
 }
 
@@ -45,13 +45,6 @@ interface LibraryDoc {
   updatedAt?: string;
   // PLAN 3.4 残留：列表接口派生下发（routes.ts documentSummary）
   summary?: string | null;
-}
-
-interface LibrarySource {
-  id: string;
-  projectId: string;
-  type: SourceType;
-  name: string;
 }
 
 interface TeamUser {
@@ -100,18 +93,14 @@ const VISIBILITY_META: Record<Visibility, { label: string; Icon: LucideIcon; cls
   public: { label: '公开', Icon: Globe, cls: 'bg-emerald-50 text-emerald-600' },
 };
 
-const SOURCE_ICON: Record<SourceType, LucideIcon> = {
+const BACKEND_ICON: Record<BackendKind, LucideIcon> = {
   git: GitBranch,
   local: HardDrive,
-  database: Database,
-  web: ExternalLink,
 };
 
-const SOURCE_LABEL: Record<SourceType, string> = {
+const BACKEND_LABEL: Record<BackendKind, string> = {
   git: 'Git',
   local: '本地',
-  database: '数据库',
-  web: '网页',
 };
 
 // 状态筛选候选直接从 STATUS_MAP 派生（label/dot 单一来源，避免双表维护漂移）
@@ -162,6 +151,18 @@ function siteUrlOf(site: PublishSite): string {
   return site.addressMode === 'subpath'
     ? `ewiki.local/p/${site.slug}`
     : `${site.slug}.ewiki.local`;
+}
+
+// 状态徽章：统一走 .tag 基类（旧实现漏掉基类 → 无 padding/圆角的紧贴色块），
+// 内嵌状态圆点提供色弱冗余编码（与 FilterDrawer 状态点同一套色）
+function StatusBadge({ status }: { status: DocStatus }): React.ReactElement {
+  const meta = STATUS_MAP[status] ?? STATUS_MAP.synced;
+  return (
+    <span className={`tag shrink-0 !text-[10px] ${meta.cls}`}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
+      {meta.label}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +325,7 @@ function DocumentCard({ doc, projects, users, delayMs = 0 }: {
             <ChevronRight size={12} className="shrink-0 text-neutral-300" />
             <span className="truncate text-neutral-500">{fileName}</span>
           </div>
-          <span className={`shrink-0 ${status.cls}`}>{status.label}</span>
+          <StatusBadge status={doc.status} />
         </div>
 
         <div className="space-y-1.5">
@@ -443,15 +444,15 @@ function DocumentListView({ docs, projects, users }: {
 // ProjectCard（按项目模式）
 // ---------------------------------------------------------------------------
 
-function ProjectCard({ project, docCount, sourceType, siteUrl, delayMs = 0, onOpenWebsite }: {
+function ProjectCard({ project, docCount, backendKind, siteUrl, delayMs = 0, onOpenWebsite }: {
   project: Project;
   docCount: number;
-  sourceType: SourceType;
+  backendKind: BackendKind;
   siteUrl: string | null;
   delayMs?: number;
   onOpenWebsite: (url: string) => void;
 }): React.ReactElement {
-  const Icon = SOURCE_ICON[sourceType] ?? HardDrive;
+  const Icon = BACKEND_ICON[backendKind] ?? HardDrive;
   const vis = VISIBILITY_META[project.visibility] ?? VISIBILITY_META.private;
   const VisIcon = vis.Icon;
 
@@ -466,7 +467,7 @@ function ProjectCard({ project, docCount, sourceType, siteUrl, delayMs = 0, onOp
           </div>
           <div className="flex flex-col items-end gap-1.5">
             <span className="tag-neutral !px-1.5 !py-0 !text-[10px]">
-              {SOURCE_LABEL[sourceType] ?? sourceType}
+              {BACKEND_LABEL[backendKind] ?? backendKind}
             </span>
             {project.updatedAt && (
               <span className="flex items-center gap-0.5 text-[11px] text-neutral-400">
@@ -879,8 +880,6 @@ export function LibraryPage(): React.ReactElement {
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [websiteUrl, setWebsiteUrl] = useState<string | null>(null);
-  // 「新建库」三步向导开关（PLAN 5.1.5：Library 页头入口从跳转 Dashboard 升级为向导）
-  const [starterWizardOpen, setStarterWizardOpen] = useState(false);
   // 分页页码（平铺/按项目共用一份：模式切换即重置，见下方 effect）
   const [page, setPage] = useState(1);
   // 内容区顶部锚点：切页后把新页顶部滚回视口
@@ -897,13 +896,10 @@ export function LibraryPage(): React.ReactElement {
     queryKey: ['projects'],
     queryFn: () => apiFetch<ItemsResp<Project>>('/api/v1/projects'),
   });
-  const { data: docsData, isLoading: docsLoading } = useQuery<ItemsResp<LibraryDoc>>({
+  const { data: docsData, isLoading: docsLoading } = useQuery<LibraryDoc[], Error>({
     queryKey: ['library-documents'],
-    queryFn: () => apiFetch<ItemsResp<LibraryDoc>>('/api/v1/documents'),
-  });
-  const { data: sourcesData } = useQuery<ItemsResp<LibrarySource>>({
-    queryKey: ['library-sources'],
-    queryFn: () => apiFetch<ItemsResp<LibrarySource>>('/api/v1/sources'),
+    // 服务端真分页（pageSize 上限 500）后循环拉齐全量，前端过滤/分页架构不变
+    queryFn: () => fetchAllDocuments<LibraryDoc>(),
   });
   const { data: teamData } = useQuery<ItemsResp<TeamUser>>({
     queryKey: ['team'],
@@ -911,16 +907,8 @@ export function LibraryPage(): React.ReactElement {
   });
 
   const projects = projectsData?.items ?? [];
-  const documents = docsData?.items ?? [];
-  const sources = sourcesData?.items ?? [];
+  const documents = docsData ?? [];
   const users = teamData?.items ?? [];
-
-  // 项目 → 数据源类型（projects 表无 sourceType 列，由 sources 列表推导）
-  const projectSourceType = useMemo(() => {
-    const map: Record<string, SourceType> = {};
-    for (const s of sources) map[s.projectId] = s.type;
-    return map;
-  }, [sources]);
 
   // 公开项目（explore 范围）
   const publicProjects = useMemo(
@@ -1120,17 +1108,10 @@ export function LibraryPage(): React.ReactElement {
 
             {scope === 'mine' && (
               <>
-                <button type="button" className="btn-secondary !h-8 !text-xs" onClick={() => navigate('/sources')}>
-                  <ExternalLink size={14} />
-                  导入源
-                </button>
-                <button type="button" className="btn-secondary !h-8 !text-xs" onClick={() => navigate('/projects/new')}>
+                {/* 新建文档库统一入口（平台化需求 5/7）：跳转完整向导 —— 模板/空库 × 本地/Git 存储源（连接配置 + 仓库名称 + 自动初始化） */}
+                <button type="button" className="btn-primary !h-8 !text-xs" onClick={() => navigate('/projects/new')}>
                   <FolderPlus size={14} />
                   新建文档库
-                </button>
-                <button type="button" className="btn-primary !h-8 !text-xs" onClick={() => setStarterWizardOpen(true)}>
-                  <Wand2 size={14} />
-                  新建库
                 </button>
               </>
             )}
@@ -1295,7 +1276,7 @@ export function LibraryPage(): React.ReactElement {
                 {pagedProjects.map((p, i) => (
                   <ProjectCard key={p.id} project={p}
                     docCount={docCounts[p.id] ?? 0}
-                    sourceType={projectSourceType[p.id] ?? 'local'}
+                    backendKind={p.storageKind ?? 'local'}
                     siteUrl={siteByProject[p.id] ?? null}
                     onOpenWebsite={setWebsiteUrl}
                     delayMs={i * 50} />
@@ -1312,9 +1293,6 @@ export function LibraryPage(): React.ReactElement {
         filters={filters} setFilters={setFilters} availableTags={availableTags} />
 
       {websiteUrl && <WebsiteModal url={websiteUrl} onClose={() => setWebsiteUrl(null)} />}
-
-      {/* StarterPack 建库三步向导（条件渲染，卸载即重置向导状态） */}
-      {starterWizardOpen && <StarterPackWizardModal onClose={() => setStarterWizardOpen(false)} />}
     </div>
   );
 }

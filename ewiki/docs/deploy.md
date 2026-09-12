@@ -74,7 +74,7 @@ corepack pnpm dev
 ```bash
 # 前置：server/worker/realtime 已启动；Gitea 已创建测试账号与 Token
 $env:E2E_GITEA_TOKEN = '<token>'
-node scripts/e2e-platform.mjs        # 51 项断言，写 scripts/e2e-report.json
+node scripts/e2e-platform.mjs        # 53 项断言，写 scripts/e2e-report.json
 ```
 
 覆盖：注册/示例库、NAS 落盘三方一致、越权拦截、版本冲突保护、连接配置验证（含错误令牌）、Git 自动建仓与自动提交（服务端可查）、分享协作（editor/guest 权限）、发布站点匿名访问、系统管理与审计台账、NAS 根目录运行时切换演练。

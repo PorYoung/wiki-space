@@ -1,11 +1,8 @@
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
-import { eq } from 'drizzle-orm';
-import { SourceType } from '@ewiki/shared';
-import type { AppDeps } from './app.js';
-import { activities, projectMembers, projects, sources } from '../db/schema.js';
 
-// StarterPack（F10）：初始化模板目录 + 从模板创建项目（内嵌数据源创建，复用 S1）
+// StarterPack（F10）：模板包清单。
+// 建库统一入口为 POST /api/v1/projects（携带 storage 判别联合：本地或 Git 连接配置+仓库名称，
+// 模板解析支持 starter-pack id），原 init-from-starter 端点（直填 Git 地址模型）已下线。
 
 export const STARTER_PACKS = [
   {
@@ -39,72 +36,6 @@ export const STARTER_PACKS = [
   },
 ];
 
-export function registerStarterRoutes(app: Hono, deps: AppDeps): void {
-  const { db, boss } = deps;
-
+export function registerStarterRoutes(app: Hono): void {
   app.get('/api/v1/starter-packs', (c) => c.json({ items: STARTER_PACKS }));
-
-  app.post('/api/v1/projects/init-from-starter', async (c) => {
-    const userId = c.get('userId') as string;
-    const body = (await c.req.json()) as {
-      packId?: string;
-      name?: string;
-      visibility?: 'private' | 'team' | 'public';
-      sourceType?: 'git' | 'local' | null;
-      sourceUrl?: string;
-      autoSync?: boolean;
-    };
-    if (!body.packId || !body.name) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
-    const pack = STARTER_PACKS.find((p) => p.id === body.packId);
-    if (!pack) throw new HTTPException(404, { message: 'NOT_FOUND' });
-
-    const [project] = await db
-      .insert(projects)
-      .values({
-        name: body.name,
-        description: pack.description,
-        visibility: body.visibility ?? 'private',
-        template: pack.id,
-        ownerId: userId,
-      })
-      .returning();
-    await db.insert(projectMembers).values({ projectId: project.id, userId, role: 'owner' });
-
-    // 内嵌数据源创建（F10 第三步），并立即触发一次同步以填充文档
-    let sourceId: string | null = null;
-    if ((body.sourceType === 'git' || body.sourceType === 'local') && body.sourceUrl) {
-      const parsed = SourceType.safeParse(body.sourceType);
-      if (parsed.success) {
-        const [source] = await db
-          .insert(sources)
-          .values({
-            projectId: project.id,
-            type: parsed.data,
-            name: `${body.name} 主源`,
-            configPublic: body.sourceType === 'git' ? { url: body.sourceUrl } : { path: body.sourceUrl },
-            defaultBranch: body.sourceType === 'git' ? 'main' : null,
-            autoSync: body.autoSync ?? false,
-            intervalSeconds: body.autoSync ? 3600 : 0,
-          })
-          .returning();
-        sourceId = source.id;
-        await boss.send(
-          'sync',
-          { sourceId: source.id, trigger: 'manual' },
-          { id: `sync:${source.id}:init:${Math.floor(Date.now() / 60_000)}` },
-        );
-        await db.update(sources).set({ status: 'syncing' }).where(eq(sources.id, source.id));
-      }
-    }
-
-    await db.insert(activities).values({
-      projectId: project.id,
-      actorId: userId,
-      verb: 'create',
-      targetType: 'project',
-      targetId: project.id,
-      targetTitle: project.name,
-    });
-    return c.json({ project, sourceId, packId: pack.id }, 201);
-  });
 }

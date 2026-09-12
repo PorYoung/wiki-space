@@ -9,7 +9,7 @@ try {
   console.log('sync queue =', JSON.stringify(q));
   const jobId = await boss.send(
     'sync',
-    { sourceId: '00000000-0000-0000-0000-000000000000', trigger: 'manual' },
+    { projectId: '00000000-0000-0000-0000-000000000000', trigger: 'manual' },
     { singletonKey: 'repro-sync', singletonMinutes: 1 },
   );
   console.log('send ok =', jobId);

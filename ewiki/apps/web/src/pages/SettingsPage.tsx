@@ -6,6 +6,7 @@ import {
   Circle,
   Eye,
   Globe,
+  HardDrive,
   Keyboard,
   LogOut,
   Moon,
@@ -50,7 +51,7 @@ interface UserPrefs {
   notifyEmail: boolean;
   notifyInApp: boolean;
   notifyWeekly: boolean;
-  defaultSourceType: 'git' | 'local';
+  defaultBackend: 'git' | 'local';
   kbdSearch: string;
   kbdCommand: string;
 }
@@ -63,7 +64,7 @@ const DEFAULT_PREFS: UserPrefs = {
   notifyEmail: false,
   notifyInApp: true,
   notifyWeekly: false,
-  defaultSourceType: 'git',
+  defaultBackend: 'git',
   kbdSearch: '⌘K',
   kbdCommand: '⌘⇧P',
 };
@@ -139,10 +140,8 @@ function Section({ title, desc, icon, children }: {
 // Sub-sections
 // ---------------------------------------------------------------------------
 
-function ProfileSection({ user, prefs, setPrefs }: {
+function ProfileSection({ user }: {
   user: MeUser | undefined;
-  prefs: UserPrefs;
-  setPrefs: React.Dispatch<React.SetStateAction<UserPrefs>>;
 }): React.ReactElement {
   const [name, setName] = useState('');
   const [email] = useState(user?.email ?? '');
@@ -368,7 +367,7 @@ function NotificationsSection({ prefs, setPrefs }: {
     { title: '协作者评论我时', hint: '当有人 @你 或评论你参与的文档' },
     { title: '文档被合并时', hint: '你的草稿或分支被合并入主文档' },
     { title: '版本发布时', hint: '有人从版本历史发布一个稳定快照' },
-    { title: '数据源同步失败时', hint: 'Git / 本地等数据源的同步出错' },
+    { title: 'Git 同步失败时', hint: 'Git 存储源的拉取或推送同步出错' },
   ];
   return (
     <Section title="通知" desc="站内与邮件通知偏好" icon={<Bell size={15} />}>
@@ -436,31 +435,31 @@ function NotificationsSection({ prefs, setPrefs }: {
   );
 }
 
-function SourceDefaultsSection({ prefs, setPrefs }: {
+function StorageDefaultsSection({ prefs, setPrefs }: {
   prefs: UserPrefs; setPrefs: React.Dispatch<React.SetStateAction<UserPrefs>>;
 }): React.ReactElement {
-  // 已连接数据源预览（原型 Settings.jsx:413-447；真实 GET /api/v1/sources）
-  const { data: sourcesData } = useQuery<{ items: Array<{
-    id: string; name: string; type: string; status: string; lastSyncedAt: string | null;
+  // 已配置的用户级存储源连接（GET /api/v1/connections；管理操作在「存储源」页）
+  const { data: connectionsData } = useQuery<{ items: Array<{
+    id: string; name: string; kind: 'gitlab' | 'gitea'; status: string; lastCheckAt: string | null;
   }> }>({
-    queryKey: ['sources'],
-    queryFn: () => apiFetch<{ items: Array<{ id: string; name: string; type: string; status: string; lastSyncedAt: string | null }> }>('/api/v1/sources'),
+    queryKey: ['connections'],
+    queryFn: () => apiFetch<{ items: Array<{ id: string; name: string; kind: 'gitlab' | 'gitea'; status: string; lastCheckAt: string | null }> }>('/api/v1/connections'),
   });
-  const sources = sourcesData?.items ?? [];
+  const connections = connectionsData?.items ?? [];
 
   return (
-    <Section title="数据源默认" desc="新建项目时的默认数据源类型" icon={<Globe size={15} />}>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+    <Section title="存储默认" desc="新建文档库时默认使用的存储后端" icon={<HardDrive size={15} />}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {[
-          { key: 'git' as const, label: 'Git 仓库', desc: '推荐：自动同步变更' },
-          { key: 'local' as const, label: '本地文件夹', desc: '手动同步' },
+          { key: 'git' as const, label: 'Git 仓库', desc: '关联 GitLab / Gitea，可拉取与推送同步' },
+          { key: 'local' as const, label: '本地存储', desc: '平台分配目录落盘，无需同步' },
         ].map(({ key, label, desc }) => {
-          const active = prefs.defaultSourceType === key;
+          const active = prefs.defaultBackend === key;
           return (
             <button
               key={key}
               type="button"
-              onClick={() => setPrefs((p) => ({ ...p, defaultSourceType: key }))}
+              onClick={() => setPrefs((p) => ({ ...p, defaultBackend: key }))}
               className={`flex items-start gap-3 p-3 rounded-lg border text-left transition ${
                 active
                   ? 'border-primary-300 bg-primary-50 ring-1 ring-primary-200'
@@ -479,38 +478,24 @@ function SourceDefaultsSection({ prefs, setPrefs }: {
             </button>
           );
         })}
-        {/* TODO: 第三方数据源（Notion / Confluence 等 database 类型）后端未实现，先占位禁用（PLAN 5.2.2） */}
-        <button
-          type="button"
-          disabled
-          title="TODO: 第三方数据源连接器未实现"
-          className="flex items-start gap-3 p-3 rounded-lg border border-dashed text-left opacity-60 cursor-not-allowed"
-          style={{ borderColor: 'var(--border-soft)' }}
-        >
-          <div className="w-5 h-5 rounded-full border-2 border-neutral-300 flex items-center justify-center shrink-0 mt-0.5" />
-          <div>
-            <div className="text-xs font-medium text-neutral-500">第三方平台</div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">Notion / Confluence（即将上线）</div>
-          </div>
-        </button>
       </div>
 
-      {/* 已连接数据源预览（原型 :413-447；管理操作在「数据源」页） */}
+      {/* 已配置的存储源连接预览（管理操作在「存储源」页） */}
       <div className="mt-5">
-        <div className="mb-2 text-xs font-semibold text-neutral-700">已连接数据源</div>
-        {sources.length === 0 ? (
-          <p className="text-xs text-neutral-400">暂无已连接的数据源，可在「数据源」页添加。</p>
+        <div className="mb-2 text-xs font-semibold text-neutral-700">已配置的存储源</div>
+        {connections.length === 0 ? (
+          <p className="text-xs text-neutral-400">暂无存储源连接，可在侧边栏「存储源」页添加 GitLab / Gitea 连接。</p>
         ) : (
           <div className="divide-y rounded-lg border" style={{ borderColor: 'var(--border-soft)' }}>
-            {sources.slice(0, 6).map((s) => (
-              <div key={s.id} className="flex items-center gap-2.5 px-3.5 py-2.5">
-                <span className="tag tag-neutral !text-[10px] uppercase">{s.type}</span>
-                <span className="text-xs font-medium text-neutral-800 truncate">{s.name}</span>
-                <span className={`ml-auto shrink-0 ${s.status === 'error' ? 'tag tag-danger' : s.status === 'syncing' ? 'tag tag-warning' : 'tag tag-success'}`}>
-                  {s.status === 'error' ? '异常' : s.status === 'syncing' ? '同步中' : '已连接'}
+            {connections.slice(0, 6).map((c) => (
+              <div key={c.id} className="flex items-center gap-2.5 px-3.5 py-2.5">
+                <span className="tag tag-neutral !text-[10px] uppercase">{c.kind}</span>
+                <span className="text-xs font-medium text-neutral-800 truncate">{c.name}</span>
+                <span className={`ml-auto shrink-0 ${c.status === 'error' ? 'tag tag-danger' : c.status === 'ok' ? 'tag tag-success' : 'tag tag-warning'}`}>
+                  {c.status === 'error' ? '异常' : c.status === 'ok' ? '已校验' : '未校验'}
                 </span>
                 <span className="shrink-0 text-[11px] text-neutral-400 hidden sm:inline">
-                  {s.lastSyncedAt ? `同步于 ${new Date(s.lastSyncedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '从未同步'}
+                  {c.lastCheckAt ? `校验于 ${new Date(c.lastCheckAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '从未校验'}
                 </span>
               </div>
             ))}
@@ -746,7 +731,7 @@ const SETTINGS_TABS = [
   { key: 'profile', label: '个人资料', Icon: User },
   { key: 'appearance', label: '外观与主题', Icon: Palette },
   { key: 'notifications', label: '通知', Icon: Bell },
-  { key: 'sources', label: '数据源默认', Icon: Globe },
+  { key: 'storage', label: '存储默认', Icon: HardDrive },
   { key: 'shortcuts', label: '快捷键', Icon: Keyboard },
   { key: 'about', label: '关于 / 帮助', Icon: Settings2 },
 ] as const;
@@ -887,7 +872,7 @@ export function SettingsPage(): React.ReactElement {
             ) : (
               <div className="space-y-5 animate-fade-up" key={activeTab}>
                 {activeTab === 'profile' && (
-                  <ProfileSection user={user} prefs={prefs} setPrefs={setPrefs} />
+                  <ProfileSection user={user} />
                 )}
                 {activeTab === 'appearance' && (
                   <AppearanceSection prefs={prefs} setPrefs={setPrefs} />
@@ -895,8 +880,8 @@ export function SettingsPage(): React.ReactElement {
                 {activeTab === 'notifications' && (
                   <NotificationsSection prefs={prefs} setPrefs={setPrefs} />
                 )}
-                {activeTab === 'sources' && (
-                  <SourceDefaultsSection prefs={prefs} setPrefs={setPrefs} />
+                {activeTab === 'storage' && (
+                  <StorageDefaultsSection prefs={prefs} setPrefs={setPrefs} />
                 )}
                 {activeTab === 'shortcuts' && (
                   <KeyboardSection prefs={prefs} setPrefs={setPrefs} />

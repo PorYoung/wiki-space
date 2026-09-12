@@ -2,106 +2,21 @@
 // @ewiki/render —— 发布渲染单一事实源（EXT-PLATFORM-PLAN ADR-P2）
 //   worker（发布：异步全量、工件落盘）与 server（预览：同步按需、不落盘）
 //   必须消费同一实现，保证「预览即所得」。纯函数包：入参即数据，不触 DB。
-//   仅 server/worker 消费（Node 运行时，可用 node:crypto），前端不 import。
+//   仅 server/worker 消费（Node 运行时，可用 node:crypto），前端不 import 本入口
+//   （前端经子路径 @ewiki/render/markdown 复用同一 Markdown 管线，避免 node:crypto 入图）。
 //   发布模板（t-docs 五套）是渲染参数而非五套渲染器；accent / sidebarSide
 //   可被预览端点覆盖（PreviewModal 外观定制）。
-//   边界：Markdown 常用子集（标题/段落/行内/代码块/引用/无序列表/链接），
-//   表格等语法按纯文本透传——与 2026-09 前 worker 行为一致，不回退。
+//   Markdown 管线与应用内预览同源（markdown-it + hljs + KaTeX + mermaid 占位），
+//   见 ./markdown.ts；发布页对 KaTeX/mermaid 按需注入平台同源 vendor 资源
+//   （server 提供 /assets/vendor/katex/* 与 /assets/vendor/mermaid/*）。
 // ---------------------------------------------------------------------------
 
 import { createHash } from 'node:crypto';
+import { hasKatexOutput, hasMermaidBlock, markdownToHtml, mdEscapeHtml } from './markdown.js';
 
-const escapeHtml = (s: string): string =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+export { markdownToHtml, slugify, mdEscapeHtml } from './markdown.js';
 
-/** Markdown → HTML（自 worker 迁移，逐行保持行为一致） */
-export function markdownToHtml(md: string): string {
-  const lines = md.split(/\r?\n/);
-  const out: string[] = [];
-  let i = 0;
-
-  const formatInline = (text: string): string =>
-    text
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // 代码块
-    if (/^```/.test(line)) {
-      const lang = line.slice(3).trim();
-      const buf: string[] = [];
-      i++;
-      while (i < lines.length && !/^```/.test(lines[i])) {
-        buf.push(lines[i]);
-        i++;
-      }
-      i++; // 跳过 closing ```
-      out.push(
-        `<pre><code${lang ? ` class="language-${escapeHtml(lang)}"` : ''}>${escapeHtml(buf.join('\n'))}</code></pre>`,
-      );
-      continue;
-    }
-
-    // 空行 → 段落边界由 join 后的 <p> 自然处理
-    if (!line.trim()) {
-      i++;
-      continue;
-    }
-
-    // 标题
-    const h = /^(#{1,6})\s+(.+)$/.exec(line);
-    if (h) {
-      const level = h[1].length;
-      out.push(`<h${level}>${formatInline(escapeHtml(h[2]))}</h${level}>`);
-      i++;
-      continue;
-    }
-
-    // 引用
-    if (/^>\s?/.test(line)) {
-      const buf: string[] = [];
-      while (i < lines.length && /^>\s?/.test(lines[i])) {
-        buf.push(formatInline(escapeHtml(lines[i].replace(/^>\s?/, ''))));
-        i++;
-      }
-      out.push(`<blockquote>${buf.join(' ')}</blockquote>`);
-      continue;
-    }
-
-    // 无序列表
-    if (/^[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
-        items.push(`<li>${formatInline(escapeHtml(lines[i].replace(/^[-*]\s+/, '')))}</li>`);
-        i++;
-      }
-      out.push(`<ul>${items.join('')}</ul>`);
-      continue;
-    }
-
-    // 普通段落：收集连续非空非特殊行
-    const buf: string[] = [line];
-    i++;
-    while (
-      i < lines.length &&
-      lines[i].trim() &&
-      !/^(#{1,6})\s+/.test(lines[i]) &&
-      !/^```/.test(lines[i]) &&
-      !/^[-*]\s+/.test(lines[i]) &&
-      !/^>\s?/.test(lines[i])
-    ) {
-      buf.push(lines[i]);
-      i++;
-    }
-    out.push(`<p>${formatInline(escapeHtml(buf.join(' ')))}</p>`);
-  }
-
-  return out.join('\n');
-}
+const escapeHtml = mdEscapeHtml;
 
 // ---------------------------------------------------------------------------
 // 发布模板元数据（GET /publish-templates 的渲染侧镜像；服务端权威源在 server routes.ts）
@@ -152,19 +67,51 @@ export interface SitePage {
 const BASE_CSS =
   'body{font-family:var(--tpl-font),system-ui,sans-serif;max-width:780px;margin:2rem auto;padding:0 1rem;line-height:1.7;color:#222}header{margin-bottom:2rem;border-bottom:1px solid #eee;padding-bottom:1rem}a{color:var(--tpl-accent)}pre{background:#f6f8fa;padding:1rem;border-radius:6px;overflow-x:auto}code{background:#f1f5f9;padding:.15em .35em;border-radius:4px;font-size:.92em}pre code{background:transparent;padding:0}blockquote{border-left:3px solid #d1d5db;padding-left:1rem;color:#6b7280;margin:1rem 0}h1,h2,h3{line-height:1.35}';
 
+// 文档级排版补充（与应用内预览 prose-doc 同能力的发布侧版本）：
+// GFM 表格（块级 + 横向滚动）、highlight.js github-light 令牌色、KaTeX/公式块、mermaid 容器
+const DOC_CSS =
+  'table{border-collapse:collapse;width:100%;display:block;overflow-x:auto;margin:1rem 0;font-size:.95em}th,td{border:1px solid #e2e8f0;padding:.45em .7em;text-align:left;vertical-align:top}th{background:#f8fafc;font-weight:600}tbody tr:nth-child(2n){background:#fafafa}del,s{color:#94a3b8}img{max-width:100%}.hljs{color:#24292e;background:transparent}.hljs-comment,.hljs-quote{color:#6a737d;font-style:italic}.hljs-keyword,.hljs-selector-tag,.hljs-meta{color:#d73a49}.hljs-literal,.hljs-number,.hljs-built_in{color:#005cc5}.hljs-string,.hljs-doctag,.hljs-addition,.hljs-regexp{color:#032f62}.hljs-title,.hljs-section,.hljs-name,.hljs-selector-id,.hljs-selector-class{color:#6f42c1;font-weight:600}.hljs-attr,.hljs-attribute,.hljs-variable,.hljs-template-variable{color:#e36209}.hljs-type,.hljs-class .hljs-title{color:#6f42c1}.hljs-deletion{color:#b31d28;background:#ffeef0}.hljs-emphasis{font-style:italic}.hljs-strong{font-weight:600}.katex{font-size:1.08em}.math-block{overflow-x:auto;margin:1rem 0}.mermaid-block{margin:1rem 0;text-align:center;overflow-x:auto}.mermaid-block svg{max-width:100%;height:auto}';
+
+/** 发布页 head 按需注入：KaTeX 官方样式（含字体，经平台同源 vendor 路由） */
+function headExtras(body: string): string {
+  return hasKatexOutput(body) ? '\n  <link rel="stylesheet" href="/assets/vendor/katex/katex.min.css" />' : '';
+}
+
+/** 发布页尾按需注入：mermaid 占位渲染 loader（同源 ESM，内网/气隙可用） */
+const MERMAID_LOADER = `
+<script type="module">
+try {
+  const m = await import('/assets/vendor/mermaid/mermaid.esm.min.mjs');
+  m.default.initialize({ startOnLoad: false, securityLevel: 'strict' });
+  document.querySelectorAll('.mermaid-block').forEach((el) => {
+    el.textContent = decodeURIComponent(el.dataset.mermaidCode ?? '');
+  });
+  await m.default.run({ querySelector: '.mermaid-block' });
+} catch (e) {
+  document.querySelectorAll('.mermaid-block').forEach((el) => {
+    el.textContent = '流程图渲染失败：mermaid 资源加载不可用';
+  });
+}
+</script>`;
+
+function tailExtras(body: string): string {
+  return hasMermaidBlock(body) ? MERMAID_LOADER : '';
+}
+
 function pageShell(title: string, body: string, opts: { accent: string; font: string; relativeRoot: string; headerHtml?: string }): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>${escapeHtml(title)}</title>
+  <title>${escapeHtml(title)}</title>${headExtras(body)}
   <style>:root{--tpl-accent:${opts.accent};--tpl-font:${opts.font}}
-  ${BASE_CSS}</style>
+  ${BASE_CSS}
+  ${DOC_CSS}</style>
 </head>
 <body>
   ${opts.headerHtml ?? `<header><a href="${opts.relativeRoot}index.html">← 首页</a></header>`}
-  <main>${body}</main>
+  <main>${body}</main>${tailExtras(body)}
 </body>
 </html>`;
 }
@@ -200,7 +147,7 @@ export function renderSite(input: {
   });
   pages.unshift({ rel: 'index.html', html: indexHtml });
 
-  pages.push({ rel: 'style.css', html: `:root{--tpl-accent:${tpl.accent};--tpl-font:${tpl.bodyFont}}\n${BASE_CSS}` });
+  pages.push({ rel: 'style.css', html: `:root{--tpl-accent:${tpl.accent};--tpl-font:${tpl.bodyFont}}\n${BASE_CSS}\n${DOC_CSS}` });
 
   const concat = pages.map((p) => p.html).join('\n');
   // 与 worker 历史产物同口径：sha256 hex（publish_jobs.contentHash 消费方依赖该格式）
@@ -245,11 +192,11 @@ export function renderDocPage(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>${escapeHtml(input.docTitle)}</title>
+  <title>${escapeHtml(input.docTitle)}</title>${headExtras(contentHtml)}
   <style>:root{--tpl-accent:${accent};--tpl-font:${tpl.bodyFont}}
   ${TPL_CHROME_CSS}</style>
 </head>
-<body data-layout="sidebar">${headerHtml}</body>
+<body data-layout="sidebar">${headerHtml}${tailExtras(contentHtml)}</body>
 </html>`;
   } else {
     headerHtml = `<header class="tpl-topbar"><span class="tpl-site">${escapeHtml(input.siteTitle)}</span></header><main><article>${contentHtml}</article></main>`;
@@ -260,16 +207,17 @@ export function renderDocPage(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>${escapeHtml(input.docTitle)}</title>
+  <title>${escapeHtml(input.docTitle)}</title>${headExtras(contentHtml)}
   <style>:root{--tpl-accent:${accent};--tpl-font:${tpl.bodyFont}}
   ${TPL_CHROME_CSS}</style>
 </head>
-<body data-layout="${escapeHtml(tpl.layout)}">${headerHtml}</body>
+<body data-layout="${escapeHtml(tpl.layout)}">${headerHtml}${tailExtras(contentHtml)}</body>
 </html>`;
 }
 
-/** 预览页 chrome：基础排版 + 模板版式（侧栏/hero/顶栏），accent 驱动高亮 */
+/** 预览页 chrome：基础排版 + 文档排版 + 模板版式（侧栏/hero/顶栏），accent 驱动高亮 */
 const TPL_CHROME_CSS = `${BASE_CSS}
+${DOC_CSS}
 body{max-width:none;margin:0;padding:0}
 .tpl-site{font-weight:700;color:var(--tpl-accent);letter-spacing:.01em}
 .tpl-topbar{display:flex;align-items:center;gap:1rem;padding:.8rem 1.5rem;border-bottom:2px solid var(--tpl-accent)}

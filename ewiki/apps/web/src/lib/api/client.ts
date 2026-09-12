@@ -119,3 +119,27 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 export function idempotencyKey(): Record<string, string> {
   return { 'Idempotency-Key': crypto.randomUUID() };
 }
+
+/** 文档全局列表分页响应（GET /api/v1/documents，服务端真分页） */
+interface DocumentsPageResp<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+}
+
+/**
+ * 循环拉取全量文档（对齐「拉全量→前端过滤」架构）：
+ * 服务端分页上限 pageSize=500，超过时按 total 逐页取齐；单页失败即抛错。
+ */
+export async function fetchAllDocuments<T>(pageSize = 500): Promise<T[]> {
+  const first = await apiFetch<DocumentsPageResp<T>>(`/api/v1/documents?page=1&pageSize=${pageSize}`);
+  const total = Number(first.total ?? first.items.length);
+  const items: T[] = [...first.items];
+  const pages = Math.ceil(total / pageSize);
+  for (let p = 2; p <= pages; p++) {
+    const next = await apiFetch<DocumentsPageResp<T>>(`/api/v1/documents?page=${p}&pageSize=${pageSize}`);
+    items.push(...next.items);
+  }
+  return items;
+}

@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search, Bell, SquarePen, Settings, X, ExternalLink, AlertTriangle,
   GitBranch, FolderOpen, Download, Users, ChevronRight, Sun, Moon, Monitor,
-  Database, FileText,
+  FileText,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api/client';
 import { useTheme } from '../../theme/ThemeProvider';
@@ -22,7 +22,7 @@ export interface NotificationItem {
 }
 
 const routeLabels: Record<string, string> = {
-  dashboard: '仪表盘', library: '文档库', sources: '数据源', themes: '主题模板', settings: '设置', team: '团队', notifications: '通知中心',
+  dashboard: '仪表盘', library: '文档库', connections: '存储源', themes: '主题模板', settings: '设置', team: '团队', notifications: '通知中心',
 };
 
 function Breadcrumb(): React.ReactElement {
@@ -173,7 +173,7 @@ function QuickCreateDropdown({ onClose }: { onClose: () => void }): React.ReactE
   const options = [
     { icon: FileText,  label: '新建文档',   desc: '在当前项目中创建 Markdown 文档', to: '/library' },
     { icon: FolderOpen, label: '新建文档库', desc: '创建一个新的知识库项目',        to: '/library' },
-    { icon: Database,  label: '添加数据源', desc: '从 Git / 本地 / 网页连接源',     to: '/sources' },
+    { icon: GitBranch, label: '新建 Git 文档库', desc: '关联 GitLab / Gitea 仓库', to: '/projects/new' },
     { icon: Users,     label: '邀请成员',   desc: '添加协作者到你的团队',          to: '/team' },
   ];
   return (

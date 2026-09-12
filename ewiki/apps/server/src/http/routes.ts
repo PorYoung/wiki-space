@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { SourceType } from '@ewiki/shared';
-import { encryptJson } from '@ewiki/db';
+import { createHash } from 'node:crypto';
+import { CreateProjectSchema, UpdateProjectSchema } from '@ewiki/shared';
 import { renderDocPage } from '@ewiki/render';
 import type { AppDeps } from './app.js';
 import {
@@ -27,10 +27,24 @@ import {
   publishJobs,
   publishSites,
   refreshTokens,
-  sources,
+  storageConnections,
+  syncJobs,
   userPrefs,
   users,
 } from '../db/schema.js';
+import {
+  commitAndPush,
+  ensureRepo,
+  ensureWorkdir,
+  findRepo,
+  GitHostError,
+  seedWorkdirFiles,
+  validateConnection,
+  type ConnLike,
+  type HostRepo,
+} from '@ewiki/git';
+import { getLibraryTemplate } from '../lib/library-templates.js';
+import { getNasRoot, getReposRoot, mirrorDoc } from '../lib/nas.js';
 import { registerStarterRoutes } from './routes-starter.js';
 import { docStorageEffects, registerPlatformRoutes } from './routes-platform.js';
 import { denyIfNot, projectAccess } from '../lib/permissions.js';
@@ -238,7 +252,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   const projectsRoute = new Hono();
   projectsRoute.get('/', async (c) => {
     // 可见性过滤：private 仅成员/管理员可见；team/public 任何已登录用户可见
-    // （与 GET /:id 的 projectAccess、sources 列表的 scoped 过滤保持同一规则）
+    // （与 GET /:id 的 projectAccess、文档列表的 scoped 过滤保持同一规则）
     const uid = c.get('userId') as string;
     const isAdmin = c.get('globalRole') === 'admin';
     const rows = await db
@@ -259,32 +273,339 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
 
   projectsRoute.post('/', async (c) => {
     const userId = c.get('userId') as string;
-    const body = (await c.req.json()) as {
-      name?: string;
-      description?: string;
-      visibility?: 'private' | 'team' | 'public';
-      template?: string;
-    };
-    if (!body.name) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
+    const raw = await c.req.json().catch(() => null);
+    const parsed = CreateProjectSchema.safeParse(raw);
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: 'VALIDATION_FAILED',
+          message: 'VALIDATION_FAILED',
+          fields: parsed.error.flatten().fieldErrors,
+        },
+        400,
+      );
+    }
+    const body = parsed.data;
 
+    // 模板解析：富模板（带正文）优先；starter-pack 骨架 id 回退为占位文档；空/未知不预置
+    const tplId = body.template && body.template !== 'empty' ? body.template : null;
+    const richTpl = tplId ? getLibraryTemplate(tplId) : null;
+    let tplDocs: Array<{ path: string; content: string }> = [];
+    let tplDescription: string | null = null;
+    if (richTpl) {
+      tplDocs = richTpl.docs;
+      tplDescription = richTpl.description;
+    } else if (tplId) {
+      const { STARTER_PACKS } = await import('./routes-starter.js');
+      const pack = STARTER_PACKS.find((p) => p.id === tplId);
+      if (pack) {
+        tplDocs = pack.tree.map((p) => ({
+          path: p,
+          content: `# ${p.replace(/\.md$/, '').split('/').pop()}\n\n> 模板「${pack.name}」占位文档，请补充正文。\n`,
+        }));
+        tplDescription = pack.description;
+      }
+    }
+
+    const storage = body.storage ?? { kind: 'local' as const };
+    const [owner] = await db
+      .select({ id: users.id, name: users.name, email: users.email })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!owner) throw new HTTPException(401, { message: 'UNAUTHENTICATED' });
+
+    // ---- Git 后端：全部校验前置，任一失败 MUST NOT 创建项目行 ----
+    let gitProvision:
+      | {
+          conn: ConnLike;
+          connectionId: string;
+          repo: HostRepo;
+          created: boolean;
+          login: string;
+          branch: string;
+        }
+      | null = null;
+    if (storage.kind === 'git') {
+      const [connRow] = await db
+        .select()
+        .from(storageConnections)
+        .where(eq(storageConnections.id, storage.connectionId))
+        .limit(1);
+      // 不存在或不属于当前用户统一 403（不暴露连接存在性）
+      if (!connRow || connRow.ownerId !== userId) {
+        throw new HTTPException(403, { message: 'FORBIDDEN: 存储源不存在或不属于当前用户' });
+      }
+      const conn: ConnLike = {
+        kind: connRow.kind,
+        baseUrl: connRow.baseUrl,
+        tokenEncrypted: connRow.tokenEncrypted,
+        defaultNamespace: connRow.defaultNamespace,
+      };
+      const checked = await validateConnection(conn);
+      if (!checked.ok || !checked.login) {
+        throw new HTTPException(400, { message: `CONNECTION_INVALID: ${checked.message ?? '连接校验失败'}` });
+      }
+      try {
+        if (storage.autoInit === false) {
+          const found = await findRepo(conn, storage.repoName, checked.login);
+          if (!found.found || !found.repo) {
+            throw new HTTPException(400, { message: 'REPO_NOT_FOUND: 仓库不存在，且未启用自动初始化' });
+          }
+          gitProvision = {
+            conn,
+            connectionId: connRow.id,
+            repo: found.repo,
+            created: false,
+            login: checked.login,
+            branch: storage.defaultBranch || found.repo.defaultBranch || 'main',
+          };
+        } else {
+          const ensured = await ensureRepo(conn, storage.repoName, checked.login, { private: true });
+          gitProvision = {
+            conn,
+            connectionId: connRow.id,
+            repo: ensured.repo,
+            created: ensured.created,
+            login: checked.login,
+            branch: storage.defaultBranch || ensured.repo.defaultBranch || 'main',
+          };
+        }
+      } catch (e) {
+        if (e instanceof HTTPException) throw e;
+        if (e instanceof GitHostError) {
+          throw new HTTPException(e.status === 401 || e.status === 403 ? 400 : e.status === 409 ? 409 : 400, {
+            message: `${e.code}: ${e.message}`,
+          });
+        }
+        throw new HTTPException(400, { message: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    // ---- 校验通过，创建项目行（9 个存储列一次性写入） ----
     const [project] = await db
       .insert(projects)
       .values({
         name: body.name,
-        description: body.description ?? null,
+        description: body.description ?? tplDescription ?? null,
+        color: body.color ?? null,
         visibility: body.visibility ?? 'private',
-        template: body.template ?? null,
+        template: tplId,
         ownerId: userId,
+        storageKind: gitProvision ? 'git' : 'local',
+        storageConnectionId: gitProvision ? gitProvision.connectionId : null,
+        storageConfig: gitProvision
+          ? {
+              url: gitProvision.repo.cloneUrl,
+              host: gitProvision.conn.baseUrl,
+              kind: gitProvision.conn.kind,
+              namespace: gitProvision.login,
+              repoName: storage.kind === 'git' ? storage.repoName : null,
+              autoCommit: true,
+            }
+          : storage.kind === 'local' && storage.path
+            ? { path: storage.path }
+            : {},
+        defaultBranch: gitProvision ? gitProvision.branch : null,
+        storageStatus: 'connected',
       })
       .returning();
+
     await db.insert(projectMembers).values({ projectId: project.id, userId, role: 'owner' });
+
+    // 模板文档：平台侧预置（documents + NAS 镜像）
+    const docsCount = tplDocs.length;
+    for (const doc of tplDocs) {
+      await db.insert(documents).values({
+        projectId: project.id,
+        path: doc.path,
+        title: doc.content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? doc.path.replace(/\.md$/, ''),
+        content: doc.content,
+        contentHash: createHash('sha256').update(doc.content).digest('hex'),
+        status: 'untracked',
+        wordCount: [...doc.content.matchAll(/[\p{L}\p{N}]/gu)].length,
+        updatedBy: userId,
+      });
+    }
+    try {
+      const nasRoot = await getNasRoot(config);
+      await mirrorDoc(nasRoot, { username: owner.name, projectName: project.name, projectId: project.id }, '__占位__.md', null).catch(
+        () => undefined,
+      );
+      for (const doc of tplDocs) {
+        await mirrorDoc(nasRoot, { username: owner.name, projectName: project.name, projectId: project.id }, doc.path, doc.content);
+      }
+    } catch {
+      // NAS 不可写不阻断建库；系统管理页可查存储告警
+    }
+    await db.insert(activities).values({
+      projectId: project.id,
+      actorId: userId,
+      verb: 'create',
+      targetType: 'project',
+      targetId: project.id,
+      targetTitle: project.name,
+      meta: { storageKind: project.storageKind },
+    });
     await db.insert(auditLogs).values({
       actorId: userId,
       action: 'project.create',
       resourceType: 'project',
       resourceId: project.id,
+      meta: { storageKind: project.storageKind, template: tplId },
     });
-    return c.json(project, 201);
+
+    // ---- Git 后端：克隆工作副本；空库首次提交（模板或 README），已有内容库不覆盖远端 ----
+    let git: { repo: string; created: boolean; committed: boolean; commitHash?: string; message?: string } | undefined;
+    if (gitProvision) {
+      try {
+        const { workdir, hadCommits } = await ensureWorkdir(
+          getReposRoot(config),
+          project.id,
+          gitProvision.conn,
+          gitProvision.repo.cloneUrl,
+          gitProvision.login,
+          gitProvision.branch,
+        );
+        if (!hadCommits) {
+          const seedFiles =
+            tplDocs.length > 0
+              ? tplDocs
+              : [{ path: 'README.md', content: `# ${project.name}\n\n由 eWiki 平台创建。\n` }];
+          await seedWorkdirFiles(workdir, seedFiles);
+          const pushed = await commitAndPush(
+            workdir,
+            [],
+            { name: owner.name, email: owner.email },
+            `chore: 初始化文档库（${tplDocs.length} 篇模板文档）`,
+          );
+          git = {
+            repo: gitProvision.repo.fullPath,
+            created: gitProvision.created,
+            committed: pushed.ok && pushed.pushed,
+            commitHash: pushed.commitHash,
+            message: pushed.ok ? undefined : pushed.error,
+          };
+          if (pushed.ok) {
+            await db
+              .update(projects)
+              .set({ storageStatus: 'synced', lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
+              .where(eq(projects.id, project.id));
+            await db.insert(syncJobs).values({
+              projectId: project.id,
+              trigger: 'push',
+              commitHash: pushed.commitHash ?? null,
+              status: 'succeeded',
+              stats: { pushed: pushed.pushed, init: true, docs: seedFiles.length },
+              finishedAt: new Date(),
+            });
+          } else {
+            await db
+              .update(projects)
+              .set({ storageStatus: 'error', lastError: pushed.error?.slice(0, 500) ?? 'push failed' })
+              .where(eq(projects.id, project.id));
+            await db.insert(syncJobs).values({
+              projectId: project.id,
+              trigger: 'push',
+              commitHash: pushed.commitHash ?? null,
+              status: 'failed',
+              error: pushed.error?.slice(0, 500) ?? null,
+              finishedAt: new Date(),
+            });
+          }
+        } else {
+          git = { repo: gitProvision.repo.fullPath, created: gitProvision.created, committed: false, message: '仓库已有内容，平台侧预置模板不覆盖远端' };
+        }
+      } catch (e) {
+        // 连接/仓库校验已全部前置；此处仅克隆/推送失败：项目保留并标记 error，用户可稍后手动同步
+        const msg = e instanceof Error ? e.message : String(e);
+        await db
+          .update(projects)
+          .set({ storageStatus: 'error', lastError: msg.slice(0, 500), updatedAt: new Date() })
+          .where(eq(projects.id, project.id));
+        await db.insert(auditLogs).values({
+          actorId: userId,
+          action: 'git.provision_failed',
+          resourceType: 'project',
+          resourceId: project.id,
+          meta: { error: msg.slice(0, 300) },
+        });
+        git = { repo: gitProvision.repo.fullPath, created: gitProvision.created, committed: false, message: msg.slice(0, 200) };
+      }
+    }
+
+    return c.json({ project, docs: docsCount, git }, 201);
+  });
+
+  // ---- 手动同步：POST /api/v1/projects/:id/sync（仅 Git 后端） ----
+  // 必须在 app.route() 挂载之前注册在 projectsRoute 上（Hono 只合并挂载时刻已有的路由）
+  projectsRoute.post('/:id/sync', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const [project] = await db
+      .select({
+        id: projects.id,
+        storageKind: projects.storageKind,
+        storageConnectionId: projects.storageConnectionId,
+      })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+    if (project.storageKind !== 'git' || !project.storageConnectionId) {
+      throw new HTTPException(400, { message: 'LOCAL_BACKEND_NO_SYNC: 本地存储后端无需同步' });
+    }
+
+    // 去重判定不能依赖 projects.storage_status：worker 提交与本请求读状态存在竞态，
+    // 上一作业可能正处于瞬态 syncing。pg-boss 对 singletonMinutes 的节流机制是：
+    // pgboss.job 上存在部分唯一索引 (name, singleton_on, singleton_key)
+    //   WHERE state <> 'cancelled' AND singleton_on IS NOT NULL，
+    // singleton_on 为按分钟对齐的 epoch 时间桶，重复 send 会被 ON CONFLICT DO NOTHING 静默丢弃。
+    // 因此这里按同一时间桶复算其去重条件（completed 作业默认滞留 12 小时才归档，无需查 archive）。
+    const singletonKey = `sync:${projectId}:manual`;
+    const throttleRows = await db.execute<{ throttle_hit: number }>(sql`
+      select exists (
+        select 1
+        from pgboss.job
+        where name = 'sync'
+          and singleton_key = ${singletonKey}
+          and state <> 'cancelled'
+          and singleton_on is not null
+          and singleton_on = 'epoch'::timestamp
+            + interval '1 second' * (60 * floor(extract(epoch from now()) / 60))
+      )::int as throttle_hit
+    `);
+    const deduped = (throttleRows[0]?.throttle_hit ?? 0) === 1;
+    await boss.send('sync', { projectId, trigger: 'manual' }, { singletonKey, singletonMinutes: 1 });
+    // 仅在作业真正入队时才翻转 syncing；去重请求保持项目当前状态，避免永久卡在 syncing
+    if (!deduped) {
+      const [cur] = await db
+        .select({ storageStatus: projects.storageStatus })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      if (cur?.storageStatus !== 'syncing') {
+        await db
+          .update(projects)
+          .set({ storageStatus: 'syncing', lastError: null, updatedAt: new Date() })
+          .where(eq(projects.id, projectId));
+      }
+    }
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.sync_requested',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { deduped },
+    });
+    return c.json(
+      { ok: true, projectId, status: deduped ? 'deduped' : 'syncing', deduped },
+      202,
+    );
   });
 
   projectsRoute.get('/:id', async (c) => {
@@ -302,144 +623,6 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   });
 
   app.route('/api/v1/projects', projectsRoute);
-
-  // ---- 数据源（S1 创建 / S2 列表 / S3 手动同步 / 更新 / 删除） ----
-  const sourcesRoute = new Hono();
-  sourcesRoute.get('/', async (c) => {
-    // 数据源列表按项目可见性过滤：私有项目仅成员/管理员可见
-    const uid0 = c.get('userId') as string;
-    const scoped = c.get('globalRole') === 'admin'
-      ? undefined
-      : sql`${sources.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${uid0})))`;
-    const rows = await db
-      .select({
-        id: sources.id,
-        projectId: sources.projectId,
-        type: sources.type,
-        name: sources.name,
-        configPublic: sources.configPublic,
-        defaultBranch: sources.defaultBranch,
-        autoSync: sources.autoSync,
-        intervalSeconds: sources.intervalSeconds,
-        status: sources.status,
-        lastSyncedAt: sources.lastSyncedAt,
-        lastError: sources.lastError,
-        projectName: projects.name,
-      })
-      .from(sources)
-      .leftJoin(projects, eq(sources.projectId, projects.id))
-      .where(scoped ? and(isNull(sources.deletedAt), scoped) : isNull(sources.deletedAt))
-      .orderBy(desc(sources.createdAt))
-      .limit(200);
-    return c.json({ items: rows, page: 1, pageSize: 200, total: rows.length });
-  });
-
-  sourcesRoute.post('/', async (c) => {
-    const userId = c.get('userId') as string;
-    const body = (await c.req.json()) as {
-      projectId?: string;
-      type?: string;
-      name?: string;
-      configPublic?: Record<string, unknown>;
-      configSecret?: Record<string, unknown>;
-      defaultBranch?: string | null;
-    };
-    if (!body.projectId || !body.name) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
-    const parsed = SourceType.safeParse(body.type);
-    if (!parsed.success) throw new HTTPException(400, { message: 'VALIDATION_FAILED' });
-    {
-      const access = await projectAccess(body.projectId, userId, c.get('globalRole') as string);
-      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
-    }
-
-    const [source] = await db
-      .insert(sources)
-      .values({
-        projectId: body.projectId,
-        type: parsed.data,
-        name: body.name,
-        configPublic: body.configPublic ?? {},
-        configEncrypted:
-          body.configSecret && Object.keys(body.configSecret).length > 0
-            ? encryptJson(body.configSecret)
-            : null,
-        defaultBranch: body.defaultBranch ?? null,
-      })
-      .returning();
-    await db.insert(activities).values({
-      projectId: body.projectId,
-      actorId: userId,
-      verb: 'create',
-      targetType: 'source',
-      targetId: source.id,
-      targetTitle: source.name,
-    });
-    return c.json(source, 201);
-  });
-
-  sourcesRoute.post('/:id/sync', async (c) => {
-    const id = c.req.param('id');
-    const [source] = await db
-      .select()
-      .from(sources)
-      .where(and(eq(sources.id, id), isNull(sources.deletedAt)))
-      .limit(1);
-    if (!source) throw new HTTPException(404, { message: 'NOT_FOUND' });
-    {
-      const access = await projectAccess(source.projectId, c.get('userId') as string, c.get('globalRole') as string);
-      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
-    }
-
-    // 手动同步幂等：同分钟去重（pg-boss v10 id 必须 UUID，幂等用 singletonKey）
-    const key = `sync:${id}:manual`;
-    await boss.send('sync', { sourceId: id, trigger: 'manual' }, { singletonKey: key, singletonMinutes: 1 });
-    await db.update(sources).set({ status: 'syncing', lastError: null }).where(eq(sources.id, id));
-    return c.json({ ok: true, sourceId: id, status: 'syncing' });
-  });
-
-  sourcesRoute.patch('/:id', async (c) => {
-    const body = (await c.req.json()) as {
-      name?: string;
-      autoSync?: boolean;
-      intervalSeconds?: number;
-      defaultBranch?: string | null;
-      configSecret?: Record<string, unknown>;
-    };
-    const [existing] = await db.select().from(sources).where(and(eq(sources.id, c.req.param('id')!), isNull(sources.deletedAt))).limit(1);
-    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
-    {
-      const access = await projectAccess(existing.projectId, c.get('userId') as string, c.get('globalRole') as string);
-      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改数据源');
-    }
-    const set: Record<string, unknown> = { updatedAt: new Date() };
-    if (body.name !== undefined) set.name = body.name;
-    if (body.autoSync !== undefined) set.autoSync = body.autoSync;
-    if (body.intervalSeconds !== undefined) set.intervalSeconds = body.intervalSeconds;
-    if (body.defaultBranch !== undefined) set.defaultBranch = body.defaultBranch;
-    if (body.configSecret && Object.keys(body.configSecret).length > 0)
-      set.configEncrypted = encryptJson(body.configSecret);
-
-    const [updated] = await db.update(sources).set(set).where(eq(sources.id, c.req.param('id'))).returning();
-    return c.json(updated);
-  });
-
-  sourcesRoute.delete('/:id', async (c) => {
-    const [existing] = await db.select().from(sources).where(and(eq(sources.id, c.req.param('id')!), isNull(sources.deletedAt))).limit(1);
-    if (!existing) throw new HTTPException(404, { message: 'NOT_FOUND' });
-    {
-      const access = await projectAccess(existing.projectId, c.get('userId') as string, c.get('globalRole') as string);
-      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可删除数据源');
-    }
-    const [deleted] = await db
-      .update(sources)
-      .set({ deletedAt: new Date() })
-      .where(eq(sources.id, c.req.param('id')))
-      .returning();
-    void deleted;
-    return c.json({ ok: true });
-  });
-
-  app.route('/api/v1/sources', sourcesRoute);
 
   // ---- 动态（N1 骨架） ----
   // 支持 ?projectId= 过滤：项目动态页只应显示本项目动态（前端 ActivityPage 已在传参，PLAN 5.4.1）
@@ -644,10 +827,12 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json({ id: updated.id, role });
   });
 
-  // ---- 文档全局列表（D1 + F04 预警数据源） ----
+  // ---- 文档全局列表（D1 + F04 预警数据源；真服务端分页：page/pageSize/total） ----
   app.get('/api/v1/documents', async (c) => {
     const projectId = c.req.query('projectId');
     const status = c.req.query('status');
+    const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1') || 1));
+    const pageSize = Math.min(500, Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '500') || 500)));
     const conditions = [isNull(documents.deletedAt)];
     if (projectId) {
       const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
@@ -659,11 +844,15 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       conditions.push(sql`${documents.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${uid})))`);
     }
     if (status) conditions.push(eq(documents.status, status));
+    const where = and(...conditions);
+    const [totalRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(documents)
+      .where(where);
     const rows = await db
       .select({
         id: documents.id,
         projectId: documents.projectId,
-        sourceId: documents.sourceId,
         path: documents.path,
         title: documents.title,
         status: documents.status,
@@ -677,11 +866,12 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         content: documents.content,
       })
       .from(documents)
-      .where(and(...conditions))
+      .where(where)
       .orderBy(desc(documents.updatedAt))
-      .limit(500);
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
     const items = rows.map(({ content, ...row }) => ({ ...row, summary: documentSummary(content) }));
-    return c.json({ items, page: 1, pageSize: 500, total: items.length });
+    return c.json({ items, page, pageSize, total: Number(totalRow?.count ?? 0) });
   });
 
   // ---- 项目详情增强（P3 扩展：附带统计） ----
@@ -704,29 +894,16 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .select({ count: sql<number>`count(*)` })
       .from(documents)
       .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
-    const [sourceCountRow] = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(sources)
-      .where(and(eq(sources.projectId, projectId), isNull(sources.deletedAt)));
     const [memberCountRow] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectMembers)
       .where(eq(projectMembers.projectId, projectId));
 
-    // sourceType 动态推导（问题 1 修复）：projects 表无 source_type 字段，
-    // 旧实现把 project 行原样下发导致前端恒显示「未知」。
-    // 取该项目第一个未删除数据源的 type（git | local | web | database），无数据源时为 null。
-    const [firstSource] = await db
-      .select({ type: sources.type })
-      .from(sources)
-      .where(and(eq(sources.projectId, projectId), isNull(sources.deletedAt)))
-      .limit(1);
-
+    // 存储后端类型直接取项目行内嵌的 storage_kind（git | local）
     return c.json({
       ...project,
-      sourceType: firstSource?.type ?? null,
+      backendKind: project.storageKind,
       docCount: Number(docCountRow?.count ?? 0),
-      sourceCount: Number(sourceCountRow?.count ?? 0),
       memberCount: Number(memberCountRow?.count ?? 0),
     });
   });
@@ -748,7 +925,6 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .select({
         id: documents.id,
         projectId: documents.projectId,
-        sourceId: documents.sourceId,
         path: documents.path,
         title: documents.title,
         status: documents.status,
@@ -774,7 +950,6 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .select({
         id: documents.id,
         projectId: documents.projectId,
-        sourceId: documents.sourceId,
         path: documents.path,
         title: documents.title,
         content: documents.content,
@@ -995,7 +1170,6 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .insert(documents)
       .values({
         projectId,
-        sourceId: null,
         path: body.path,
         title,
         content: content || null,
@@ -1091,12 +1265,20 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   // 项目成员等后补路由同理均直接挂 app（见下）。
   app.patch('/api/v1/projects/:id', async (c) => {
     const projectId = c.req.param('id')!;
-    const body = (await c.req.json()) as Partial<{
-      name: string;
-      description: string | null;
-      visibility: 'private' | 'team' | 'public';
-      color: string | null;
-    }>;
+    const raw = await c.req.json().catch(() => null);
+    const parsed = UpdateProjectSchema.safeParse(raw);
+    // .strict()：storageKind/storageConnectionId/storageConfig 等后端更换字段一律拒绝（不可通过 PATCH 更换后端）
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: 'VALIDATION_FAILED',
+          message: 'VALIDATION_FAILED',
+          fields: parsed.error.flatten().fieldErrors,
+        },
+        400,
+      );
+    }
+    const body = parsed.data;
 
     // 越权修复：此前 PATCH 无任何校验，任何登录用户（含 team 可见性的隐式读者）可改任意项目
     {
@@ -1107,11 +1289,18 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const set: Record<string, unknown> = { updatedAt: new Date() };
     if (body.name !== undefined && body.name.trim()) set.name = body.name.trim();
     if (body.description !== undefined) set.description = body.description;
-    if (body.visibility !== undefined) set.visibility = body.visibility;
     if (body.color !== undefined) set.color = body.color;
+    if (body.visibility !== undefined) set.visibility = body.visibility;
+    if (body.autoSync !== undefined) set.autoSync = body.autoSync;
+    if (body.intervalSeconds !== undefined) set.intervalSeconds = body.intervalSeconds;
+    if (body.defaultBranch !== undefined) set.defaultBranch = body.defaultBranch;
 
     if (Object.keys(set).length === 1) {
-      const [current] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+      const [current] = await db
+        .select()
+        .from(projects)
+        .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+        .limit(1);
       if (!current) throw new HTTPException(404, { message: 'NOT_FOUND' });
       return c.json(current);
     }
@@ -1135,8 +1324,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   });
 
   // ---- DELETE projects/:id（PLAN 5.2.1：ProjectLayout 更多菜单 / 设置危险区删除项目） ----
-  // 软删（projects.deletedAt）：与 sources/documents 一致，列表与详情查询均带 isNull(deletedAt)
-  // 过滤，删除后项目自然从全站消失；关联文档/数据源不级联物理删除，保留恢复可能。
+  // 软删（projects.deletedAt）：与 documents 一致，列表与详情查询均带 isNull(deletedAt)
+  // 过滤，删除后项目自然从全站消失；关联文档不级联物理删除，保留恢复可能。
   // 同样必须直接注册在 app 上（app.route() 挂载时序陷阱，见上方 PATCH 注释）。
   app.delete('/api/v1/projects/:id', async (c) => {
     const projectId = c.req.param('id')!;
@@ -1607,7 +1796,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json({ ok: true, siteId, queued: true }, 202);
   });
 
-  registerStarterRoutes(app, deps);
+  registerStarterRoutes(app);
 
   // ---- 发布预览（EXT-PLATFORM Step1 / ADR-P2）：与 worker 发布共用 @ewiki/render ----
   // 同步渲染、不落盘、无缓存（原型级文档量可接受）。docId 缺省渲染项目索引页。

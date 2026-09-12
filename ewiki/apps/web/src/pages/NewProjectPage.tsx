@@ -21,7 +21,6 @@ interface ConnectionItem {
 }
 interface CreateResult {
   project: { id: string; name: string };
-  storageType: 'cloud' | 'git';
   docs: number;
   git?: { created: boolean; repo: string; branch: string; webUrl: string; message: string };
 }
@@ -52,15 +51,17 @@ export function NewProjectPage(): React.ReactElement {
 
   const createMutation = useMutation({
     mutationFn: () =>
-      apiFetch<CreateResult>('/api/v1/projects/with-storage', {
+      apiFetch<CreateResult>('/api/v1/projects', {
         method: 'POST',
         body: JSON.stringify({
           name,
           description: description || undefined,
           visibility,
           template,
-          storageType,
-          git: storageType === 'git' ? { connectionId, repoName, autoInit } : undefined,
+          storage:
+            storageType === 'git'
+              ? { kind: 'git', connectionId, repoName, autoInit }
+              : { kind: 'local' },
         }),
       }),
     onSuccess: (res) => {
@@ -128,9 +129,9 @@ export function NewProjectPage(): React.ReactElement {
               <Cloud size={20} />
             </div>
             <div className="flex-1">
-              <div className="font-semibold">云文档（平台分配存储）</div>
+              <div className="font-semibold">本地存储（平台分配目录）</div>
               <div className="text-xs" style={{ color: 'var(--text-muted, #64748b)' }}>
-                文档保存在服务器配置的存储目录（模拟 NAS 盘），按 用户 / 文档库 分目录落盘
+                文档保存在服务器配置的存储目录（模拟 NAS 盘），按文档库分目录落盘
               </div>
             </div>
             {storageType === 'cloud' && <CheckCircle2 size={18} className="text-primary-600" />}
@@ -155,7 +156,7 @@ export function NewProjectPage(): React.ReactElement {
               <div>
                 <label className="mb-1.5 block text-sm font-medium">连接配置 *</label>
                 {connections.length === 0 ? (
-                  <p className="text-xs text-danger">还没有连接配置，请先到「存储配置」添加 GitLab 连接。</p>
+                  <p className="text-xs text-danger">还没有存储源，请先到「存储源」页添加 GitLab / Gitea 连接。</p>
                 ) : (
                   <select className="input" value={connectionId} onChange={(e) => setConnectionId(e.target.value)}>
                     <option value="">请选择…</option>
@@ -204,7 +205,7 @@ export function NewProjectPage(): React.ReactElement {
           <CheckCircle2 size={40} className="mx-auto mb-3 text-emerald-500" />
           <div className="text-lg font-bold">文档库「{created.project.name}」创建成功</div>
           <div className="mt-2 text-sm" style={{ color: 'var(--text-muted, #64748b)' }}>
-            存储源：{created.storageType === 'cloud' ? '云文档（平台存储目录）' : 'Git 仓库'}
+            存储源：{created.git ? 'Git 仓库' : '本地存储（平台目录）'}
             {created.docs > 0 && ` · 已预置 ${created.docs} 篇模板文档`}
           </div>
           {created.git && (

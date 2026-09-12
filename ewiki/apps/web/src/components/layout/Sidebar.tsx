@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  LayoutDashboard, FolderKanban, Palette, Database, Settings,
-  ChevronUp, User as UserIcon, LogOut, BookOpen, Bell, Users, HardDrive, ShieldCheck,
+  LayoutDashboard, FolderKanban, Palette,
+  ChevronUp, User as UserIcon, LogOut, BookOpen, Bell, Users, HardDrive, ShieldCheck, Settings,
 } from 'lucide-react';
 import { apiFetch, tokenStore } from '../../lib/api/client';
 import type { User as EwikiUser } from '@ewiki/shared';
@@ -15,16 +15,14 @@ const mainNav = [
   { path: '/library', label: '文档库', icon: FolderKanban },
   { path: '/themes', label: '主题管理', icon: Palette },
 ];
-// 「配置」组：原型侧栏仅含数据源/设置，团队入口原在 TopBar 面包屑与快捷操作中；
-// 按对齐计划 3.6g 补入侧栏（顺序参照原型 TopBar.jsx:29-32 面包屑：数据源 → 团队 → 设置）
+// 「配置」组：存储源（Git 连接等用户级凭据）/ 团队 / 设置
 const secondaryNav = [
-  { path: '/connections', label: '存储配置', icon: HardDrive },
-  { path: '/sources', label: '数据源', icon: Database },
+  { path: '/connections', label: '存储源', icon: HardDrive },
   { path: '/team', label: '团队', icon: Users },
   { path: '/settings', label: '设置', icon: Settings },
 ];
 
-function NavItem({ to, label, icon: Icon }: { to: string; label: string; icon: typeof Database }): React.ReactElement {
+function NavItem({ to, label, icon: Icon }: { to: string; label: string; icon: typeof HardDrive }): React.ReactElement {
   return (
     <NavLink to={to} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
       <Icon size={18} className="nav-icon" />

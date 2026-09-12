@@ -7,6 +7,8 @@ import {
 } from '@tanstack/react-query';
 import MDEditor from '@uiw/react-md-editor';
 import { useTheme } from '../theme/ThemeProvider';
+import { markdownToHtml, slugify } from '../lib/markdown';
+import { useMermaidRender } from '../lib/use-mermaid-render';
 import { EwikiRealtime } from '../lib/ws/client';
 import {
   Activity,
@@ -61,7 +63,6 @@ import { useShowToast } from '../components/Toast';
 interface DocumentListItem {
   id: string;
   projectId: string;
-  sourceId: string | null;
   path: string;
   title: string | null;
   status: 'untracked' | 'synced' | 'modified' | 'conflict';
@@ -157,16 +158,7 @@ function avatarColor(name: string | null | undefined): string {
   return palette[Math.abs(h) % palette.length]!;
 }
 
-/** Minimal markdown → HTML（prose-doc 子集） */
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\u4e00-\u9fa5\s-]/g, '')
-    .replace(/[\s_]+/g, '-')
-    .replace(/-+/g, '-');
-}
-
+/** 文档预览渲染：markdown-it（表格/高亮/KaTeX/mermaid）统一入口见 lib/markdown.ts；TOC 提取仍走源文正则 */
 function extractToc(md: string | null): Array<{ level: number; text: string; id: string }> {
   if (!md) return [];
   const lines = md.split('\n');
@@ -180,74 +172,6 @@ function extractToc(md: string | null): Array<{ level: number; text: string; id:
     else if (h1) toc.push({ level: 1, text: h1[1]!.trim(), id: slugify(h1[1]!) });
   }
   return toc;
-}
-
-function inlineMd(text: string): string {
-  return text
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>');
-}
-
-function markdownToHtml(md: string | null): string {
-  if (!md) return '';
-  let src = md.replace(/\r\n/g, '\n');
-
-  // code fence —— 先抽成占位符隔离处理：围栏内含多行，若直接替换成 <pre>，
-  // 后续的标题/段落正则仍会命中围栏内部行（"# 注释"被转 <h1>、命令行被包 <p>），
-  // 漏出 pre 的深色文字落在终端深底上几乎不可读；占位符占整行、不匹配任何行级语法，
-  // 全部转换完成后再还原（与 worker 侧逐行状态机实现思路一致）
-  const fences: string[] = [];
-  src = src.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, _lang, code: string) => {
-    const escaped = code.trim().replace(/[<>]/g, (c) => (c === '<' ? '&lt;' : '&gt;'));
-    fences.push(`<pre><code>${escaped}</code></pre>`);
-    return `\n@@FENCE_${fences.length - 1}@@\n`;
-  });
-
-  // blockquote
-  src = src.replace(/^(>\s*.+)$/gm, (_m, line: string) => `<blockquote>${inlineMd(line.replace(/^>\s*/, ''))}</blockquote>`);
-
-  // headings
-  src = src.replace(/^###\s+(.+)$/gm, (_m, t: string) => `<h3 id="${slugify(t)}">${t}</h3>`);
-  src = src.replace(/^##\s+(.+)$/gm, (_m, t: string) => `<h2 id="${slugify(t)}">${t}</h2>`);
-  src = src.replace(/^#\s+(.+)$/gm, (_m, t: string) => `<h1 id="${slugify(t)}">${t}</h1>`);
-  src = src.replace(/^---+$/gm, '<hr/>');
-
-  // ul
-  src = src.replace(/((?:^[-*+]\s+.+\n?)+)/gm, (block) => {
-    const items = block
-      .split('\n')
-      .filter((l) => /^[-*+]\s+/.test(l))
-      .map((l) => `<li>${inlineMd(l.replace(/^[-*+]\s+/, ''))}</li>`)
-      .join('');
-    return `<ul>${items}</ul>`;
-  });
-
-  // ol
-  src = src.replace(/((?:^\d+\.\s+.+\n?)+)/gm, (block) => {
-    const items = block
-      .split('\n')
-      .filter((l) => /^\d+\.\s+/.test(l))
-      .map((l) => `<li>${inlineMd(l.replace(/^\d+\.\s+/, ''))}</li>`)
-      .join('');
-    return `<ol>${items}</ol>`;
-  });
-
-  // paragraphs — skip lines already wrapped（含代码围栏占位行：不匹配任何行级语法，原样保留）
-  src = src
-    .split('\n')
-    .map((line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return '';
-      if (/^<(h1|h2|h3|ul|ol|li|pre|blockquote|hr)/.test(trimmed)) return line;
-      if (/^@@FENCE_\d+@@$/.test(trimmed)) return line;
-      return `<p>${inlineMd(trimmed)}</p>`;
-    })
-    .join('');
-
-  // 还原代码围栏
-  return src.replace(/@@FENCE_(\d+)@@/g, (_m, i: string) => fences[Number(i)] ?? '');
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +311,7 @@ function TreeSidebar({
   activeDocId: string | null;
   onSelect: (d: DocumentListItem) => void;
   onBack: () => void;
-  project: { sourceType?: string | null } | null;
+  project: { backendKind?: 'git' | 'local' | null } | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
   onNewDoc: () => void;
@@ -442,7 +366,7 @@ function TreeSidebar({
   };
 
   const modifiedCount = docs.filter((d) => d.status === 'modified' || d.status === 'conflict').length;
-  const isGitSource = project?.sourceType === 'git' || project?.sourceType === 'repo-docs';
+  const isGitBackend = project?.backendKind === 'git';
   const searchKw = keyword.trim().toLowerCase();
   const rootVisibleDocs = searchKw ? tree.docs.filter((d) => docMatchesKeyword(d, searchKw)) : tree.docs;
   const rootVisibleChildren = searchKw
@@ -574,7 +498,7 @@ function TreeSidebar({
       {/* Footer */}
       <div className="shrink-0 border-t px-3 py-2" style={{ borderColor: 'var(--border-soft)' }}>
         <div className="flex items-center gap-1.5 text-[11px] text-neutral-500">
-          {isGitSource ? (
+          {isGitBackend ? (
             <>
               <GitBranch size={12} className="text-neutral-400" />
               <span className="font-mono">main</span>
@@ -654,6 +578,10 @@ function DocumentEditor({
   const [showThemeMenu, setShowThemeMenu] = useState(false);
 
   const tocItems = useMemo(() => extractToc(doc?.content ?? null), [doc?.content]);
+  // 预览 HTML：markdown-it 渲染（GFM 表格/代码高亮/KaTeX/mermaid 占位容器）
+  const previewHtml = useMemo(() => markdownToHtml(doc?.content ?? null), [doc?.content]);
+  // mermaid 占位容器异步渲染为 SVG（懒加载 mermaid，跟随明暗主题）
+  useMermaidRender(previewScrollRef, view === 'preview', isDark, previewHtml);
 
   useEffect(() => {
     setFadeKey((k) => k + 1);
@@ -850,7 +778,7 @@ function DocumentEditor({
               onDoubleClick={() => { if (canWrite) setView('edit'); }}
               title={canWrite ? '双击内容可快速进入编辑' : undefined}>
               <div className={`max-w-3xl mx-auto px-10 py-10 prose-doc prose-${renderTheme || 'plain'}`}
-                dangerouslySetInnerHTML={{ __html: markdownToHtml(doc.content) }} />
+                dangerouslySetInnerHTML={{ __html: previewHtml }} />
             </div>
             {/* 「双击进入编辑」悬浮提示（对齐原型 ProjectBrowse.jsx:1100-1107）：hover 正文时浮现；只读用户不提示 */}
             {canWrite && (
@@ -1030,9 +958,9 @@ export function BrowsePage(): React.ReactElement {
   });
 
   // 项目概览（与 ProjectLayout 共享 queryKey 缓存）
-  const { data: projectOverview } = useQuery<{ id: string; name: string; sourceType?: string | null }>({
+  const { data: projectOverview } = useQuery<{ id: string; name: string; backendKind?: 'git' | 'local' | null }>({
     queryKey: ['project-overview', projectId],
-    queryFn: () => apiFetch<{ id: string; name: string; sourceType?: string | null }>(`/api/v1/projects/${projectId}/overview`),
+    queryFn: () => apiFetch<{ id: string; name: string; backendKind?: 'git' | 'local' | null }>(`/api/v1/projects/${projectId}/overview`),
     enabled: !!projectId,
   });
 
@@ -1270,7 +1198,7 @@ export function BrowsePage(): React.ReactElement {
             <div className="card p-10 text-center text-neutral-400">
               <FileText size={40} className="mx-auto mb-3 text-neutral-300" />
               <p className="text-sm">该项目暂无文档</p>
-              <p className="text-xs mt-1">请配置数据源并触发同步，或使用 StarterPack 初始化</p>
+              <p className="text-xs mt-1">可新建文档，或在项目设置中对 Git 存储源触发同步</p>
             </div>
           ) : visibleDocs.length === 0 ? (
             <div className="card p-10 text-center text-neutral-400 max-w-md mx-auto mt-10">

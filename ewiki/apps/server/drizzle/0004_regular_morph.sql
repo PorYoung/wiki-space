@@ -1,0 +1,1 @@
+ALTER TABLE "sync_jobs" DROP CONSTRAINT "sync_jobs_project_commit_uq";
