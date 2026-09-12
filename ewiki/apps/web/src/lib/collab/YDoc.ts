@@ -44,12 +44,19 @@ export class CollabYDoc {
   readonly ytext: Y.Text;
   /** P4-6 CRDT awareness：远程光标/ presence 二进制协议 */
   readonly awareness: awarenessProtocol.Awareness;
+  /** P4-6 B3: Yjs UndoManager —— 本地操作撤销历史（仅本地，不含远程） */
+  readonly undoManager: Y.UndoManager;
   private ws: WebSocket | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryCount = 0;
   private manualClose = false;
   private synced = false;
   private peers = new Map<string, Peer>();
+
+  /** B3: 150ms 内连续 update 合并成一次 ws.send，降低服务器压力 */
+  private static readonly FLUSH_INTERVAL = 150;
+  private pendingUpdates: Uint8Array[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     public readonly docId: string,
@@ -65,6 +72,8 @@ export class CollabYDoc {
       this.awareness.setLocalStateField('user', { name: localUser.name, id: localUser.userId });
     }
     this.awareness.on('update', this.handleAwarenessUpdate.bind(this));
+    // B3: UndoManager 绑定 ytext —— 撤销历史仅含本地操作（undoManager 不跟踪远程更新）
+    this.undoManager = new Y.UndoManager(this.ytext);
   }
 
   // -------------------------------------------------------------------------
@@ -80,11 +89,22 @@ export class CollabYDoc {
   disconnect(): void {
     this.manualClose = true;
     this.clearRetry();
+    // B3: flush 剩余 batching 中的更新（断开前尽量让服务器收到最新状态）
+    this.flushPending();
     this.ws?.close();
     this.ws = null;
     // P4-6：销毁 awareness（会触发本地 state 移除，其他客户端收到后知道我们下线了）
     this.awareness.destroy();
     this.callbacks.onStatus?.('disconnected');
+  }
+
+  /**
+   * 完全销毁：disconnect + Y.Doc.destroy()。
+   * TTL 缓存淘汰时调用（不仅断连接，还要释放 Y.Doc 的内存）。
+   */
+  destroy(): void {
+    this.disconnect();
+    this.doc.destroy();
   }
 
   private clearRetry(): void {
@@ -184,14 +204,28 @@ export class CollabYDoc {
   }
 
   /**
-   * 本地 doc update → 广播给服务器（服务器合并进房间并转发给其他客户端）
-   * y-codemirror.next 或手动 observe 时调用。
+   * 本地 doc update → 广播给服务器（服务器合并进房间并转发给其他客户端）。
+   * B3: 150ms debounce batching —— 连续 update 合并成一次发送，降低 ws 消息频率。
+   * y-codemirror.next 在用户打字时每个按键都触发一次 update，不合并的话每秒发 20-50 条。
    */
   sendUpdate(update: Uint8Array): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.pendingUpdates.push(update);
+    if (this.flushTimer !== null) return;
+    this.flushTimer = setTimeout(() => this.flushPending(), CollabYDoc.FLUSH_INTERVAL);
+  }
+
+  /** 立即发送所有 pending updates（batching flush） */
+  private flushPending(): void {
+    this.flushTimer = null;
+    const updates = this.pendingUpdates;
+    this.pendingUpdates = [];
+    if (updates.length === 0 || this.ws?.readyState !== WebSocket.OPEN) return;
+    // 单条 update 直接发；多条用 Y.mergeUpdates 合并（CRDT 语义安全，等价于一次性 transact）
+    const merged = updates.length === 1 ? updates[0]! : Y.mergeUpdates(updates);
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, 0); // messageSync
-    syncProtocol.writeUpdate(enc, update);
+    syncProtocol.writeUpdate(enc, merged);
     this.ws.send(encoding.toUint8Array(enc));
   }
 

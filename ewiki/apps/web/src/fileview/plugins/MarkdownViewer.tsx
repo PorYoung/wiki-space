@@ -15,7 +15,7 @@
 //   - EditorView.updateListener 捕获 selectionSet → sendCursor({line,ch}) 广播
 // ---------------------------------------------------------------------------
 
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
 import type { ViewUpdate } from '@codemirror/view';
@@ -243,7 +243,8 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     return fallback;
   }, [view, buffer, saved, tocFromEditor]);
 
-  const previewHtml = useMemo(() => markdownToHtml(saved), [saved]);
+  const deferredSaved = useDeferredValue(saved);
+  const previewHtml = useMemo(() => markdownToHtml(deferredSaved), [deferredSaved]);
   useMermaidRender(previewScrollRef, view === 'preview', isDark, previewHtml);
 
   // ---------------------------------------------------------------------------
@@ -288,7 +289,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     ];
     // P4-6：协同模式挂 y-codemirror.next —— 实时远程光标 + CRDT 自动合并
     if (collabEnabled && collab.ytext) {
-      base.push(yCollab(collab.ytext, null, { undoManager: false }));
+      base.push(yCollab(collab.ytext, collab.awareness ?? null, { undoManager: collab.undoManager ?? false }));
     }
     // P4-6：selection 变化 → 防抖广播 presence cursor
     base.push(
@@ -306,7 +307,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
       }),
     );
     return base;
-  }, [collabEnabled, collab?.ytext]);
+  }, [collabEnabled, collab?.ytext, collab?.awareness, collab?.undoManager]);
 
   // ---------------------------------------------------------------------------
   // P4-6：presence 光标防抖广播

@@ -20,9 +20,12 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  FolderTree,
   Filter,
   GitBranch,
   History,
+  LayoutGrid,
+  List,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -57,6 +60,7 @@ import {
 import { UploadManager } from '../tree/UploadManager';
 import { fileIconOf, docMatchesFacet, FILE_FACETS, type FileFacetId, type FileTypeId } from '../tree/fileIcons';
 import { useUiStore } from '../stores/uiStore';
+import { ListView, type ListRow } from './components/ListView';
 
 // ---------------------------------------------------------------------------
 // Types — 直接从后端返回 shape 推导
@@ -880,6 +884,35 @@ export function BrowsePage(): React.ReactElement {
   const [facet, setFacet] = useState<FileFacetId>('all');
   const [leftCollapsed, setLeftCollapsed] = useState(false);
 
+  // 列表视图模式（非 focused 分支）：tree（目录树）| list（表格）| grid（卡片网格）
+  const [viewMode, setViewMode] = useState<'tree' | 'list' | 'grid'>(() => {
+    const v = searchParams.get('view');
+    return v === 'list' || v === 'grid' || v === 'tree' ? v : 'grid';
+  });
+  // 前端分页（非 focused 分支）：当前页
+  const [page, setPage] = useState<number>(() => {
+    const p = Number(searchParams.get('page'));
+    return Number.isFinite(p) && p > 0 ? p : 1;
+  });
+  const pageSize = 50;
+
+  // URL 同步：view / page 参数变更 → 同步到 state（双向绑定）
+  useEffect(() => {
+    const params: Record<string, string> = {};
+    const curDoc = searchParams.get('doc');
+    if (curDoc) params.doc = curDoc;
+    if (viewMode !== 'grid') params.view = viewMode;
+    if (page > 1) params.page = String(page);
+    const newStr = new URLSearchParams(params).toString();
+    const curStr = new URLSearchParams(searchParams).toString();
+    if (newStr !== curStr) setSearchParams(params, { replace: true });
+  }, [viewMode, page]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // filter/search 条件变化 → 自动 reset page=1（避免新筛选下 page 越界）
+  useEffect(() => {
+    if (page !== 1) setPage(1);
+  }, [keyword, facet]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ---- Queries ----
   const { data: docData, isLoading: docsLoading } = useQuery<{ items: DocumentListItem[] }>({
     queryKey: ['project-documents', projectId],
@@ -1558,8 +1591,32 @@ export function BrowsePage(): React.ReactElement {
                 value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
             <div className="flex-1" />
-            {/* 有据偏离（PLAN 5.3.1 声明）：原型的「网格/树状」grid 视图切换（ProjectBrowse.jsx:1587-1613）
-                为视觉性 mock，此处以真实数据刷新按钮替代，树状结构由左栏目录树承担 */}
+            {/* 视图模式切换：tree（目录树）| list（表格）| grid（卡片） */}
+            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border" style={{ borderColor: 'var(--border-soft)' }}>
+              {([
+                { key: 'tree' as const, Icon: FolderTree, label: '目录树' },
+                { key: 'list' as const, Icon: List, label: '列表' },
+                { key: 'grid' as const, Icon: LayoutGrid, label: '网格' },
+              ]).map(({ key, Icon, label }) => {
+                const active = viewMode === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setViewMode(key)}
+                    title={label}
+                    className={`h-8 px-2.5 inline-flex items-center gap-1 rounded text-xs transition ${
+                      active
+                        ? 'bg-primary-50 text-primary-700'
+                        : 'text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700'
+                    }`}
+                  >
+                    <Icon size={14} />
+                    <span className="hidden sm:inline">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
             <button type="button" className="btn-secondary !h-9 !text-xs"
               onClick={() => void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] })}>
               <RefreshCw size={15} /> 刷新
@@ -1582,40 +1639,129 @@ export function BrowsePage(): React.ReactElement {
             )}
           </div>
 
-          {docsLoading ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className="card p-4 space-y-3">
-                  <div className="skeleton h-3 w-24" />
-                  <div className="skeleton h-5 w-32" />
-                  <div className="skeleton h-3 w-full" />
+          {/* =============== viewMode: tree — 左栏目录树 + 右栏占位 =============== */}
+          {viewMode === 'tree' && (
+            <div className="h-[calc(100vh-220px)] min-h-[360px]">
+              <PanelGroup direction="horizontal" className="h-full rounded-lg border overflow-hidden"
+                style={{ borderColor: 'var(--border-soft)' }}>
+                <Panel defaultSize={30} minSize={20} collapsible>
+                  <TreeSidebar
+                    docs={docs}
+                    activeDocId={null}
+                    onSelect={openDoc}
+                    onBack={backToGrid}
+                    project={projectOverview ?? null}
+                    collapsed={false}
+                    onToggleCollapse={() => { /* 非 focused tree 视图不支持折叠 */ }}
+                    onCreate={startCreate}
+                    onUploadFiles={() => openUploadPicker('files', '')}
+                    onUploadFolder={() => openUploadPicker('folder', '')}
+                    canWrite={canWrite}
+                    draggingDocId={null}
+                    dragOverPath={null}
+                    onMenu={openTreeMenu}
+                    onDocDragStart={() => { /* 非 focused tree 视图禁用拖拽 */ }}
+                    onDocDragEnd={() => {}}
+                    onFolderDragOver={() => {}}
+                    onFolderDragLeave={() => {}}
+                    onFolderDrop={() => {}}
+                    facet={facet}
+                    facetCounts={facetCounts}
+                    onFacetChange={setFacet}
+                  />
+                </Panel>
+                <PanelResizeHandle className="resize-handle" />
+                <Panel minSize={40}>
+                  <div className="h-full flex flex-col items-center justify-center text-center px-6"
+                    style={{ background: 'var(--bg-surface)' }}>
+                    <div className="w-14 h-14 rounded-full flex items-center justify-center mb-4"
+                      style={{ background: 'var(--bg-hover)' }}>
+                      <FolderTree size={24} className="text-primary-500" />
+                    </div>
+                    <p className="text-sm font-medium text-neutral-700">从左侧目录树选择文件</p>
+                    <p className="text-xs text-neutral-400 mt-1">点击文件以打开，双击文件夹展开</p>
+                  </div>
+                </Panel>
+              </PanelGroup>
+            </div>
+          )}
+
+          {/* =============== viewMode: list — 表格视图 =============== */}
+          {viewMode === 'list' && (
+            <div className="h-[calc(100vh-220px)] min-h-[360px] rounded-lg border overflow-hidden"
+              style={{ borderColor: 'var(--border-soft)', background: 'var(--bg-surface)' }}>
+              {docsLoading ? (
+                <div className="p-4 space-y-3">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-3 h-10">
+                      <div className="skeleton h-4 w-48" />
+                      <div className="skeleton h-4 w-20" />
+                      <div className="skeleton h-4 w-16" />
+                      <div className="skeleton h-4 w-24" />
+                      <div className="skeleton h-4 w-24" />
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          ) : realDocCount === 0 ? (
-            <div className="card p-10 text-center text-neutral-400">
-              <FileText size={40} className="mx-auto mb-3 text-neutral-300" />
-              <p className="text-sm">该项目暂无文档</p>
-              <p className="text-xs mt-1">可新建文档，或在项目设置中对 Git 存储源触发同步</p>
-            </div>
-          ) : visibleDocs.length === 0 ? (
-            <div className="card p-10 text-center text-neutral-400 max-w-md mx-auto mt-10">
-              <Search size={32} className="mx-auto mb-3 text-neutral-300" />
-              <p className="text-sm">没有找到匹配的文档</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {visibleDocs.map((d, i) => (
-                <DocumentCard
-                  key={d.id}
-                  doc={d}
-                  onOpen={openDoc}
-                  onOpenInfo={openInfo}
-                  onOpenHistory={openHistory}
-                  index={i}
+              ) : realDocCount === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 text-center">
+                  <FileText size={40} className="mx-auto mb-3 text-neutral-300" />
+                  <p className="text-sm text-neutral-500">该项目暂无文档</p>
+                  <p className="text-xs text-neutral-400 mt-1">可新建文档，或在项目设置中对 Git 存储源触发同步</p>
+                </div>
+              ) : (
+                <ListView
+                  docs={visibleDocs as unknown as ListRow[]}
+                  onSelect={openDoc as unknown as (d: ListRow) => void}
+                  onMenu={openTreeMenu as unknown as (e: React.MouseEvent, d: ListRow) => void}
+                  keyword={keyword}
+                  page={page}
+                  onPageChange={setPage}
+                  pageSize={pageSize}
+                  loading={docsLoading}
                 />
-              ))}
+              )}
             </div>
+          )}
+
+          {/* =============== viewMode: grid — 卡片网格（现状） =============== */}
+          {viewMode === 'grid' && (
+            <>
+              {docsLoading ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="card p-4 space-y-3">
+                      <div className="skeleton h-3 w-24" />
+                      <div className="skeleton h-5 w-32" />
+                      <div className="skeleton h-3 w-full" />
+                    </div>
+                  ))}
+                </div>
+              ) : realDocCount === 0 ? (
+                <div className="card p-10 text-center text-neutral-400">
+                  <FileText size={40} className="mx-auto mb-3 text-neutral-300" />
+                  <p className="text-sm">该项目暂无文档</p>
+                  <p className="text-xs mt-1">可新建文档，或在项目设置中对 Git 存储源触发同步</p>
+                </div>
+              ) : visibleDocs.length === 0 ? (
+                <div className="card p-10 text-center text-neutral-400 max-w-md mx-auto mt-10">
+                  <Search size={32} className="mx-auto mb-3 text-neutral-300" />
+                  <p className="text-sm">没有找到匹配的文档</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {visibleDocs.map((d, i) => (
+                    <DocumentCard
+                      key={d.id}
+                      doc={d}
+                      onOpen={openDoc}
+                      onOpenInfo={openInfo}
+                      onOpenHistory={openHistory}
+                      index={i}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
         </div>

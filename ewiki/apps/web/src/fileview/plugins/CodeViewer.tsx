@@ -20,13 +20,23 @@ import CodeMirror from '@uiw/react-codemirror';
 import { loadLanguage, type LanguageName } from '@uiw/codemirror-extensions-langs';
 import { githubLight, githubDark } from '@uiw/codemirror-theme-github';
 import { yCollab } from 'y-codemirror.next';
-import * as awarenessProtocol from 'y-protocols/awareness';
 import type { FileViewerProps } from '../types';
 import { downloadFile, fetchRawBlob } from '../api';
 import { decodeUtf8Strict, humanSize } from '../util';
-import { useCollab, type CollabContextValue } from '../../lib/collab';
+import { useCollab } from '../../lib/collab';
 
 const READONLY_LIMIT = 2 * 1024 * 1024;
+
+// 语言加载缓存（跨组件实例复用，EXT_LANG 只有 ~40 种扩展名）
+const langCache = new Map<LanguageName | string, Extension | null>();
+function getLangExt(ext: string): Extension | null {
+  const langName = EXT_LANG[ext];
+  if (!langName) return null;
+  if (langCache.has(langName)) return langCache.get(langName)!;
+  const extObj = loadLanguage(langName);
+  langCache.set(langName, extObj);
+  return extObj;
+}
 
 // 共享注册表白名单扩展名 → CodeMirror 语言（无匹配项按纯文本渲染）
 const EXT_LANG: Record<string, LanguageName> = {
@@ -169,18 +179,16 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
   const editable = canWrite && !!onSave && !tooLarge && !loadError;
 
   const extensions = useMemo<Extension[]>(() => {
-    const langName = EXT_LANG[file.ext];
-    const lang = langName ? loadLanguage(langName) : null;
     const base: Extension[] = [];
+    const lang = getLangExt(file.ext);
     if (lang) base.push(lang);
-    // P4-6 CRDT awareness 全链路：awareness 替换 null → 启用远程光标显示
-    // CollabProvider 懒创建后会 export awareness 字段，这里用类型断言先接上
-    const awareness = (collab as CollabContextValue & { awareness?: awarenessProtocol.Awareness })?.awareness;
+    // P4-6 CRDT：awareness 现在由 CollabProvider context 直接暴露（引用稳定，同一 CollabYDoc 不变）
     if (collabEnabled && collab.ytext) {
-      base.push(yCollab(collab.ytext, awareness ?? null, { undoManager: false }));
+      base.push(yCollab(collab.ytext, collab.awareness ?? null, { undoManager: collab.undoManager ?? false }));
     }
     return base;
-  }, [file.ext, collabEnabled, collab?.ytext]);
+    // 依赖收窄：file.ext 变了才需要 loadLanguage 新语言；ytext/awareness/undoManager 引用稳定
+  }, [file.ext, collabEnabled, collab?.ytext, collab?.awareness, collab?.undoManager]);
 
   const doSave = async () => {
     if (!onSave || saving || !dirty) return;

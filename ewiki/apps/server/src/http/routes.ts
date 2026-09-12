@@ -121,6 +121,26 @@ const PUBLISH_TEMPLATES = [
   },
 ] as const;
 
+// ---- B5: documents count 短 TTL 缓存 ----
+// 列表接口每次都跑 count(*)，万行级表上 PG 也慢。30s TTL 让用户看到近似准确计数，
+// 编辑/创建/删除时主动清空缓存（下一次列表请求重新 COUNT），避免数据不一致窗口过长。
+const docCountCache = new Map<string, { count: number; expireAt: number }>();
+const DOC_COUNT_CACHE_TTL = 30_000;
+
+function getCachedCount(key: string, compute: () => Promise<number>): Promise<number> {
+  const cached = docCountCache.get(key);
+  if (cached && cached.expireAt > Date.now()) return Promise.resolve(cached.count);
+  return compute().then((count) => {
+    docCountCache.set(key, { count, expireAt: Date.now() + DOC_COUNT_CACHE_TTL });
+    return count;
+  });
+}
+
+/** 文档写操作（insert / update / delete）后调用，清空所有 count 缓存 */
+function invalidateDocCountCache(): void {
+  docCountCache.clear();
+}
+
 /**
  * 文档内容摘要（PLAN 3.4 残留：DocumentCard 内容摘要）。
  * 列表接口不下发全文，读取时从 content 派生 ~140 字符纯文本摘要：
@@ -970,10 +990,16 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     // 文件管理重构 §4.1-F1：按 kind facet 过滤（缺省全部；非法值忽略）
     if (kind === 'text' || kind === 'binary') conditions.push(eq(documents.kind, kind));
     const where = and(...conditions);
-    const [totalRow] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(documents)
-      .where(where);
+    const total = await getCachedCount(
+      `global:${projectId ?? 'all'}:${status ?? ''}:${kind ?? ''}:${c.get('globalRole') === 'admin' ? 'admin' : uid}`,
+      async () => {
+        const [totalRow] = await db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(documents)
+          .where(where);
+        return Number(totalRow?.count ?? 0);
+      },
+    );
     const rows = await db
       .select({
         id: documents.id,
@@ -1006,7 +1032,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       summary: documentSummary(content),
       rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
     }));
-    return c.json({ items, page, pageSize, total: Number(totalRow?.count ?? 0) });
+    return c.json({ items, page, pageSize, total });
   });
 
   // ---- 项目详情增强（P3 扩展：附带统计） ----
@@ -1025,10 +1051,13 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .limit(1);
     if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
 
-    const [docCountRow] = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(documents)
-      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
+    const docCount = await getCachedCount(`overview:${projectId}`, async () => {
+      const [row] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(documents)
+        .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)));
+      return Number(row?.count ?? 0);
+    });
     const [memberCountRow] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectMembers)
@@ -1038,7 +1067,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json({
       ...project,
       backendKind: project.storageKind,
-      docCount: Number(docCountRow?.count ?? 0),
+      docCount,
       memberCount: Number(memberCountRow?.count ?? 0),
     });
   });
@@ -1072,10 +1101,16 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       )`);
     }
     const where = and(...conditions);
-    const [totalRow] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(documents)
-      .where(where);
+    const total = await getCachedCount(
+      `project:${projectId}:${status ?? ''}:${kind ?? ''}:${q ?? ''}`,
+      async () => {
+        const [totalRow] = await db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(documents)
+          .where(where);
+        return Number(totalRow?.count ?? 0);
+      },
+    );
     const rows = await db
       .select({
         id: documents.id,
@@ -1108,7 +1143,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       summary: documentSummary(content),
       rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
     }));
-    return c.json({ items, page, pageSize, total: Number(totalRow?.count ?? 0) });
+    return c.json({ items, page, pageSize, total });
   });
 
   // ---- 文档详情（D3 BrowsePage 必需：含 content） ----
@@ -1244,6 +1279,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       })
       .where(eq(documents.id, id))
       .returning();
+
+    // B5: 文档内容变更后清空 count 缓存（30s 内的列表请求会重新 COUNT）
+    invalidateDocCountCache();
 
     await db.insert(activities).values({
       projectId: existing.projectId,
@@ -1563,6 +1601,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       })
       .returning();
 
+    // B5: 新建文档后清空 count 缓存
+    invalidateDocCountCache();
+
     await db.insert(activities).values({
       projectId,
       actorId: userId,
@@ -1649,6 +1690,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .limit(10);
 
     await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, id));
+
+    // B5: 软删除后清空 count 缓存
+    invalidateDocCountCache();
 
     await db.insert(activities).values({
       projectId: existing.projectId,
