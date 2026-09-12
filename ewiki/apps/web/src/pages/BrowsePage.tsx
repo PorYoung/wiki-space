@@ -1716,6 +1716,9 @@ export function BrowsePage(): React.ReactElement {
           canWrite={canWrite}
           isDark={isDark}
           onSave={unifiedOnSave}
+          // §4.1-F16 Markdown 引用图片：透传 projectId 给 MarkdownViewer → ImagePickerModal，
+          //   用于库内图片列表查询 GET /api/v1/projects/:id/documents?kind=binary
+          projectId={projectId}
           onReplaced={() => {
             /* replaceUploadMutation 已完成缓存刷新；签名 rawUrl 由 invalidate document 后新详情下发 */
           }}
@@ -1749,6 +1752,8 @@ export function BrowsePage(): React.ReactElement {
           canWrite={canWrite}
           isDark={isDark}
           onSave={unifiedOnSave}
+          // §4.1-F16 Markdown 引用图片：同样透传 projectId（空态时也可能短暂展示 MarkdownViewer）
+          projectId={projectId}
           onReplaced={() => {}}
           host={{
             openOpenInfo: () => {

@@ -251,6 +251,9 @@ importers:
       '@ewiki/render':
         specifier: workspace:*
         version: link:../../packages/render
+      '@ewiki/server':
+        specifier: workspace:*
+        version: link:../server
       '@ewiki/shared':
         specifier: workspace:*
         version: link:../../packages/shared

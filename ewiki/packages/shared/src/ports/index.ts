@@ -2,7 +2,7 @@
 // PostgreSQL 实现；国产库触发时按方言新增实现（MySQL 系 = 自研 SKIP LOCKED 队列 +
 // GET_LOCK + 事件表轮询 + FULLTEXT ngram；PG 系国产库直兼容）。
 
-export type QueueName = 'sync' | 'publish' | 'ai-classify' | 'import' | 'export' | 'compensate';
+export type QueueName = 'sync' | 'publish' | 'ai-classify' | 'import' | 'export' | 'compensate' | 'gc-blob';
 
 export interface JobEnqueueOptions {
   /** 幂等键：同键任务去重（如 sync = projectId:commitHash，SDD 4.3 O1） */
@@ -118,6 +118,8 @@ export type NotificationType =
   | 'publish.finished'
   | 'import.finished'
   | 'import.failed'
+  | 'export.finished'
+  | 'export.failed'
   | 'team.invite';
 
 export interface NotificationInput {

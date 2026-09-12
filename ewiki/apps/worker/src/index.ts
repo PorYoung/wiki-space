@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import PgBoss from 'pg-boss';
 import { and, desc, eq, inArray, isNull, sql as dsql } from 'drizzle-orm';
 import {
@@ -12,6 +13,7 @@ import {
   documentLinks,
   documents,
   documentVersions,
+  exportJobs,
   importJobs,
   notifications,
   projectMembers,
@@ -25,6 +27,7 @@ import {
 import { ensureWorkdir, pullWorkdir, type ConnLike } from '@ewiki/git';
 import { LocalBlobStore, reposRoot, resolveRoot, safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
 import type { BlobStore } from '@ewiki/storage';
+import { runBlobGC } from '@ewiki/server/src/lib/blob-gc.js';
 import { extractDocLinks, resolveFileType, type ImportDocPayload, type Job } from '@ewiki/shared';
 import type { ClassifyProvider, ImportProvider, Notifier, NotificationType } from '@ewiki/shared';
 import { renderSite, type SiteAsset } from '@ewiki/render';
@@ -968,36 +971,181 @@ async function handleImport(job: Job): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// export（F45 最小实现）：全库 JSON 导出到 FS_ROOT/exports
+// export（设计文档 §4.1-F18）：整库 tar.gz 归档到 NAS exports 目录
+// 零新依赖：手写 UStar header（512B/file + 512 对齐 + 双 EOF 块），zlib.gzipSync 压缩
+// DB export_jobs 表承载状态机；过期清理：7 天后的文件 + 记录（由 GC agent 负责）
 // ---------------------------------------------------------------------------
 
+/** 把整数转成 tar header 需要的零填充 8 进制 ASCII + 终止 null 字节 */
+function tarOctal(n: number, width: number): Buffer {
+  const abs = Math.max(0, Math.floor(n));
+  const s = abs.toString(8).padStart(width - 1, '0') + '\0';
+  return Buffer.from(s, 'ascii');
+}
+
+/**
+ * 手写 UStar v0 header（512 bytes）。
+ * 字段布局严格遵循 POSIX.1-2001 pax ustar 格式。
+ */
+function buildTarHeader(name: string, size: number, mtime: number): Buffer {
+  const buf = Buffer.alloc(512);
+  // name（100B，UTF-8，null 截断）
+  const nameBytes = Buffer.from(name, 'utf8');
+  nameBytes.copy(buf, 0, 0, Math.min(nameBytes.length, 100));
+  // mode / uid / gid / size / mtime
+  Buffer.from('0000644\0', 'ascii').copy(buf, 100);
+  Buffer.from('0000000\0', 'ascii').copy(buf, 108);
+  Buffer.from('0000000\0', 'ascii').copy(buf, 116);
+  tarOctal(size, 12).copy(buf, 124);
+  tarOctal(mtime, 12).copy(buf, 136);
+  // checksum 临时填 8 个空格（0x20），计算后回填
+  Buffer.from('        ', 'ascii').copy(buf, 148);
+  // typeflag = '0'（普通文件）
+  buf[156] = 0x30;
+  // linkname / uname / gname / devmajor / devminor / prefix：默认零
+  // magic = "ustar\0" + version = "00"
+  Buffer.from('ustar\0', 'ascii').copy(buf, 257);
+  Buffer.from('00', 'ascii').copy(buf, 263);
+  // 校验和：header 所有字节之和（checksum 字段视作 8 个 0x20）
+  let chk = 0;
+  for (let i = 0; i < 512; i++) chk += buf[i];
+  tarOctal(chk, 8).copy(buf, 148);
+  return buf;
+}
+
+/** 把一组（name + data）拼成 tar buffer，末尾加双 EOF 零块 */
+function buildTarBuffer(entries: Array<{ name: string; data: Buffer }>): Buffer {
+  const chunks: Buffer[] = [];
+  const mtime = Math.floor(Date.now() / 1000);
+  for (const e of entries) {
+    chunks.push(buildTarHeader(e.name, e.data.length, mtime));
+    chunks.push(e.data);
+    const rem = e.data.length % 512;
+    if (rem > 0) chunks.push(Buffer.alloc(512 - rem));
+  }
+  chunks.push(Buffer.alloc(1024)); // 双 EOF 零块
+  return Buffer.concat(chunks);
+}
+
 async function handleExport(job: Job): Promise<void> {
-  const data = job.data as { projectId?: string };
-  if (!data.projectId) throw new Error('VALIDATION_FAILED: projectId required');
+  const data = job.data as { exportJobId?: string; projectId?: string };
+  if (!data.exportJobId || !data.projectId) {
+    throw new Error('VALIDATION_FAILED: exportJobId + projectId required');
+  }
+  const exportJobId = data.exportJobId;
+  const projectId = data.projectId;
 
-  const rows = await db
-    .select({ path: documents.path, title: documents.title, content: documents.content })
-    .from(documents)
-    .where(and(eq(documents.projectId, data.projectId), isNull(documents.deletedAt)))
-    .orderBy(documents.path);
+  // 幂等保护：查 job 状态，done 则跳过
+  const [existing] = await db
+    .select({ id: exportJobs.id, status: exportJobs.status })
+    .from(exportJobs)
+    .where(eq(exportJobs.id, exportJobId))
+    .limit(1);
+  if (!existing) throw new Error(`export job not found: ${exportJobId}`);
+  if (existing.status === 'done') {
+    log('export idempotent skip', { jobId: job.id, exportJobId });
+    return;
+  }
 
-  const root = path.resolve(process.cwd(), process.env.FS_ROOT ?? './data', 'exports', data.projectId);
-  await fs.mkdir(root, { recursive: true });
-  const file = path.join(root, `${Date.now()}.json`);
-  await fs.writeFile(
-    file,
-    JSON.stringify({ exportedAt: new Date().toISOString(), project: { id: data.projectId }, docs: rows }, null, 2),
-    'utf8',
-  );
+  // running
+  await db.update(exportJobs).set({ status: 'running', error: null }).where(eq(exportJobs.id, exportJobId));
 
-  await db.insert(activities).values({
-    projectId: data.projectId,
-    verb: 'export',
-    targetType: 'project',
-    targetId: data.projectId,
-    meta: { docs: rows.length, file },
-  });
-  log('export finished', { jobId: job.id, projectId: data.projectId, docs: rows.length, file });
+  try {
+    // 查 project 元信息（用于文件名）
+    const [project] = await db
+      .select({ name: projects.name })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    const projectName = project?.name ?? projectId;
+    const id8 = projectId.replace(/-/g, '').slice(0, 8);
+    const safeName = projectName.replace(/[^\w\u4e00-\u9fa5.-]/g, '_').slice(0, 40) || 'project';
+
+    // 查所有非软删文档
+    const rows = await db
+      .select({
+        id: documents.id,
+        path: documents.path,
+        kind: documents.kind,
+        content: documents.content,
+        storageRef: documents.storageRef,
+        size: documents.size,
+      })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), isNull(documents.deletedAt)))
+      .orderBy(documents.path);
+
+    const entries: Array<{ name: string; data: Buffer }> = [];
+    const blob = getBlobStore();
+
+    for (const doc of rows) {
+      // ZIP/TAR 里用 posix 路径（Windows 写入也转换，避免路径穿越和跨平台问题）
+      const tarPath = doc.path.replace(/\\/g, '/');
+      let data: Buffer;
+      if (doc.kind === 'binary') {
+        if (!doc.storageRef) {
+          log('export skip binary: missing storageRef', { exportJobId, path: doc.path });
+          continue;
+        }
+        data = await blob.get(doc.storageRef);
+      } else {
+        data = Buffer.from(doc.content ?? '', 'utf8');
+      }
+      entries.push({ name: tarPath, data });
+    }
+
+    // 拼 tar → gzip
+    const tarBuf = buildTarBuffer(entries);
+    const gzBuf = gzipSync(tarBuf);
+
+    // 落 NAS exports 目录：<NAS>/exports/<safeName>-<id8>-<ts>.tar.gz
+    const nasRoot = resolveRoot(process.env.FS_NAS_ROOT);
+    const relPath = `exports/${safeName}-${id8}-${Date.now()}.tar.gz`;
+    const abs = safeJoin(nasRoot, relPath);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, gzBuf);
+
+    // 更新 exportJobs：done + path + size + finishedAt
+    await db
+      .update(exportJobs)
+      .set({
+        status: 'done',
+        path: relPath,
+        size: gzBuf.length,
+        finishedAt: new Date(),
+      })
+      .where(eq(exportJobs.id, exportJobId));
+
+    await db.insert(activities).values({
+      projectId,
+      verb: 'export',
+      targetType: 'project',
+      targetId: projectId,
+      meta: { exportJobId, docs: entries.length, size: gzBuf.length, path: relPath },
+    });
+
+    await notifyProjectMembers(projectId, 'export.finished', {
+      title: '整库导出',
+      message: `项目「${projectName}」整库导出完成（${entries.length} 个文件，${(gzBuf.length / 1024 / 1024).toFixed(1)} MB）`,
+      link: `/projects/${projectId}/export-jobs`,
+    });
+
+    log('export finished', {
+      jobId: job.id,
+      exportJobId,
+      projectId,
+      docs: entries.length,
+      size: gzBuf.length,
+      path: relPath,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await db
+      .update(exportJobs)
+      .set({ status: 'failed', error: msg.slice(0, 500), finishedAt: new Date() })
+      .where(eq(exportJobs.id, exportJobId));
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,9 +1166,32 @@ async function handleCompensate(): Promise<void> {
   log('compensate sweep finished', { scanned: recent.length, retried: siteIds.length });
 }
 
+// ---------------------------------------------------------------------------
+// gc-blob（设计文档 §7.4 —— 风险对策 → blob 垃圾累积）
+//   每日 03:00 cron 扫描 blob 目录与 DB 引用差集，清理 orphan 文件。
+//   删除前必须过二次确认安全网（refCount 再查一次，可能被新写入挂住）。
+// ---------------------------------------------------------------------------
+
+async function handleGcBlob(job: Job): Promise<void> {
+  const data = (job.data ?? {}) as { limit?: number };
+  const result = await runBlobGC({
+    db,
+    store: getBlobStore(),
+    limit: data.limit,
+  });
+  log('gc-blob finished', {
+    jobId: job.id,
+    deleted: result.deleted,
+    candidates: result.candidates,
+    safetyNetRejected: result.safetyNetRejected,
+    truncated: result.truncated,
+    failed: result.failed.length,
+  });
+}
+
 async function main(): Promise<void> {
   await boss.start();
-  for (const q of ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate']) {
+  for (const q of ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob']) {
     await boss.createQueue(q);
   }
 
@@ -1040,11 +1211,17 @@ async function main(): Promise<void> {
     for (const j of jobs) await handleExport({ id: j.id, queue: 'export', data: j.data });
   });
   await boss.work('compensate', { batchSize: 10 }, async () => handleCompensate());
+  // gc-blob 单个执行（文件 I/O + DB 查询，不并发）
+  await boss.work('gc-blob', { batchSize: 1 }, async (jobs) => {
+    for (const j of jobs) await handleGcBlob({ id: j.id, queue: 'gc-blob', data: j.data });
+  });
 
   // 定时任务：每日 03:00 发布调度检查（PRD F35）
   await boss.schedule('publish', '0 3 * * *', { trigger: 'daily' });
+  // 定时任务：每日 03:00 Blob GC（设计文档 §7.4 —— blob 垃圾累积风险对策）
+  await boss.schedule('gc-blob', '0 3 * * *', {});
 
-  log('worker started', { queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate'] });
+  log('worker started', { queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob'] });
 }
 
 main().catch((err) => {

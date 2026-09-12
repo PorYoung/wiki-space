@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
 import {
   basenameOf,
   CreateProjectSchema,
@@ -26,6 +27,7 @@ import {
   documentLinks,
   documentVersions,
   documents,
+  exportJobs,
   importJobs,
   notifications,
   projectMembers,
@@ -52,6 +54,7 @@ import {
 import { getLibraryTemplate } from '../lib/library-templates.js';
 import { buildAddedSummary, buildChangedSummary } from '../lib/diff-summary.js';
 import { getNasRoot, getReposRoot, mirrorDoc } from '../lib/nas.js';
+import { safeJoin } from '@ewiki/storage';
 import { registerStarterRoutes } from './routes-starter.js';
 import { docStorageEffects, docStorageEffectsBatch, registerPlatformRoutes, type DocEffectResult } from './routes-platform.js';
 import { registerFileRoutes } from './routes-files.js';
@@ -1040,8 +1043,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     });
   });
 
-  // ---- 项目文档列表（D2 BrowsePage 必需） ----
+  // ---- 项目文档列表（D2 BrowsePage 必需；真服务端分页：page/pageSize/total） ----
   // 文件管理重构 §5.2 / §4.1-F1：支持 ?kind=text|binary 类型 facet；binary 项下发 rawUrl
+  // 设计文档 §4.1-F18（导入导出）：复用全局列表的真分页模式，count 子查询 + limit/offset
   app.get('/api/v1/projects/:id/documents', async (c) => {
     const projectId = c.req.param('id')!;
     const uid = c.get('userId') as string;
@@ -1049,6 +1053,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       const access = await projectAccess(projectId, uid, c.get('globalRole') as string);
       denyIfNot(access.canRead);
     }
+    const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1') || 1));
+    const pageSize = Math.min(500, Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '500') || 500)));
     const status = c.req.query('status');
     const q = c.req.query('q');
     const kind = c.req.query('kind');
@@ -1065,7 +1071,11 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         (${documents.kind} = 'text' AND ${documents.content} ILIKE ${like})
       )`);
     }
-
+    const where = and(...conditions);
+    const [totalRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(documents)
+      .where(where);
     const rows = await db
       .select({
         id: documents.id,
@@ -1083,12 +1093,14 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         updatedBy: documents.updatedBy,
         updatedAt: documents.updatedAt,
         createdAt: documents.createdAt,
-        // content 仅用于派生 summary，不随响应下发（PLAN 3.4 残留）
+        // content 仅用于派生 summary，不随响应下发
         content: documents.content,
       })
       .from(documents)
-      .where(and(...conditions))
-      .orderBy(documents.path);
+      .where(where)
+      .orderBy(documents.path)
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
     // 文件管理重构 §5.4：binary 项附带短期签名 rawUrl
     const items = rows.map(({ content, kind: k, ...row }) => ({
       ...row,
@@ -1096,7 +1108,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       summary: documentSummary(content),
       rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
     }));
-    return c.json({ items, page: 1, pageSize: items.length, total: items.length });
+    return c.json({ items, page, pageSize, total: Number(totalRow?.count ?? 0) });
   });
 
   // ---- 文档详情（D3 BrowsePage 必需：含 content） ----
@@ -2637,6 +2649,75 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       denyIfNot(access.canRead);
     }
     return c.json(job);
+  });
+
+  // ---- 整库导出（设计文档 §4.1-F18）：tar.gz 归档到 NAS exports 目录 ----
+  // POST → 建 export_jobs + 入 export 队列；GET /:id 查状态；GET /:id/download 流式下载 tar.gz
+  app.post('/api/v1/projects/:id/export-jobs', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const [project] = await db
+      .select({ id: projects.id, name: projects.name, deletedAt: projects.deletedAt })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    if (!project || project.deletedAt) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    const [job] = await db
+      .insert(exportJobs)
+      .values({ projectId, createdBy: userId })
+      .returning({ id: exportJobs.id });
+
+    await boss.send('export', { exportJobId: job!.id, projectId });
+    return c.json({ jobId: job!.id, status: 'queued' }, 202);
+  });
+
+  app.get('/api/v1/export-jobs/:id', async (c) => {
+    const [job] = await db
+      .select()
+      .from(exportJobs)
+      .where(eq(exportJobs.id, c.req.param('id')!))
+      .limit(1);
+    if (!job) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(job.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    // done 时附带 downloadUrl 提示前端走 download 端点（浏览器直接 fetch 下载）
+    return c.json({
+      ...job,
+      downloadUrl: job.status === 'done' ? `/api/v1/export-jobs/${job.id}/download` : null,
+    });
+  });
+
+  app.get('/api/v1/export-jobs/:id/download', async (c) => {
+    const [job] = await db
+      .select()
+      .from(exportJobs)
+      .where(eq(exportJobs.id, c.req.param('id')!))
+      .limit(1);
+    if (!job) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    {
+      const access = await projectAccess(job.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    if (job.status !== 'done' || !job.path) throw new HTTPException(409, { message: 'EXPORT_NOT_READY' });
+    const nasRoot = await getNasRoot(config);
+    const abs = safeJoin(nasRoot, job.path);
+    try {
+      await fs.access(abs);
+    } catch {
+      throw new HTTPException(404, { message: 'EXPORT_FILE_MISSING' });
+    }
+    const filename = job.path.split('/').pop() ?? `export-${job.id}.tar.gz`;
+    c.header('Content-Type', 'application/gzip');
+    c.header('Content-Disposition', `attachment; filename="${filename}"`);
+    c.header('X-Content-Type-Options', 'nosniff');
+    return c.body((await fs.readFile(abs)).buffer as ArrayBuffer);
   });
 
   // ---- 通知中心（EXT-PLATFORM Step3 / ADR-P3）：个人收件箱读侧 ----

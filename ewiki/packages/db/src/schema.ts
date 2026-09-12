@@ -292,6 +292,22 @@ export const importJobs = pgTable('import_jobs', {
   finishedAt: ts('finished_at'),
 });
 
+// ---- 整库导出（设计文档 §4.1-F18）：tar.gz 归档到 NAS exports 目录，7 天过期清理 ----
+export const exportJobs = pgTable('export_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id')
+    .notNull()
+    .references(() => projects.id),
+  status: text('status').notNull().default('queued'), // queued | running | done | failed
+  format: text('format').notNull().default('tar.gz'),
+  path: text('path'),          // NAS 导出相对路径：exports/<projectSlug>-<id8>-<timestamp>.tar.gz
+  size: bigint('size', { mode: 'number' }), // 字节
+  error: text('error'),
+  createdBy: uuid('created_by').references(() => users.id),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  finishedAt: ts('finished_at'),
+});
+
 export const aiClassifyRuns = pgTable('ai_classify_runs', {
   id: uuid('id').primaryKey().defaultRandom(),
   projectId: uuid('project_id')

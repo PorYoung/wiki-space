@@ -396,6 +396,13 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
                   const t = e.currentTarget;
                   cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
                 },
+                // §4.1-F16 防御性保存：任何导致 textarea blur 的路径（切预览、Esc、其他按钮点击），
+                // 都在 blur 瞬间把当前 range 写进 ref，确保即使未来新增「快捷键直接打开弹层」
+                // 这类不经过按钮 onClick 的路径，cursorPosRef 也不会过期。
+                onBlur: (e) => {
+                  const t = e.currentTarget;
+                  cursorPosRef.current = { start: t.selectionStart, end: t.selectionEnd };
+                },
                 onKeyDown: (e) => {
                   if (e.key === 'Escape') {
                     e.preventDefault();

@@ -14,6 +14,7 @@
     "@ewiki/db": "workspace:*",
     "@ewiki/git": "workspace:*",
     "@ewiki/render": "workspace:*",
+    "@ewiki/server": "workspace:*",
     "@ewiki/shared": "workspace:*",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.38.0",

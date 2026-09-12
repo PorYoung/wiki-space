@@ -7,6 +7,7 @@ import { createDb } from '@ewiki/db';
 import type { Config } from '../config.js';
 import { registerRoutes } from './routes.js';
 import { registerRawRoute } from './routes-files.js';
+import { registerGCRoutes } from './routes-gc.js';
 
 /** Hono 上下文变量类型扩充（SDD 4.1/4.2） */
 declare module 'hono' {
@@ -59,6 +60,7 @@ export function createApp(deps: AppDeps): Hono {
 
   registerRawRoute(app, deps);
   registerRoutes(app, deps);
+  registerGCRoutes(app, deps);
 
   // ---- 生产模式静态托管：WEB_DIST 指向前端构建产物（apps/web/dist），SPA 回退 index.html ----
   // 注意：/api/*、/sites/*、/ws、/collab 均在上方路由先行匹配，此处只兜底前端资源。
