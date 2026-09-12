@@ -946,22 +946,26 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   });
 
   // ---- 文档全局列表（D1 + F04 预警数据源；真服务端分页：page/pageSize/total） ----
+  // 文件管理重构 §5.2 / §4.1-F1：支持 ?kind=text|binary 类型 facet 过滤；binary 项下发 rawUrl
   app.get('/api/v1/documents', async (c) => {
     const projectId = c.req.query('projectId');
     const status = c.req.query('status');
+    const kind = c.req.query('kind');
     const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1') || 1));
     const pageSize = Math.min(500, Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '500') || 500)));
+    const uid = c.get('userId') as string;
     const conditions = [isNull(documents.deletedAt)];
     if (projectId) {
-      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      const access = await projectAccess(projectId, uid, c.get('globalRole') as string);
       denyIfNot(access.canRead);
       conditions.push(eq(documents.projectId, projectId));
     } else if (c.get('globalRole') !== 'admin') {
       // 全局文档列表仅返回当前用户可读项目的文档
-      const uid = c.get('userId') as string;
       conditions.push(sql`${documents.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${uid})))`);
     }
     if (status) conditions.push(eq(documents.status, status));
+    // 文件管理重构 §4.1-F1：按 kind facet 过滤（缺省全部；非法值忽略）
+    if (kind === 'text' || kind === 'binary') conditions.push(eq(documents.kind, kind));
     const where = and(...conditions);
     const [totalRow] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -992,7 +996,13 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .orderBy(desc(documents.updatedAt))
       .limit(pageSize)
       .offset((page - 1) * pageSize);
-    const items = rows.map(({ content, ...row }) => ({ ...row, summary: documentSummary(content) }));
+    // 文件管理重构 §5.4：binary 项附带短期签名 rawUrl（img/iframe 直接消费，不必走 Bearer 头）
+    const items = rows.map(({ content, kind: k, ...row }) => ({
+      ...row,
+      kind: k,
+      summary: documentSummary(content),
+      rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
+    }));
     return c.json({ items, page, pageSize, total: Number(totalRow?.count ?? 0) });
   });
 
@@ -1031,16 +1041,21 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   });
 
   // ---- 项目文档列表（D2 BrowsePage 必需） ----
+  // 文件管理重构 §5.2 / §4.1-F1：支持 ?kind=text|binary 类型 facet；binary 项下发 rawUrl
   app.get('/api/v1/projects/:id/documents', async (c) => {
     const projectId = c.req.param('id')!;
+    const uid = c.get('userId') as string;
     {
-      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+      const access = await projectAccess(projectId, uid, c.get('globalRole') as string);
       denyIfNot(access.canRead);
     }
     const status = c.req.query('status');
     const q = c.req.query('q');
+    const kind = c.req.query('kind');
     const conditions = [eq(documents.projectId, projectId), isNull(documents.deletedAt)];
     if (status) conditions.push(eq(documents.status, status));
+    // 文件管理重构 §4.1-F1：按 kind facet 过滤（缺省全部；非法值忽略）
+    if (kind === 'text' || kind === 'binary') conditions.push(eq(documents.kind, kind));
     if (q) {
       const like = '%' + q + '%';
       conditions.push(sql`(
@@ -1074,7 +1089,13 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .from(documents)
       .where(and(...conditions))
       .orderBy(documents.path);
-    const items = rows.map(({ content, ...row }) => ({ ...row, summary: documentSummary(content) }));
+    // 文件管理重构 §5.4：binary 项附带短期签名 rawUrl
+    const items = rows.map(({ content, kind: k, ...row }) => ({
+      ...row,
+      kind: k,
+      summary: documentSummary(content),
+      rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
+    }));
     return c.json({ items, page: 1, pageSize: items.length, total: items.length });
   });
 
@@ -1255,16 +1276,19 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   });
 
   // ---- 文档版本历史（D5 BrowsePage 历史面板） ----
+  // 文件管理重构 §5.4：binary 类型的版本项附带 rawUrl（raw 接口暂不支持版本参数，指向当前 storageRef；
+  // 前端可据此渲染下载入口，后续接版本级 raw 时替换即可）
   app.get('/api/v1/documents/:id/versions', async (c) => {
     const id = c.req.param('id')!;
+    const uid = c.get('userId') as string;
     const [docRow] = await db
-      .select({ projectId: documents.projectId })
+      .select({ projectId: documents.projectId, kind: documents.kind })
       .from(documents)
       .where(and(eq(documents.id, id), isNull(documents.deletedAt)))
       .limit(1);
     if (!docRow) throw new HTTPException(404, { message: 'NOT_FOUND' });
     {
-      const access = await projectAccess(docRow.projectId, c.get('userId') as string, c.get('globalRole') as string);
+      const access = await projectAccess(docRow.projectId, uid, c.get('globalRole') as string);
       denyIfNot(access.canRead);
     }
     const rows = await db
@@ -1286,7 +1310,12 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .where(eq(documentVersions.documentId, id))
       .orderBy(desc(documentVersions.versionNo))
       .limit(50);
-    return c.json({ items: rows, total: rows.length });
+    const isBinary = docRow.kind === 'binary';
+    const items = rows.map((r) => ({
+      ...r,
+      rawUrl: isBinary ? buildRawUrl(config.JWT_SECRET, '/api/v1', { id }, uid, config.RAW_URL_TTL_SECONDS) : null,
+    }));
+    return c.json({ items, total: rows.length });
   });
 
   // ---- 单版本详情（diff 对比 / 版本预览 / 恢复前置） ----

@@ -458,6 +458,9 @@ function ProjectRightSidebar({ overview, members, activities, compact, onToggle 
                     </span>
                   </div>
                   <div className="mt-1 flex items-center gap-1.5 text-[10px] text-neutral-400">
+                    {/* 文件管理重构 §4.5：二进制版本行展示 mime（同文档所有版本 mime 一致，复用 currentDoc） */}
+                    {currentDoc?.mime && <span className="truncate font-mono">{currentDoc.mime}</span>}
+                    {currentDoc?.mime && <span className="w-1 h-1 shrink-0 rounded-full bg-neutral-300" />}
                     <span className="truncate">{v.authorName ?? '未知用户'}</span>
                     <span className="w-1 h-1 shrink-0 rounded-full bg-neutral-300" />
                     <span className="shrink-0">{relativeTime(v.createdAt)}</span>

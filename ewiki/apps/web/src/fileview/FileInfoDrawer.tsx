@@ -234,10 +234,13 @@ export function FileInfoDrawer({ documentId, open, canWrite, onClose, onOpenHist
               <dl className="divide-y border-y" style={{ borderColor: 'var(--border-soft)' }}>
                 <InfoRow label="类型">
                   {TYPE_LABEL[typeId] ?? TYPE_LABEL.binary}
-                  <span className="ml-1" style={{ color: 'var(--text-muted)' }}>
-                    ({doc.ext ?? extOf(doc.path) ?? '—'}{doc.mime ? ` · ${doc.mime}` : ''})
-                  </span>
+                  {/* 文件管理重构 §4.5：MIME 跟类型同行，ext 独立成行 */}
+                  {doc.mime && (
+                    <span className="ml-1" style={{ color: 'var(--text-muted)' }}>({doc.mime})</span>
+                  )}
                 </InfoRow>
+                {/* 文件管理重构 §4.5：扩展名独立展示，小写不含点 */}
+                <InfoRow label="扩展名">{doc.ext ?? extOf(doc.path) ?? '—'}</InfoRow>
                 <InfoRow label="大小">
                   {typeof doc.size === 'number' && doc.size > 0 ? humanSize(doc.size) : '—'}
                 </InfoRow>
@@ -248,18 +251,26 @@ export function FileInfoDrawer({ documentId, open, canWrite, onClose, onOpenHist
                 <InfoRow label="版本数">
                   {versionCount > 0 ? `${versionCount} 个版本` : '—'}
                 </InfoRow>
-                {isBinary && (
-                  <InfoRow label="存储">
-                    {doc.storageRef ? (
+                {/* 文件管理重构 §4.5：存储位置按 kind 分流——文本=PG+Git+NAS，二进制=blob 存储 */}
+                <InfoRow label="存储">
+                  {isBinary ? (
+                    doc.storageRef ? (
                       <span className="inline-flex items-center gap-1.5">
                         <HardDrive size={12} className="text-emerald-500" />
-                        <span className="align-middle" title={doc.storageRef}>已入库 · {shortRef(doc.storageRef)}</span>
+                        <span className="align-middle" title={doc.storageRef}>
+                          blob 存储 · {shortRef(doc.storageRef)}
+                        </span>
                       </span>
                     ) : (
                       <span style={{ color: 'var(--text-muted)' }}>未入库</span>
-                    )}
-                  </InfoRow>
-                )}
+                    )
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5">
+                      <HardDrive size={12} className="text-sky-500" />
+                      <span className="align-middle">文本库</span>
+                    </span>
+                  )}
+                </InfoRow>
                 <InfoRow label="创建时间">{formatTime(doc.createdAt)}</InfoRow>
                 <InfoRow label="更新时间">{formatTime(doc.updatedAt)}</InfoRow>
                 <InfoRow label="更新者">
@@ -270,58 +281,77 @@ export function FileInfoDrawer({ documentId, open, canWrite, onClose, onOpenHist
                 </InfoRow>
               </dl>
 
-              {isMarkdown && (
-                <div className="mt-4">
-                  <div className="mb-1.5 flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
-                    <Pencil size={12} />
-                    <span>文档标题</span>
-                  </div>
-                  {editingTitle ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        autoFocus
-                        value={titleDraft}
-                        onChange={(e) => setTitleDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') submitTitle();
-                          if (e.key === 'Escape') setEditingTitle(false);
-                        }}
-                        className="input h-8 flex-1 !text-xs"
-                        placeholder="输入文档标题"
-                      />
-                      <button
-                        type="button"
-                        onClick={submitTitle}
-                        disabled={renameTitleMutation.isPending}
-                        className="btn-primary !h-8 !w-8 !p-0"
-                        title="保存"
-                      >
-                        <Check size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingTitle(false)}
-                        className="btn-secondary !h-8 !w-8 !p-0"
-                        title="取消"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ) : (
+              {/* 文件管理重构 §4.5：title 与 path 解耦，所有类型都展示标题，但仅 Markdown 可编辑 */}
+              <div className="mt-4">
+                <div className="mb-1.5 flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                  <Pencil size={12} />
+                  <span>文档标题</span>
+                </div>
+                {editingTitle ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      autoFocus
+                      value={titleDraft}
+                      onChange={(e) => setTitleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitTitle();
+                        if (e.key === 'Escape') setEditingTitle(false);
+                      }}
+                      className="input h-8 flex-1 !text-xs"
+                      placeholder="输入文档标题"
+                    />
                     <button
                       type="button"
-                      onClick={startEditTitle}
-                      disabled={!canWrite}
-                      className="flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors hover:bg-neutral-500/5 disabled:cursor-not-allowed disabled:opacity-60"
-                      style={{ borderColor: 'var(--border-soft)', color: 'var(--text-primary)' }}
-                      title={canWrite ? '重命名标题' : '只读权限'}
+                      onClick={submitTitle}
+                      disabled={renameTitleMutation.isPending}
+                      className="btn-primary !h-8 !w-8 !p-0"
+                      title="保存"
                     >
-                      <span className="truncate">{doc.title || '（未设置标题）'}</span>
-                      <Pencil size={12} className="shrink-0" style={{ color: 'var(--text-muted)' }} />
+                      <Check size={14} />
                     </button>
-                  )}
-                </div>
-              )}
+                    <button
+                      type="button"
+                      onClick={() => setEditingTitle(false)}
+                      className="btn-secondary !h-8 !w-8 !p-0"
+                      title="取消"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : isMarkdown && canWrite ? (
+                  <button
+                    type="button"
+                    onClick={startEditTitle}
+                    className="flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors hover:bg-neutral-500/5"
+                    style={{ borderColor: 'var(--border-soft)', color: 'var(--text-primary)' }}
+                    title="重命名标题"
+                  >
+                    <span className="truncate">
+                      {doc.title || (() => {
+                        const base = basenameOf(doc.path);
+                        const dotIdx = base.startsWith('.') ? -1 : base.lastIndexOf('.');
+                        return dotIdx > 0 ? base.slice(0, dotIdx) : base;
+                      })() || '（未设置标题）'}
+                    </span>
+                    <Pencil size={12} className="shrink-0" style={{ color: 'var(--text-muted)' }} />
+                  </button>
+                ) : (
+                  // 非 Markdown 类型或只读：仅展示 title （或从 path basename 去扩展名推导），无编辑入口
+                  <div
+                    className="rounded-md border px-3 py-2 text-left text-xs"
+                    style={{ borderColor: 'var(--border-soft)', color: 'var(--text-primary)' }}
+                    title={isMarkdown ? '只读权限，无法编辑标题' : `${TYPE_LABEL[typeId] ?? TYPE_LABEL.binary} 不支持独立标题编辑`}
+                  >
+                    <span className="truncate">
+                      {doc.title || (() => {
+                        const base = basenameOf(doc.path);
+                        const dotIdx = base.startsWith('.') ? -1 : base.lastIndexOf('.');
+                        return dotIdx > 0 ? base.slice(0, dotIdx) : base;
+                      })() || '（未设置标题）'}
+                    </span>
+                  </div>
+                )}
+              </div>
 
               <div className="mt-4">
                 <div className="mb-1.5 flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>

@@ -47,17 +47,50 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
 
   const tooLarge = file.size > READONLY_LIMIT;
 
-  // 切换文件：重置缓冲并载入文本（content 已内联则跳过 blob 拉取与解码）
+  // §6.2 ref 存最新值：避免 useEffect 闭包陷阱（§6.2 跨宿主文件切换逻辑）
+  const prevFileIdRef = useRef<string | null>(null);
+  const savedRef = useRef(savedValue);
+  const valueRef = useRef(value);
+  savedRef.current = savedValue;
+  valueRef.current = value;
+
+  // §6.2 跨宿主文件切换逻辑：
+  //   - file.id 变 → 切换了文件：全重置 + 载入新内容（从 content 内联或拉 raw blob）
+  //   - file.id 不变但 file.content 变 → WS 通知服务器有新版本：
+  //     - value === savedValue（clean）→ 自动更新为新 content
+  //     - value !== savedValue（dirty）→ 保留用户输入，保存时触发 409
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
     setSaveError(null);
 
-    if (typeof file.content === 'string') {
-      setValue(file.content);
-      setSavedValue(file.content);
+    // file.id 变 = 切换文件，需全重置；否则只是服务器版本变更
+    const switched = file.id !== prevFileIdRef.current;
+    if (switched) prevFileIdRef.current = file.id;
+
+    const finish = (text: string) => {
+      if (cancelled) return;
+      if (switched) {
+        // 切换文件：全重置
+        setValue(text);
+        setSavedValue(text);
+      } else if (text !== savedRef.current) {
+        // 同文件，服务器 content 变了
+        if (valueRef.current === savedRef.current) {
+          // clean：安全更新
+          setValue(text);
+          setSavedValue(text);
+        } else {
+          // dirty：用户有未保存输入，只更新 saved 让状态与服务器对齐
+          setSavedValue(text);
+        }
+      }
       setLoading(false);
+    };
+
+    if (typeof file.content === 'string') {
+      finish(file.content);
       return () => {
         cancelled = true;
       };
@@ -67,8 +100,7 @@ export function CodeViewer({ file, canWrite, isDark, onSave, host }: FileViewerP
       .then(decodeUtf8Strict)
       .then((text) => {
         if (cancelled) return;
-        setValue(text);
-        setSavedValue(text);
+        finish(text);
       })
       .catch((err: unknown) => {
         if (cancelled) return;

@@ -70,15 +70,37 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave }: FileViewerPro
 
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
+  // §6.2 ref 存最新值：避免 useEffect 闭包陷阱（saved/buffer 变化频率高，不能放 deps）
+  const prevFileIdRef = useRef<string | null>(null);
+  const savedRef = useRef(saved);
+  const bufferRef = useRef(buffer);
+  savedRef.current = saved;
+  bufferRef.current = buffer;
 
-  // 切换文件：以新文件内容重置本地缓冲与视图
+  // §6.2 跨宿主文件切换逻辑：
+  //   - file.id 变 → 切换了文件：全重置 buffer/saved/view/toc
+  //   - file.id 不变但 file.content 变 → WS 通知服务器有新版本：
+  //     - buffer === saved（clean）→ 自动更新 buffer 为新 content
+  //     - buffer !== saved（dirty）→ 保留 buffer 等待用户保存（保存时触发 409）
   useEffect(() => {
     const next = file.content ?? '';
-    setBuffer(next);
-    setSaved(next);
-    setSaveError(null);
-    setView('preview');
-    setActiveHeadingId(null);
+    if (file.id !== prevFileIdRef.current) {
+      // 切换到新文件
+      prevFileIdRef.current = file.id;
+      setBuffer(next);
+      setSaved(next);
+      setSaveError(null);
+      setView('preview');
+      setActiveHeadingId(null);
+    } else if (next !== savedRef.current) {
+      // 同文件，服务器 content 变了
+      if (bufferRef.current === savedRef.current) {
+        // clean：安全更新 buffer（saved 将在下轮 render 同步到 ref）
+        setBuffer(next);
+      }
+      // dirty：保留 buffer，等用户手动处理（保存时触发 PUT 409）
+      setSaveError(null);
+    }
   }, [file.id, file.content]);
 
   const tocItems = useMemo(() => extractToc(buffer), [buffer]);

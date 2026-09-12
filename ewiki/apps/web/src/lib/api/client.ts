@@ -81,36 +81,74 @@ function promptSessionExpired(): void {
   }
 }
 
-export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+// ---------------------------------------------------------------------------
+// 私有：带 token + 401 刷新重放的 fetch 执行器（SDD 4.1 / §6.3）
+//   autoJsonContentType = true  → body 存在且未指定 Content-Type 时自动 application/json
+//   autoJsonContentType = false → 完全不碰 Content-Type（FormData 让浏览器补 multipart boundary）
+// ---------------------------------------------------------------------------
+async function executeFetch(
+  path: string,
+  body: BodyInit | undefined,
+  init: RequestInit | undefined,
+  autoJsonContentType: boolean,
+): Promise<Response> {
   const doFetch = (): Promise<Response> => {
     const headers = new Headers(init?.headers);
     const token = tokenStore.access;
     if (token) headers.set('Authorization', `Bearer ${token}`);
-    if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-    return fetch(path, { ...init, headers });
+    if (autoJsonContentType && body && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+    return fetch(path, { ...init, body, headers });
   };
-
   let res = await doFetch();
   if (res.status === 401 && (await refreshTokens())) {
     res = await doFetch(); // 重放一次（SDD 4.1）
   }
-  if (!res.ok) {
-    // refresh 失败后的最终 401 = 会话已失效，主动提醒用户（而非各页面静默报错）
-    if (res.status === 401) promptSessionExpired();
-    const body = (await res.json().catch(() => ({}))) as {
-      code?: string;
-      message?: string;
-      details?: unknown;
-      requestId?: string;
-    };
-    throw new EwikiApiError(
-      body.code ?? 'HTTP_ERROR',
-      body.message ?? `HTTP ${res.status}`,
-      res.status,
-      body.details,
-      body.requestId,
-    );
-  }
+  return res;
+}
+
+/** 解析非 2xx 响应体，抛出 EwikiApiError（SDD 4.1 错误信封） */
+async function parseErrorAndThrow(res: Response): Promise<never> {
+  if (res.status === 401) promptSessionExpired();
+  const body = (await res.json().catch(() => ({}))) as {
+    code?: string;
+    message?: string;
+    details?: unknown;
+    requestId?: string;
+  };
+  throw new EwikiApiError(
+    body.code ?? 'HTTP_ERROR',
+    body.message ?? `HTTP ${res.status}`,
+    res.status,
+    body.details,
+    body.requestId,
+  );
+}
+
+export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await executeFetch(path, init?.body ?? undefined, init, true);
+  if (!res.ok) await parseErrorAndThrow(res);
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+/**
+ * FormData / 原生 fetch 上传 helper（§4.3 / §6.3）：
+ *  - 不强制设 Content-Type，浏览器自动补 multipart/form-data boundary
+ *  - 带 token + 401 刷新重放 + 错误信封，与 apiFetch 能力对称
+ *  - 返回值与 apiFetch 一致：204 → undefined，其余解析 JSON
+ *
+ * 注意：XHR 场景（需要 upload.onprogress 进度事件）仍应直接用 XMLHttpRequest，
+ * 见 upload-api.ts 的 uploadFileXhr；此 helper 仅覆盖 fetch + FormData 的便利调用。
+ */
+export async function apiFetchForm<T = unknown>(
+  path: string,
+  body: BodyInit,
+  init?: Omit<RequestInit, 'body'>,
+): Promise<T> {
+  const res = await executeFetch(path, body, init, false);
+  if (!res.ok) await parseErrorAndThrow(res);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -142,4 +180,26 @@ export async function fetchAllDocuments<T>(pageSize = 500): Promise<T[]> {
     items.push(...next.items);
   }
   return items;
+}
+
+/**
+ * 轻量下载触发（§6.3）：
+ *  - 有 filename 时用 a[href, download=filename]，浏览器弹出另存为并带建议名
+ *  - 无 filename 时直接 location.href，交由浏览器按响应头决定（如 Content-Disposition）
+ *  - 签名 URL（rawUrl）、普通 /raw 直链均可，不附加鉴权
+ *
+ * 注：需要带 Bearer token 拉 blob 再触发下载的场景（如历史版本无签名地址），
+ * 见 fileview/api.ts 的 downloadFile；本函数只负责"手头已有 URL 字符串"的快速触发。
+ */
+export function downloadUrl(url: string, filename?: string): void {
+  if (filename) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } else {
+    window.location.href = url;
+  }
 }

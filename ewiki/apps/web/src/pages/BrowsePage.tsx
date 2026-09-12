@@ -5,21 +5,14 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import MDEditor from '@uiw/react-md-editor';
 import { useTheme } from '../theme/ThemeProvider';
-import { markdownToHtml, slugify } from '../lib/markdown';
-import { useMermaidRender } from '../lib/use-mermaid-render';
 import { EwikiRealtime } from '../lib/ws/client';
 import {
   Activity,
   ArrowLeft,
-  BookOpen,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
-  Code,
-  Eye,
   FileCode2,
   FileCog,
   FileText,
@@ -30,28 +23,16 @@ import {
   Filter,
   GitBranch,
   History,
-  Image as ImageIcon,
-  ImagePlus,
-  Keyboard,
-  Layers,
   MoreHorizontal,
-  Palette,
-  PenTool,
   Pencil,
   Plus,
-  Redo2,
   RefreshCw,
-  Save,
   Search,
-  Sun,
-  Moon,
   Tag,
   Trash2,
-  Undo2,
   Upload,
   UploadCloud,
   X,
-  type LucideIcon,
 } from 'lucide-react';
 import {
   useNavigate,
@@ -62,7 +43,6 @@ import { basenameOf, extOf, resolveFileType, type FileKind } from '@ewiki/shared
 import { apiFetch } from '../lib/api/client';
 import FileHost, { type FileMeta } from '../fileview/FileHost';
 import { FileInfoDrawer } from '../fileview/FileInfoDrawer';
-import { fetchRawBlob, useAuthImageUrl } from '../fileview/api';
 import { useProjectRole } from '../lib/api/use-project-role';
 import { useShowToast } from '../components/Toast';
 import {
@@ -75,7 +55,6 @@ import {
   type TreeMenuItem,
 } from '../components/TreeContextMenu';
 import { UploadManager } from '../tree/UploadManager';
-import { createUploadSession, uploadFileXhr, explainUploadError } from '../tree/upload-api';
 import { fileIconOf, docMatchesFacet, FILE_FACETS, type FileFacetId, type FileTypeId } from '../tree/fileIcons';
 import { useUiStore } from '../stores/uiStore';
 
@@ -129,39 +108,6 @@ interface DocumentVersion {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** 取库内 posix 路径的目录段（根文档返回 ''） */
-function dirOfPosix(p: string): string {
-  const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
-  const idx = norm.lastIndexOf('/');
-  return idx < 0 ? '' : norm.slice(0, idx);
-}
-
-/**
- * 计算从文档 docPath 指向目标资源 targetPath 的相对 posix 路径（§5.3 选图插入）：
- * 同目录直接 basename；子目录无前缀；上级目录用 ../ 归一；path.normalize 只吃 '/'
- * 输入，Windows 反斜杠会被当成普通字符，故先显式 replace 再手工压栈。
- */
-function relativePosix(docPath: string, targetPath: string): string {
-  const fromParts = dirOfPosix(docPath).split('/').filter(Boolean);
-  const toParts = targetPath.replace(/\\/g, '/').split('/').filter(Boolean);
-  let common = 0;
-  while (common < fromParts.length && common < toParts.length - 1 && fromParts[common] === toParts[common]) {
-    common += 1;
-  }
-  const ups = fromParts.length - common;
-  const down = toParts.slice(common);
-  const upSegs = Array.from({ length: ups }, () => '..');
-  return [...upSegs, ...down].join('/');
-}
-
-/** 生成插入到正文的图片 markdown（alt 取标题或无扩展名 basename） */
-function buildImageMarkdown(label: string, relPath: string): string {
-  const alt = (label || '').replace(/[\[\]]/g, '');
-  return `![${alt}](${relPath.replace(/\)/g, '%29')})`;
-}
-
-
 
 // untracked=灰降调（对齐 LibraryPage STATUS_MAP 四态标尺）：品牌绿留给 Git 仓库/主操作，
 // 与「已同步」的 success 绿区分，避免双绿混淆
@@ -258,22 +204,6 @@ function prettyTreeError(err: unknown, fallback: string): string {
   if (msg.includes('FORBIDDEN')) return '没有编辑权限';
   if (msg.includes('VALIDATION_FAILED')) return msg.replace('VALIDATION_FAILED: ', '');
   return msg || fallback;
-}
-
-/** 文档预览渲染：markdown-it（表格/高亮/KaTeX/mermaid）统一入口见 lib/markdown.ts；TOC 提取仍走源文正则 */
-function extractToc(md: string | null): Array<{ level: number; text: string; id: string }> {
-  if (!md) return [];
-  const lines = md.split('\n');
-  const toc: Array<{ level: number; text: string; id: string }> = [];
-  for (const line of lines) {
-    const h3 = line.match(/^###\s+(.+)$/);
-    const h2 = line.match(/^##\s+(.+)$/);
-    const h1 = line.match(/^#\s+(.+)$/);
-    if (h3) toc.push({ level: 3, text: h3[1]!.trim(), id: slugify(h3[1]!) });
-    else if (h2) toc.push({ level: 2, text: h2[1]!.trim(), id: slugify(h2[1]!) });
-    else if (h1) toc.push({ level: 1, text: h1[1]!.trim(), id: slugify(h1[1]!) });
-  }
-  return toc;
 }
 
 // ---------------------------------------------------------------------------
@@ -838,793 +768,6 @@ function TreeSidebar({
 }
 
 // ---------------------------------------------------------------------------
-// Document editor — 中间内容区
-// ---------------------------------------------------------------------------
-
-const RENDER_THEMES: Array<{ key: string; label: string; desc: string; Icon: LucideIcon }> = [
-  { key: 'plain', label: '经典', desc: '默认无衬线 · 紧凑', Icon: FileText },
-  { key: 'book', label: '书籍', desc: '衬线体 · 宽松行距', Icon: BookOpen },
-  { key: 'journal', label: '期刊', desc: '窄栏双端对齐', Icon: FileText },
-  { key: 'compact', label: '工程风', desc: '等宽字体 · 大密度', Icon: Code },
-  { key: 'tech', label: '科技蓝', desc: '冷色调高亮', Icon: Layers },
-  { key: 'solarized-light', label: 'Solarized Light', desc: '经典米黄', Icon: Sun },
-  { key: 'solarized-dark', label: 'Solarized Dark', desc: '经典深蓝', Icon: Moon },
-];
-
-// 编辑器快捷键速查（@uiw/react-md-editor 内置 Markdown 快捷键 + 页面级快捷键）
-const SHORTCUT_GROUPS: Array<{ title: string; items: Array<{ keys: string; desc: string }> }> = [
-  {
-    title: '编辑',
-    items: [
-      { keys: 'Ctrl/⌘ + B', desc: '加粗' },
-      { keys: 'Ctrl/⌘ + I', desc: '斜体' },
-      { keys: 'Ctrl/⌘ + L', desc: '链接' },
-      { keys: 'Ctrl/⌘ + K', desc: '图片' },
-      { keys: 'Ctrl/⌘ + Q', desc: '引用' },
-      { keys: 'Ctrl/⌘ + J', desc: '行内代码' },
-      { keys: 'Ctrl/⌘ + Shift + J', desc: '代码块' },
-      { keys: 'Ctrl/⌘ + H', desc: '分割线' },
-      { keys: 'Ctrl/⌘ + /', desc: '注释' },
-    ],
-  },
-  {
-    title: '行操作',
-    items: [
-      { keys: 'Tab / Shift+Tab', desc: '缩进 / 减少缩进' },
-      { keys: 'Ctrl/⌘ + D', desc: '复制当前行' },
-      { keys: 'Alt + ↑ / ↓', desc: '上移 / 下移当前行' },
-      { keys: 'Enter', desc: '列表中自动续行' },
-    ],
-  },
-  {
-    title: '文档',
-    items: [
-      { keys: 'Ctrl/⌘ + S', desc: '保存文档' },
-      { keys: 'Ctrl/⌘ + E', desc: '编辑 / 预览切换' },
-      { keys: 'Esc', desc: '编辑态切回预览' },
-    ],
-  },
-];
-
-/** 鉴权缩略图：/raw 需 Bearer，img 不能直接指，故走 objectURL（卸载自动 revoke） */
-function AuthImageThumb({ id, className, alt = '' }: { id: string; className?: string; alt?: string }): React.ReactElement {
-  const url = useAuthImageUrl(id);
-  if (!url) {
-    return (
-      <span className={`flex items-center justify-center text-neutral-300 ${className ?? ''}`}>
-        <ImageIcon size={22} />
-      </span>
-    );
-  }
-  return <img src={url} alt={alt} loading="lazy" className={className} />;
-}
-
-// ---------------------------------------------------------------------------
-// 插入图片弹层（§5.3）：列出库内 typeId=image 图片 + 当场上传新图；无新增 .tsx 文件，
-// 作为 BrowsePage 内部组件与 DocumentEditor 同文件；上传冲突用 window.confirm 三策略最低限度处理
-// ---------------------------------------------------------------------------
-
-function ImagePickerModal({
-  projectId,
-  docs,
-  currentDocPath,
-  canWrite,
-  onClose,
-  onPick,
-  onUploaded,
-}: {
-  projectId: string;
-  docs: DocumentListItem[];
-  currentDocPath: string;
-  canWrite: boolean;
-  onClose: () => void;
-  onPick: (image: DocumentListItem) => void;
-  onUploaded: () => void;
-}): React.ReactElement {
-  const [kw, setKw] = useState('');
-  const [targetFolder, setTargetFolder] = useState(dirOfPosix(currentDocPath));
-  const [busy, setBusy] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const folders = useMemo(() => {
-    const set = new Set<string>();
-    for (const d of docs) {
-      const dir = dirOfPosix(d.path);
-      if (dir) set.add(dir);
-    }
-    return ['', ...Array.from(set).sort((a, b) => a.localeCompare(b))];
-  }, [docs]);
-
-  const images = useMemo(() => {
-    const kwl = kw.trim().toLowerCase();
-    return docs
-      .filter((d) => !isKeepPlaceholder(d) && resolveFileType(d.path, d.mime).typeId === 'image')
-      .filter((d) => !kwl || d.path.toLowerCase().includes(kwl) || (d.title ?? '').toLowerCase().includes(kwl))
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  }, [docs, kw]);
-
-  const handleFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0 || busy) return;
-    const imageFiles = Array.from(files).filter((f) => resolveFileType(f.name, f.type || null).typeId === 'image');
-    if (imageFiles.length === 0) {
-      window.alert('仅支持上传图片文件（png / jpg / gif / webp / svg 等）');
-      return;
-    }
-    setBusy(true);
-    try {
-      // 1) 批量预检（大小/路径/同名冲突）
-      const candidates = imageFiles.map((f) => ({
-        path: targetFolder ? `${targetFolder}/${f.name}` : f.name,
-        size: f.size,
-        mime: f.type || null,
-      }));
-      const session = await createUploadSession(projectId, candidates);
-      let uploadedCount = 0;
-      for (let i = 0; i < imageFiles.length; i += 1) {
-        const file = imageFiles[i]!;
-        const item = session.items[i]!;
-        if (item.decision === 'reject') {
-          window.alert(`「${file.name}」被拒绝：${item.reason || '不符合上传条件'}`);
-          continue;
-        }
-        // 2) 冲突：最低限度 window.confirm 三策略（替换 / 自动共存 / 取消）
-        let policy: 'error' | 'replace' | 'rename' = 'error';
-        if (item.decision === 'conflict') {
-          const choice = window.confirm(
-            `「${file.name}」已存在。\n\n确定 = 替换原文件并生成新版本\n取消 = 自动改名共存（-1 / -2 后缀）\n\n（按浏览器对话框 Esc 后重试可放弃该文件）`,
-          );
-          policy = choice ? 'replace' : 'rename';
-        }
-        const idemKey = `md-image-${Date.now()}-${i}-${file.size}`;
-        try {
-          const result = await uploadFileXhr(projectId, item.path, file, policy, idemKey);
-          uploadedCount += 1;
-          // rename 策略下服务端返回真实落库路径：自动选中刚上传的图片
-          const finalPath = result.path || item.path;
-          const picked = docs.find((d) => d.path === finalPath);
-          if (i === imageFiles.length - 1 || imageFiles.length === 1) {
-            if (!picked) onUploaded();
-          }
-          void result;
-        } catch (err) {
-          window.alert(`「${file.name}」上传失败：${explainUploadError(err)}`);
-        }
-      }
-      if (uploadedCount > 0) onUploaded();
-    } catch (err) {
-      window.alert(explainUploadError(err));
-    } finally {
-      setBusy(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-neutral-900/40 p-4 backdrop-blur-sm"
-      onMouseDown={onClose}>
-      <div className="flex max-h-[82vh] w-[640px] max-w-full flex-col overflow-hidden rounded-xl bg-white shadow-2xl animate-fade-up"
-        onMouseDown={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-2 border-b px-4 py-3" style={{ borderColor: 'var(--border-soft)' }}>
-          <ImagePlus size={16} className="text-primary-600" />
-          <h3 className="text-sm font-semibold text-neutral-800">插入图片</h3>
-          <span className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600"
-            role="button" tabIndex={0} onClick={onClose}><X size={14} /></span>
-        </div>
-
-        {/* 上传区：默认当前 md 同目录，可改到其他库内目录 */}
-        {canWrite && (
-          <div className="border-b px-4 py-3" style={{ borderColor: 'var(--border-soft)' }}>
-            <div className="flex items-center gap-2">
-              <select value={targetFolder} onChange={(e) => setTargetFolder(e.target.value)}
-                className="h-8 max-w-[260px] truncate rounded-md border border-neutral-200 bg-white px-2 text-xs text-neutral-700 focus:border-primary-400 focus:outline-none">
-                {folders.map((f) => (
-                  <option key={f || '/'} value={f}>{f || '根目录'}</option>
-                ))}
-              </select>
-              <button type="button" className="btn-secondary !h-8 !text-xs" disabled={busy}
-                onClick={() => fileInputRef.current?.click()}>
-                <Upload size={13} /> {busy ? '上传中…' : '上传新图片到此目录'}
-              </button>
-              <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden"
-                onChange={(e) => void handleFiles(e.target.files)} />
-            </div>
-            <p className="mt-1.5 text-[11px] text-neutral-400">新图上传后会插入相对路径，随文档一起移动目录仍可解析</p>
-          </div>
-        )}
-
-        <div className="border-b px-4 py-2.5" style={{ borderColor: 'var(--border-soft)' }}>
-          <div className="relative">
-            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
-            <input type="text" className="h-8 w-full rounded-md bg-neutral-100 pl-8 pr-3 text-xs placeholder:text-neutral-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
-              placeholder="按路径 / 标题搜索库内图片…" value={kw} onChange={(e) => setKw(e.target.value)} autoFocus />
-          </div>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-3 scrollbar-thin">
-          {images.length === 0 ? (
-            <div className="py-10 text-center text-xs text-neutral-400">
-              <ImageIcon size={28} className="mx-auto mb-2 text-neutral-300" />
-              库内暂无图片{kw ? '匹配' : ''}，{canWrite ? '可在上方上传' : '请联系有编辑权限的成员上传'}
-            </div>
-          ) : (
-            <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
-              {images.map((img) => (
-                <button key={img.id} type="button" onClick={() => onPick(img)}
-                  className="group flex flex-col overflow-hidden rounded-lg border border-neutral-200 text-left transition hover:border-primary-400 hover:shadow-sm">
-                  <div className="flex h-20 items-center justify-center overflow-hidden bg-neutral-50">
-                    <AuthImageThumb id={img.id} className="max-h-full max-w-full object-contain" />
-                  </div>
-                  <div className="truncate px-2 py-1.5 text-[11px] text-neutral-600 group-hover:text-primary-700" title={img.path}>
-                    {fileNameOfPath(img.path)}
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DocumentEditor({
-  doc,
-  editContent,
-  onEditChange,
-  view,
-  setView,
-  onSave,
-  saving,
-  renderTheme,
-  setRenderTheme,
-  canWrite,
-  onRenameTitle,
-  renamingTitle,
-  onOpenInfo,
-  onOpenHistory,
-  projectId,
-  docs,
-  onPickImage,
-}: {
-  doc: DocumentDetail | null;
-  editContent: string;
-  onEditChange: (v: string) => void;
-  view: 'preview' | 'edit';
-  setView: (v: 'preview' | 'edit') => void;
-  onSave: () => void;
-  saving: boolean;
-  renderTheme: string;
-  setRenderTheme: (t: string) => void;
-  /** 当前用户是否可编辑文档（false = 只读：隐藏编辑/保存入口，禁用双击进入编辑） */
-  canWrite: boolean;
-  /** 标题元数据编辑（仅 PATCH title，不改文件名/path；§4.5） */
-  onRenameTitle: (title: string) => Promise<void> | void;
-  renamingTitle: boolean;
-  /** 打开文件信息抽屉（md 也走统一宿主） */
-  onOpenInfo: () => void;
-  /** 打开右栏历史 tab */
-  onOpenHistory: () => void;
-  /** 当前项目 id（选图弹层上传目标目录所需） */
-  projectId: string;
-  /** 项目内全量文档列表（选图弹层过滤 typeId=image） */
-  docs: DocumentListItem[];
-  /** 选图完成回调：插入生成的 markdown 到正文末尾 */
-  onPickImage: (item: { docPath: string; label: string }) => void;
-}): React.ReactElement {
-  const previewScrollRef = useRef<HTMLDivElement | null>(null);
-  const editorWrapRef = useRef<HTMLDivElement | null>(null);
-  const { isDark } = useTheme();
-  const [fadeKey, setFadeKey] = useState(0);
-  const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
-  const [showThemeMenu, setShowThemeMenu] = useState(false);
-  const [showShortcuts, setShowShortcuts] = useState(false);
-  const [showImagePicker, setShowImagePicker] = useState(false);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState('');
-  const titleInputRef = useRef<HTMLInputElement | null>(null);
-  // 保存/视图切换的最新引用，供全局快捷键调用
-  const onSaveRef = useRef(onSave);
-  const setViewRef = useRef(setView);
-  useEffect(() => { onSaveRef.current = onSave; }, [onSave]);
-  useEffect(() => { setViewRef.current = setView; }, [setView]);
-
-  const tocItems = useMemo(() => extractToc(doc?.content ?? null), [doc?.content]);
-  // 预览 HTML：markdown-it 渲染（GFM 表格/代码高亮/KaTeX/mermaid 占位容器）
-  const previewHtml = useMemo(() => markdownToHtml(doc?.content ?? null), [doc?.content]);
-  // mermaid 占位容器异步渲染为 SVG（懒加载 mermaid，跟随明暗主题）
-  useMermaidRender(previewScrollRef, view === 'preview', isDark, previewHtml);
-
-  // ---- P3a：markdown 预览相对路径图片 → 鉴权拉 raw → object URL ----
-  // markdown 管线输出纯 HTML `<img src="相对路径">`，浏览器裸 fetch 会 401；
-  // 这里在 DOM 渲染后扫描相对路径 img，按库内 posix 路径解析图片文档 → fetchRawBlob → object URL。
-  useEffect(() => {
-    if (view !== 'preview' || !doc?.content || !previewScrollRef.current) return undefined;
-    const container = previewScrollRef.current;
-    let cancelled = false;
-    const objectUrls: string[] = [];
-
-    const resolve = (src: string): DocumentListItem | undefined => {
-      // 纯 posix：doc.path 的目录段 + src 相对路径 resolve → docs 里精确匹配（与 shared links.ts 同口径）
-      const fromDir = dirOfPosix(doc.path);
-      const combined = src.startsWith('/') ? src : `${fromDir}/${src}`;
-      const segments: string[] = [];
-      for (const seg of combined.replace(/\\/g, '/').split('/')) {
-        if (!seg || seg === '.') continue;
-        if (seg === '..') segments.pop();
-        else segments.push(seg);
-      }
-      const posix = segments.join('/');
-      return docs.find((d) => d.path === posix);
-    };
-
-    const kickoff = (): void => {
-      const imgs = container.querySelectorAll('img[src]');
-      for (const img of imgs) {
-        const raw = img.getAttribute('src') ?? '';
-        // 跳过 http / https / data: / mailto / # 锚点 / 绝对路径（/开头视为站外静态资源）
-        if (/^(https?:|data:|mailto:)/i.test(raw) || raw.startsWith('#') || raw.startsWith('/')) continue;
-        // 跳过已被替换过的 object URL（revoke 前保持）
-        if (raw.startsWith('blob:')) continue;
-
-        const target = resolve(raw);
-        if (!target || target.kind !== 'binary') continue;
-
-        fetchRawBlob({ id: target.id, rawUrl: undefined } as FileMeta)
-          .then((blob) => {
-            if (cancelled) return;
-            const url = URL.createObjectURL(blob);
-            objectUrls.push(url);
-            img.setAttribute('src', url);
-          })
-          .catch(() => {
-            // 拉取失败保留原 src（自然 404 占位），不阻断
-          });
-      }
-    };
-
-    // 等 React 完成 render（dangerouslySetInnerHTML → DOM）
-    const t = window.setTimeout(kickoff, 30);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(t);
-      for (const u of objectUrls) URL.revokeObjectURL(u);
-    };
-  }, [view, previewHtml, doc?.content, doc?.path, docs]);
-
-  useEffect(() => {
-    setFadeKey((k) => k + 1);
-    setActiveHeadingId(null);
-  }, [doc?.id]);
-
-  // scroll-spy
-  useEffect(() => {
-    if (view !== 'preview' || !previewScrollRef.current) return;
-    const container = previewScrollRef.current;
-    const handleScroll = () => {
-      const headings = container.querySelectorAll('h1[id], h2[id], h3[id]');
-      let current: string | null = null;
-      for (const h of headings) {
-        const rect = h.getBoundingClientRect();
-        const containerTop = container.getBoundingClientRect().top;
-        if (rect.top - containerTop <= 80) current = h.id;
-      }
-      setActiveHeadingId(current);
-    };
-    container.addEventListener('scroll', handleScroll, { passive: true });
-    handleScroll();
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, [view, doc?.id]);
-
-  const jumpToHeading = (id: string) => {
-    if (!id || !previewScrollRef.current) return;
-    const el = previewScrollRef.current.querySelector(`#${CSS.escape(id)}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
-  // 撤销/重做：textarea 是受控组件，React 用原生 setter 同步 value 后浏览器历史栈仍可用，
-  // execCommand 触发的 input 事件会让 React 的 onChange 正常回写 editContent
-  const focusTextarea = (): HTMLTextAreaElement | null =>
-    editorWrapRef.current?.querySelector('textarea') ?? null;
-  const runNativeCommand = (cmd: 'undo' | 'redo') => {
-    const ta = focusTextarea();
-    if (!ta) return;
-    ta.focus();
-    document.execCommand(cmd);
-  };
-
-  // 页面级快捷键：Ctrl/⌘+S 保存、Ctrl/⌘+E 切换编辑/预览（焦点在输入控件时同样生效并阻止浏览器默认行为）
-  useEffect(() => {
-    if (!doc || !canWrite) return undefined;
-    const handler = (e: KeyboardEvent) => {
-      const mod = e.ctrlKey || e.metaKey;
-      if (!mod) return;
-      const key = e.key.toLowerCase();
-      if (key === 's') {
-        e.preventDefault();
-        if (!saving) onSaveRef.current();
-      } else if (key === 'e') {
-        e.preventDefault();
-        setViewRef.current(view === 'edit' ? 'preview' : 'edit');
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [doc, canWrite, saving, view]);
-
-  // 切换文档时退出标题编辑态
-  useEffect(() => {
-    setEditingTitle(false);
-  }, [doc?.id]);
-  useEffect(() => {
-    if (editingTitle) titleInputRef.current?.select();
-  }, [editingTitle]);
-
-  const startEditTitle = () => {
-    setTitleDraft(doc?.title ?? '');
-    setEditingTitle(true);
-  };
-  const cancelEditTitle = () => setEditingTitle(false);
-  const submitTitle = async () => {
-    const next = titleDraft.trim();
-    if (!next || !doc || next === (doc.title ?? '')) {
-      setEditingTitle(false);
-      return;
-    }
-    try {
-      await onRenameTitle(next);
-      setEditingTitle(false);
-    } catch {
-      // 错误提示由父级 mutation 统一 toast，输入态保留以便重试
-    }
-  };
-
-  if (!doc) {
-    return (
-      <section className="h-full flex items-center justify-center text-sm text-neutral-400">
-        <div className="text-center">
-          <FileText size={40} className="mx-auto mb-3 text-neutral-300" />
-          <p>从左侧目录树选择文档开始阅读</p>
-        </div>
-      </section>
-    );
-  }
-
-  const pathParts = (doc.path || '').split('/').filter(Boolean);
-  const status = STATUS_MAP[doc.status] ?? STATUS_MAP.synced;
-
-  return (
-    <>
-    <section className="h-full min-h-0 flex flex-col min-w-0 overflow-hidden" style={{ background: 'var(--bg-surface)' }}>
-      {/* Context bar */}
-      <div className="shrink-0 border-b px-6 pt-4 pb-3" style={{ borderColor: 'var(--border-soft)' }}>
-        <div className="flex items-center justify-between gap-3">
-          <div className="font-mono text-xs text-neutral-400 flex items-center gap-1 min-w-0">
-            {pathParts.map((part, i) => (
-              <span key={`${part}-${i}`} className="flex items-center gap-1 min-w-0">
-                {i > 0 && <ChevronRight size={11} className="text-neutral-300 shrink-0" />}
-                <span className="truncate">{part}</span>
-              </span>
-            ))}
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={onOpenInfo}
-              title="文件信息"
-              className="inline-flex h-7 w-7 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-600"
-            >
-              <FileCog size={14} />
-            </button>
-            <button
-              type="button"
-              onClick={onOpenHistory}
-              title="历史记录"
-              className="inline-flex h-7 w-7 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-600"
-            >
-              <History size={14} />
-            </button>
-            <span className={`tag ${status.tagClass}`}>{status.label}</span>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between gap-3 mt-1">
-          {editingTitle && canWrite ? (
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <input
-                ref={titleInputRef}
-                value={titleDraft}
-                maxLength={200}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void submitTitle();
-                  if (e.key === 'Escape') cancelEditTitle();
-                }}
-                placeholder="文档标题"
-                className="h-8 min-w-0 flex-1 rounded-md border border-primary-300 px-2 text-lg font-bold text-neutral-900 focus:outline-none focus:ring-2 focus:ring-primary-100"
-              />
-              <button type="button" className="btn-primary !h-8 !px-2.5 !text-xs disabled:opacity-60"
-                disabled={!titleDraft.trim() || renamingTitle || titleDraft.trim() === (doc.title ?? '')}
-                onClick={() => void submitTitle()}>
-                <CheckCircle2 size={13} /> {renamingTitle ? '保存中…' : '确定'}
-              </button>
-              <button type="button" className="btn-secondary !h-8 !px-2.5 !text-xs"
-                onClick={cancelEditTitle} disabled={renamingTitle}>
-                取消
-              </button>
-            </div>
-          ) : (
-            <div className="group/title flex items-center gap-1.5 min-w-0">
-              <h1 className="text-xl font-bold text-neutral-900 truncate">{doc.title || fileNameOfPath(doc.path)}</h1>
-              {canWrite && (
-                <button
-                  type="button"
-                  onClick={startEditTitle}
-                  title="编辑标题（不影响文件名；文件名请在左侧目录树右键「重命名」修改）"
-                  className="shrink-0 inline-flex h-6 w-6 items-center justify-center rounded text-neutral-400 opacity-0 transition group-hover/title:opacity-100 hover:bg-neutral-100 hover:text-primary-600 focus:opacity-100"
-                >
-                  <Pencil size={13} />
-                </button>
-              )}
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 shrink-0">
-            {/* 渲染主题下拉 */}
-            {view === 'preview' && (
-              <div className="relative">
-                <button type="button" onClick={() => setShowThemeMenu((s) => !s)}
-                  className="inline-flex items-center gap-1 h-7 px-2 rounded text-xs font-medium border border-neutral-200 hover:bg-neutral-50 transition">
-                  <Palette size={12} />
-                  <span>{RENDER_THEMES.find((t) => t.key === renderTheme)?.label ?? '经典'}</span>
-                  <ChevronDown size={12} />
-                </button>
-                {showThemeMenu && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setShowThemeMenu(false)} />
-                    <div className="absolute right-0 top-full mt-1 w-64 rounded-lg bg-white border border-neutral-200 shadow-xl z-30">
-                      <div className="px-3 py-2 border-b border-neutral-100 text-[11px] font-semibold text-neutral-500 uppercase tracking-wide">渲染主题</div>
-                      <div className="py-1 max-h-72 overflow-y-auto">
-                        {RENDER_THEMES.map((t) => {
-                          const Icon = t.Icon;
-                          const active = renderTheme === t.key;
-                          return (
-                            <button key={t.key} type="button"
-                              onClick={() => { setRenderTheme(t.key); setShowThemeMenu(false); }}
-                              className={`w-full flex items-center gap-2 px-3 py-2 text-left transition ${active ? 'bg-primary-50' : 'hover:bg-neutral-50'}`}>
-                              <Icon size={14} className={active ? 'text-primary-600' : 'text-neutral-400'} />
-                              <div className="min-w-0 flex-1">
-                                <div className={`text-xs font-medium ${active ? 'text-primary-700' : 'text-neutral-700'}`}>{t.label}</div>
-                                <div className="text-[10px] text-neutral-400 truncate">{t.desc}</div>
-                              </div>
-                              {active && <CheckCircle2 size={14} className="text-primary-600 shrink-0" />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="px-3 py-2 border-t border-neutral-100 text-[10px] text-neutral-400">
-                        原 Markdown 内容不会被修改
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* View mode pill —— 编辑入口仅可写角色可见（guest/隐式读者只读，后端 PUT 403 兜底） */}
-            <div className="bg-neutral-100 rounded-md p-0.5 inline-flex">
-              <button type="button" onClick={() => setView('preview')}
-                className={`inline-flex items-center gap-1 px-2.5 h-7 rounded text-xs font-medium transition ${
-                  view === 'preview' ? 'bg-white text-neutral-800 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
-                }`}>
-                <Eye size={13} /> 预览
-              </button>
-              {canWrite && (
-                <button type="button" onClick={() => setView('edit')}
-                  title="双击内容可快速进入编辑"
-                  className={`inline-flex items-center gap-1 px-2.5 h-7 rounded text-xs font-medium transition ${
-                    view === 'edit' ? 'bg-white text-neutral-800 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
-                  }`}>
-                  <PenTool size={13} /> 编辑
-                </button>
-              )}
-            </div>
-
-            {/* Save —— 高度对齐相邻预览/编辑 pill（h-7），变体类已自带 inline-flex 布局 */}
-            {canWrite && (
-              <button type="button" className="btn-primary !h-7 !px-2.5 !text-xs disabled:opacity-60"
-                onClick={onSave} disabled={saving}>
-                <Save size={13} /> {saving ? '保存中…' : '保存'}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 编辑辅助栏（仅编辑模式）：格式操作由编辑器自带工具栏承担，这里只补撤销/重做与快捷键速查 */}
-      {view === 'edit' && (
-        <div className="h-9 px-4 flex items-center gap-1 bg-neutral-50 border-b border-neutral-200 text-neutral-500 shrink-0 animate-fade-up">
-          <button type="button" title="撤销 (Ctrl/⌘+Z)"
-            onClick={() => runNativeCommand('undo')}
-            className="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-neutral-200 transition">
-            <Undo2 size={14} />
-          </button>
-          <button type="button" title="重做 (Ctrl/⌘+Shift+Z)"
-            onClick={() => runNativeCommand('redo')}
-            className="w-7 h-7 inline-flex items-center justify-center rounded hover:bg-neutral-200 transition">
-            <Redo2 size={14} />
-          </button>
-          <span className="w-px h-4 bg-neutral-200 mx-1.5" />
-          <div className="relative">
-            <button type="button" title="快捷键速查"
-              onClick={() => setShowShortcuts((s) => !s)}
-              className="inline-flex items-center gap-1 px-2 h-7 rounded text-xs hover:bg-neutral-200 transition">
-              <Keyboard size={13} /> 快捷键
-            </button>
-            {showShortcuts && (
-              <>
-                <div className="fixed inset-0 z-20" onClick={() => setShowShortcuts(false)} />
-                <div className="absolute left-0 top-full mt-1 w-[420px] max-w-[90vw] rounded-lg bg-white border border-neutral-200 shadow-xl z-30 p-3">
-                  <div className="grid grid-cols-3 gap-3">
-                    {SHORTCUT_GROUPS.map((group) => (
-                      <div key={group.title}>
-                        <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wide mb-1.5">{group.title}</div>
-                        <ul className="space-y-1">
-                          {group.items.map((item) => (
-                            <li key={item.keys} className="flex flex-col gap-0.5">
-                              <kbd className="self-start rounded border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 font-mono text-[10px] text-neutral-600">{item.keys}</kbd>
-                              <span className="text-[11px] text-neutral-500">{item.desc}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-          <span className="flex-1" />
-          <span className="text-[11px] text-neutral-400 hidden sm:inline">Ctrl/⌘+S 保存 · Ctrl/⌘+E 预览 · Esc 返回预览</span>
-        </div>
-      )}
-
-      {/* Content */}
-      <div key={fadeKey} className="flex-1 flex min-h-0 overflow-hidden">
-        {view === 'preview' ? (
-          <div className="group flex-1 relative min-h-0">
-            <div ref={previewScrollRef} className="h-full overflow-y-auto scrollbar-thin"
-              onDoubleClick={() => { if (canWrite) setView('edit'); }}
-              title={canWrite ? '双击内容可快速进入编辑' : undefined}>
-              <div className={`max-w-3xl mx-auto px-10 py-10 prose-doc prose-${renderTheme || 'plain'}`}
-                dangerouslySetInnerHTML={{ __html: previewHtml }} />
-            </div>
-            {/* 「双击进入编辑」悬浮提示（对齐原型 ProjectBrowse.jsx:1100-1107）：hover 正文时浮现；只读用户不提示 */}
-            {canWrite && (
-              <div className="pointer-events-none fixed bottom-6 right-[340px] z-10 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                <div className="flex items-center gap-2 rounded-lg bg-neutral-900/80 px-3 py-1.5 text-xs text-white shadow-lg">
-                  <PenTool size={12} />
-                  双击任意位置开始编辑
-                  <span className="rounded bg-neutral-700 px-1.5 py-0.5 text-[10px]">Enter</span>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div ref={editorWrapRef} className="flex-1 min-h-0 overflow-hidden">
-            {/* 有据偏离（PLAN 5.3.1 声明）：原型的 mock 远程协作光标/Presence 浮层（MOCK_CURSORS，:1122-1140）
-                依赖协同编辑会话，真实协同链路落地前省略；协作面板（右栏）已按 3.2 第 4 条承载 AI/评论/历史入口 */}
-            {/* P3a 选图：独立插图按钮（不注入 MDEditor commands，避免版本差异） */}
-            {canWrite && (
-              <div className="flex items-center gap-1 border-b px-3 py-1.5 text-xs" style={{ borderColor: 'var(--border-soft)' }}>
-                <Keyboard size={12} className="text-neutral-400" />
-                <span className="text-neutral-500">快捷：</span>
-                <span className="rounded bg-neutral-100 px-1 font-mono text-[11px] text-neutral-600">Ctrl+S</span>
-                <span className="text-neutral-400">保存</span>
-                <span className="mx-1 h-3 w-px bg-neutral-200" />
-                <button
-                  type="button"
-                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-primary-600 hover:bg-primary-50"
-                  title="插入图片（Ctrl+K）"
-                  onClick={() => setShowImagePicker(true)}
-                >
-                  <ImagePlus size={12} /> 插入图片
-                </button>
-              </div>
-            )}
-            <MDEditor
-              value={editContent}
-              onChange={(v) => onEditChange(v ?? '')}
-              preview="edit"
-              hideToolbar={false}
-              height="100%"
-              className="h-full"
-              style={{ height: '100%' }}
-              // Tab 键插入缩进而非跳走焦点（defaultTabEnable），2 空格缩进
-              defaultTabEnable
-              tabSize={2}
-              // 编辑器内置明暗配色必须显式跟随 app 外观：默认 colorMode="auto" 只认系统偏好，
-              // 亮色 app + 系统暗色时会渲染成黑块；见验收走查"编辑器主题不适配"
-              data-color-mode={isDark ? 'dark' : 'light'}
-              textareaProps={{
-                placeholder: '开始编写 Markdown 文档…',
-                spellCheck: false,
-                // 编辑态双击切回预览（对齐原型 textarea onDoubleClick，:1117）
-                onDoubleClick: () => setView('preview'),
-                onKeyDown: (e) => {
-                  // Esc 回到预览；Ctrl/⌘+Z / Shift+Z 走浏览器原生撤销重做（保留历史栈）
-                  if (e.key === 'Escape') {
-                    e.preventDefault();
-                    setView('preview');
-                  }
-                },
-              }}
-            />
-          </div>
-        )}
-
-        {/* Floating TOC — 仅预览 + xl 屏幕 */}
-        {view === 'preview' && tocItems.length > 0 && (
-          <nav className="hidden xl:flex w-56 shrink-0 flex-col pt-2 pl-4 pr-3 overflow-y-auto scrollbar-thin border-l"
-            style={{ borderColor: 'var(--border-soft)' }}>
-            <div className="text-[10px] uppercase tracking-wider text-neutral-400 font-semibold mb-2 px-2">目录</div>
-            <ul className="space-y-0.5">
-              {tocItems.map((item, idx) => (
-                <li key={`${item.id}-${idx}`}
-                  style={{ paddingLeft: item.level === 3 ? '12px' : item.level === 2 ? '4px' : '0' }}>
-                  <button type="button" onClick={() => jumpToHeading(item.id)}
-                    className={`block w-full text-left text-xs leading-5 px-2 py-0.5 rounded truncate transition-colors ${
-                      activeHeadingId === item.id ? 'bg-primary-50 text-primary-700 font-medium' : 'text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100'
-                    }`}
-                    title={item.text}>
-                    {item.text}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </nav>
-        )}
-      </div>
-
-      {/* Edit status bar */}
-      {view === 'edit' && (
-        <div className="shrink-0 h-6 px-4 border-t flex items-center justify-between text-[11px] text-neutral-400"
-          style={{ borderColor: 'var(--border-soft)', background: 'var(--bg-page)' }}>
-          <div className="flex items-center gap-3">
-            <span>行 {editContent.split('\n').length}</span>
-            <span>字 {editContent.length}</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1"><GitBranch size={10} /> main</span>
-          </div>
-        </div>
-      )}
-    </section>
-    {/* P3a 选图弹层：列出库内图片 + 当场上传；选中 → 相对路径 → 追加到正文 */}
-    {showImagePicker && (
-      <ImagePickerModal
-        projectId={projectId}
-        docs={docs}
-        currentDocPath={doc.path}
-        canWrite={canWrite}
-        onClose={() => setShowImagePicker(false)}
-        onPick={(image) => {
-          const rel = relativePosix(doc.path, image.path);
-          const md = buildImageMarkdown(image.title ?? basenameOf(image.path), rel);
-          onEditChange((editContent ?? '') + '\n' + md + '\n');
-          onPickImage({ docPath: image.path, label: image.title ?? basenameOf(image.path) });
-          setShowImagePicker(false);
-        }}
-        onUploaded={() => {
-          // 刷新 docs（上传后刚入库，选图弹层关闭重开可见）；一期先关弹层让用户重开
-          setShowImagePicker(false);
-        }}
-      />
-    )}
-  </>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Document card — grid 模式
 // ---------------------------------------------------------------------------
 
@@ -1725,7 +868,6 @@ export function BrowsePage(): React.ReactElement {
   const queryClient = useQueryClient();
   const showToast = useShowToast();
   const [searchParams, setSearchParams] = useSearchParams();
-  // 项目内角色：false = 只读（非成员隐式读者 / guest），隐藏文档新建与编辑保存入口
   const { canWrite } = useProjectRole(projectId);
   const { isDark } = useTheme();
 
@@ -1736,12 +878,7 @@ export function BrowsePage(): React.ReactElement {
   const [keyword, setKeyword] = useState('');
   // 唯一的类型筛选 state（TreeSidebar + grid 视图共享；Facet popover 在 TreeSidebar 工具栏上）
   const [facet, setFacet] = useState<FileFacetId>('all');
-  const [renderTheme, setRenderTheme] = useState('plain');
-  const [focusedView, setFocusedView] = useState<'preview' | 'edit'>('preview');
-  const [editContent, setEditContent] = useState('');
   const [leftCollapsed, setLeftCollapsed] = useState(false);
-  // 右栏协作面板（AI 助手/评论/历史）已上收到 ProjectLayout.ProjectRightSidebar：
-  // browse 路由时布局右栏固定显示三 tab，概览/动态/成员进入「更多」下拉（对齐原型 ProjectLayout.jsx）
 
   // ---- Queries ----
   const { data: docData, isLoading: docsLoading } = useQuery<{ items: DocumentListItem[] }>({
@@ -1782,107 +919,80 @@ export function BrowsePage(): React.ReactElement {
     enabled: !!docParam,
   });
 
-  // 保存 mutation（乐观并发保护：baseVersionNo 与最新版本不符 → 409 冲突；Git 库自动提交推送）
+  // =========================================================================
+  // §6.2 Unified onSave: 文本类（Markdown + Code）统一走这一个 PUT 乐观并发通道
+  //   - 合并原 saveMutation（§4.4 旧 Markdown 保存）和 saveTextFile（§4.4 F5 代码保存）
+  //   - MarkdownViewer / CodeViewer 各自内部持有 dirty buffer，宿主只管 PUT + 409 提示
+  // =========================================================================
   const latestVersionRef = useRef(0);
-  const editContentRef = useRef('');
-  useEffect(() => {
-    editContentRef.current = editContent;
-  }, [editContent]);
   useEffect(() => {
     const v = versionsData?.items?.[0]?.versionNo ?? 0;
     if (v > 0) latestVersionRef.current = v;
   }, [versionsData]);
 
-  const saveMutation = useMutation({
-    mutationFn: () => {
-      if (!activeDoc) return Promise.reject(new Error('no doc'));
-      return apiFetch<{ ok: boolean; document: DocumentDetail; version: number; effects?: { git: { attempted: boolean; ok: boolean; pushed: boolean; noop?: boolean; commitHash?: string; error?: string } } }>(
-        `/api/v1/documents/${activeDoc.id}`,
-        {
-          method: 'PUT',
-          body: JSON.stringify({
-            content: editContent,
-            title: activeDoc.title ?? undefined,
-            baseVersionNo: latestVersionRef.current || undefined,
-          }),
-        },
-      );
-    },
-    onSuccess: (result) => {
-      latestVersionRef.current = result.version;
-      // 失效相关缓存
-      void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
-      void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] });
-      void queryClient.invalidateQueries({ queryKey: ['activities'] });
-      void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-      // 更新本地状态
-      if (result.document) {
-        queryClient.setQueryData<DocumentDetail | undefined>(['document', docParam], result.document);
-      }
-      const git = result.effects?.git;
-      if (git?.attempted && git.ok && git.pushed) {
-        showToast(`文档已保存，Git 自动提交 ${git.commitHash?.slice(0, 8) ?? ''} 并推送`);
-      } else if (git?.attempted && git.ok && git.noop) {
-        showToast('文档已保存（与仓库内容一致，无需提交）');
-      } else if (git?.attempted && !git.ok) {
-        showToast(`文档已保存，但 Git 自动提交失败：${git.error ?? '未知错误'}`);
-      } else {
-        showToast('文档已保存');
-      }
-    },
-    onError: (err) => {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('DOCUMENT_VERSION_CONFLICT')) {
-        // 多人协作不丢失：冲突时不静默覆盖，提示加载最新
-        if (window.confirm('版本冲突：其他成员刚更新了此文档。\n\n点「确定」加载最新内容（当前未保存的修改将被丢弃，建议先复制到剪贴板）；点「取消」留在当前编辑状态。')) {
-          void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
-          void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-        }
-      } else {
-        showToast(msg || '保存失败');
-      }
-    },
-  });
-
-  // ---- Sync editor buffer ----
-  useEffect(() => {
-    if (activeDoc) setEditContent(activeDoc.content ?? '');
-  }, [activeDoc?.id, activeDoc?.contentHash]);
-
-  // ---- 非 md 文本类（CodeViewer）保存：同一 PUT + baseVersionNo 乐观并发通道（§4.4 F5） ----
-  const saveTextFile = async (nextContent: string): Promise<void> => {
+  const saveDocContent = async (nextContent: string): Promise<void> => {
     if (!activeDoc) throw new Error('文件不存在');
-    try {
-      const result = await apiFetch<{ ok: boolean; document: DocumentDetail; version: number }>(
-        `/api/v1/documents/${activeDoc.id}`,
-        {
-          method: 'PUT',
-          body: JSON.stringify({
-            content: nextContent,
-            title: activeDoc.title ?? undefined,
-            baseVersionNo: latestVersionRef.current || undefined,
-          }),
-        },
-      );
-      latestVersionRef.current = result.version;
-      if (result.document) {
-        queryClient.setQueryData<DocumentDetail | undefined>(['document', docParam], result.document);
-      }
-      void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] });
-      void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-      void queryClient.invalidateQueries({ queryKey: ['activities'] });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('DOCUMENT_VERSION_CONFLICT')) {
-        // 冲突不静默覆盖：提示后重新拉取最新内容（CodeViewer 的 saved 缓冲随之刷新，本地脏修改仍在）
-        if (window.confirm('版本冲突：其他成员刚更新了此文件。\n\n点「确定」加载最新内容（当前未保存的修改将被丢弃，建议先复制到剪贴板）；点「取消」留在当前编辑状态。')) {
-          await queryClient.invalidateQueries({ queryKey: ['document', docParam] });
-          await queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-        }
-      }
-      throw err instanceof Error ? err : new Error('保存失败');
+    // §4.4: Markdown 也走同通道，PUT body 结构与旧 saveMutation 完全一致
+    const result = await apiFetch<{
+      ok: boolean;
+      document: DocumentDetail;
+      version: number;
+      effects?: { git: { attempted: boolean; ok: boolean; pushed: boolean; noop?: boolean; commitHash?: string; error?: string } };
+    }>(
+      `/api/v1/documents/${activeDoc.id}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          content: nextContent,
+          title: activeDoc.title ?? undefined,
+          baseVersionNo: latestVersionRef.current || undefined,
+        }),
+      },
+    );
+    latestVersionRef.current = result.version;
+    if (result.document) {
+      queryClient.setQueryData<DocumentDetail | undefined>(['document', docParam], result.document);
+    }
+    void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] });
+    void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
+    void queryClient.invalidateQueries({ queryKey: ['activities'] });
+
+    // Git 效果 toast（对齐原 saveMutation.onSuccess，§4.4）
+    const git = result.effects?.git;
+    if (git?.attempted && git.ok && git.pushed) {
+      showToast(`已保存，Git 自动提交 ${git.commitHash?.slice(0, 8) ?? ''} 并推送`);
+    } else if (git?.attempted && git.ok && git.noop) {
+      showToast('已保存（与仓库内容一致，无需提交）');
+    } else if (git?.attempted && !git.ok) {
+      showToast(`已保存，但 Git 自动提交失败：${git.error ?? '未知错误'}`);
+    } else {
+      showToast('已保存');
     }
   };
+
+  // §6.2: 409 冲突处理（§4.4）—— 宿主统一处理，MarkdownViewer 和 CodeViewer 都调 saveDocContent
+  // 409 时 catch 后 window.confirm 并让 viewer 自己决定是否加载最新
+  const wrapSaveWithConflict = (saveFn: (content: string) => Promise<void>) => {
+    return async (content: string): Promise<void> => {
+      try {
+        await saveFn(content);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.includes('DOCUMENT_VERSION_CONFLICT')) {
+          // §6.2: 冲突不静默覆盖——统一由宿主弹出 409 确认框（原 saveMutation 与 saveTextFile 各有一份，现合并）
+          if (window.confirm('版本冲突：其他成员刚更新了此文件。\n\n点「确定」加载最新内容（当前未保存的修改将被丢弃，建议先复制到剪贴板）；点「取消」留在当前编辑状态。')) {
+            void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
+            void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
+          }
+          throw err; // 仍然 throw，让 viewer 知道保存失败并设置 saveError
+        }
+        throw err; // 其他错误同样 throw 给 viewer
+      }
+    };
+  };
+
+  // §6.2: 统一的 onSave 回调，宿主把 409 冲突和 PUT 封装好，viewer 只管传 content
+  const unifiedOnSave = wrapSaveWithConflict(saveDocContent);
 
   // ---- 二进制替换上传（图片/PDF/兜底查看器，§5.2 POST /documents/:id/versions/upload） ----
   const replaceUploadMutation = useMutation({
@@ -1891,8 +1001,6 @@ export function BrowsePage(): React.ReactElement {
       const form = new FormData();
       form.append('file', file);
       form.append('idempotencyKey', crypto.randomUUID());
-      // FormData 必须让浏览器自带 multipart boundary：空串占位阻止 apiFetch 补 application/json，
-      // fetch 发送 FormData 时会忽略空串并自动生成 boundary
       return apiFetch<{ document: DocumentDetail; version: { versionNo: number } }>(
         `/api/v1/documents/${activeDoc.id}/versions/upload`,
         { method: 'POST', body: form, headers: { 'Content-Type': '' } },
@@ -1907,7 +1015,6 @@ export function BrowsePage(): React.ReactElement {
           ...result.document,
         });
       }
-      // 重新拉详情以获取新的签名 rawUrl（旧签名 30 分钟过期且内容已变）
       void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
       void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
       void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] });
@@ -1918,7 +1025,7 @@ export function BrowsePage(): React.ReactElement {
     },
   });
 
-  // 活跃文档 → FileMeta（查看器插件契约）；md 仍走旧 DocumentEditor，不经过 FileHost
+  // 活跃文档 → FileMeta（查看器插件契约；§6.2）
   const activeFileMeta: FileMeta | null = useMemo(() => {
     if (!activeDoc) return null;
     const resolved = resolveFileType(activeDoc.path, activeDoc.mime);
@@ -1938,10 +1045,6 @@ export function BrowsePage(): React.ReactElement {
       ownerName: activeDoc.updatedBy,
     };
   }, [activeDoc, versionsData]);
-
-  const activeIsMarkdown = activeDoc
-    ? resolveFileType(activeDoc.path, activeDoc.mime).typeId === 'markdown'
-    : true;
 
   // ---- 实时互见（需求 9）：订阅项目房间，他人保存时自动刷新/提示 ----
   const activeDocRef = useRef(activeDoc);
@@ -1984,20 +1087,12 @@ export function BrowsePage(): React.ReactElement {
         }
         return;
       }
-      const clean = editContentRef.current === (activeDocRef.current?.content ?? '');
-      if (clean) {
-        void apiFetch<DocumentDetail>(`/api/v1/documents/${docParam}`)
-          .then((d) => {
-            queryClient.setQueryData(['document', docParam], d);
-            setEditContent(d.content ?? '');
-            latestVersionRef.current = 0; // 触发 versions 查询回填
-            void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-            showToast(`${p.by ?? '其他成员'} 更新了此文档，已刷新为最新内容`);
-          })
-          .catch(() => undefined);
-      } else {
-        showToast(`${p.by ?? '其他成员'} 更新了此文档；你有未保存的修改，保存时将做冲突检测`);
-      }
+      // §6.2: 文本类不再在 BrowsePage 判断 dirty —— MarkdownViewer/CodeViewer 内部各自管理 buffer
+      // 直接 invalidate，viewer 的 useEffect 会感知 file.content 变化；viewer 内部会区分
+      // clean（buffer === saved）时自动更新、dirty 时保留 buffer 等待用户保存（保存时触发 409）
+      void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
+      void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
+      showToast(`${p.by ?? '其他成员'} 更新了此文件，已刷新为最新内容`);
     });
     return () => rt.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2017,7 +1112,7 @@ export function BrowsePage(): React.ReactElement {
 
   // ---- 目录树管理状态（D8：右键菜单 / 拖拽移动 / 重命名 / 删除） ----
   const [treeMenu, setTreeMenu] = useState<TreeMenuState | null>(null);
-  // 文件信息抽屉（树菜单 / 卡片 / 查看器 host.openOpenInfo / md 编辑器共用一个宿主）
+  // 文件信息抽屉（树菜单 / 卡片 / FileHost host.openOpenInfo 共用一个宿主）
   const [infoDocId, setInfoDocId] = useState<string | null>(null);
   const requestHistoryTab = useUiStore((s) => s.requestHistoryTab);
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
@@ -2109,7 +1204,6 @@ export function BrowsePage(): React.ReactElement {
   };
   const selectDocInSidebar = (doc: DocumentListItem) => {
     setSearchParams({ doc: doc.id });
-    setFocusedView('preview');
   };
   const backToGrid = () => setSearchParams({});
 
@@ -2254,7 +1348,7 @@ export function BrowsePage(): React.ReactElement {
     setTreeMenu({ x: e.clientX, y: e.clientY, target });
   };
 
-  // 文件信息抽屉（网格/聚焦两分支共用；host.openOpenInfo 也走这里）
+  // 文件信息抽屉（网格/聚焦两分支共用；FileHost host.openOpenInfo 也走这里）
   const openInfo = (doc: DocumentListItem) => setInfoDocId(doc.id);
 
   // 历史记录统一走 ProjectLayout 右栏 history tab（避免第二个历史入口）：
@@ -2418,18 +1512,6 @@ export function BrowsePage(): React.ReactElement {
     );
   };
 
-  // ---- 标题栏就地编辑：只改 title 元数据，不触碰文件名/path（§4.5 解耦） ----
-  const handleRenameTitle = async (title: string): Promise<void> => {
-    if (!activeDoc) return;
-    try {
-      await patchDocMutation.mutateAsync({ id: activeDoc.id, title });
-      showToast('标题已更新');
-    } catch (err) {
-      showToast(prettyTreeError(err, '标题更新失败'));
-      throw err;
-    }
-  };
-
   // ---- Visible docs (grid 模式)：.keep 占位文件不在卡片网格展示（§4.2）；
   //      类型 facet 与关键字 AND 组合，类型一律由 shared resolveFileType 前端派生 ----
   const visibleDocs = useMemo(() => {
@@ -2579,7 +1661,7 @@ export function BrowsePage(): React.ReactElement {
   }
 
   // =========================================================================
-  // FOCUSED MODE — 三栏 flex 布局
+  // FOCUSED MODE — 三栏 flex 布局（§6.2: 统一走 FileHost，不再区分 Markdown/Code）
   // =========================================================================
   return (
     <PanelGroup direction="horizontal" className="h-full flex overflow-hidden">
@@ -2627,42 +1709,47 @@ export function BrowsePage(): React.ReactElement {
         onDragLeave={handleOsDragLeave}
         onDrop={(e) => void handleOsDrop(e)}
       >
-      {activeIsMarkdown || !activeFileMeta ? (
-        <DocumentEditor
-          doc={activeDoc ?? null}
-          editContent={editContent}
-          onEditChange={setEditContent}
-          view={focusedView}
-          setView={setFocusedView}
-          onSave={() => void saveMutation.mutateAsync()}
-          saving={saveMutation.isPending}
-          renderTheme={renderTheme}
-          setRenderTheme={setRenderTheme}
-          canWrite={canWrite}
-          onRenameTitle={handleRenameTitle}
-          renamingTitle={patchDocMutation.isPending}
-          onOpenInfo={() => {
-            if (activeDoc) setInfoDocId(activeDoc.id);
-          }}
-          onOpenHistory={() => {
-            if (activeDoc) openHistory(activeDoc);
-          }}
-          projectId={projectId ?? ''}
-          docs={docData?.items ?? []}
-          onPickImage={() => { /* 选图弹层内部已 append editContent，此处留空供未来扩展 */ }}
-        />
-      ) : (
+      {/* §6.2: 统一走 FileHost — resolveFileType 选 MarkdownViewer/CodeViewer/ImageViewer/PdfViewer/FallbackViewer */}
+      {activeFileMeta ? (
         <FileHost
           file={activeFileMeta}
           canWrite={canWrite}
           isDark={isDark}
-          onSave={saveTextFile}
+          onSave={unifiedOnSave}
           onReplaced={() => {
-            /* mutation 已完成缓存刷新；签名 rawUrl 由 invalidate document 后新详情下发 */
+            /* replaceUploadMutation 已完成缓存刷新；签名 rawUrl 由 invalidate document 后新详情下发 */
           }}
           onReplaceUpload={async (file) => {
             await replaceUploadMutation.mutateAsync(file);
           }}
+          host={{
+            openOpenInfo: () => {
+              if (activeDoc) setInfoDocId(activeDoc.id);
+            },
+            openHistory: () => {
+              if (activeDoc) openHistory(activeDoc);
+            },
+          }}
+        />
+      ) : (
+        // 加载中（activeFileMeta 为 null = activeDoc 还没查回来）时显示 FileHost 自处理空态
+        <FileHost
+          file={
+            {
+              id: docParam ?? '',
+              path: '',
+              title: '',
+              kind: 'text',
+              ext: '',
+              mime: '',
+              size: 0,
+              content: null,
+            } as FileMeta
+          }
+          canWrite={canWrite}
+          isDark={isDark}
+          onSave={unifiedOnSave}
+          onReplaced={() => {}}
           host={{
             openOpenInfo: () => {
               if (activeDoc) setInfoDocId(activeDoc.id);
@@ -2734,7 +1821,7 @@ export function BrowsePage(): React.ReactElement {
         />
       )}
 
-      {/* 重命名弹窗（文件完整文件名 / 文件夹名；标题编辑走编辑区内联入口） */}
+      {/* 重命名弹窗（文件完整文件名 / 文件夹名；标题编辑走 FileHost 宿主） */}
       {renameTarget && (
         <RenameDialog
           title={renameTarget.kind === 'doc' ? '重命名文件' : '重命名文件夹'}
