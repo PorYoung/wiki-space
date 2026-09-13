@@ -27,18 +27,27 @@ import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { yCollab } from 'y-codemirror.next';
 import {
   BookOpen,
+  Bold,
+  CheckCircle2,
+  ChevronDown,
   Code,
   Eye,
   FileText,
+  Heading1,
   Image as ImageIcon,
+  Italic,
   Layers,
+  Link,
+  List,
+  ListOrdered,
   Moon,
   Palette,
   PenTool,
+  Quote,
   Save,
+  Strikethrough,
   Sun,
-  ChevronDown,
-  CheckCircle2,
+  Minus,
   type LucideIcon,
 } from 'lucide-react';
 import { slugify, markdownToHtml } from '../../lib/markdown';
@@ -46,6 +55,15 @@ import { useMermaidRender } from '../../lib/use-mermaid-render';
 import type { FileViewerProps } from '../types';
 import { ImagePickerModal } from './ImagePickerModal';
 import { useCollab } from '../../lib/collab';
+import {
+  wrapSelection,
+  toggleLinePrefix,
+  toggleHeading,
+  insertInlineCode,
+  insertLink,
+  insertHorizontalRule,
+} from '../formatting';
+import { typoraDecorations } from '../wysiwyg-decorations';
 
 const RENDER_THEMES: Array<{ key: string; label: string; desc: string; Icon: LucideIcon }> = [
   { key: 'plain', label: '经典', desc: '默认无衬线 · 紧凑', Icon: FileText },
@@ -245,6 +263,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
       lineNumbers(),
       highlightActiveLine(),
       history(),
+      ...typoraDecorations, // Typora 式 WYSIWYG: 隐藏语法标记 + 富样式 decorations
       keymap.of([
         ...defaultKeymap,
         ...historyKeymap,
@@ -553,6 +572,54 @@ const peersList = Array.from(collab.peers.values());
           )}
         </div>
       </div>
+
+      {/* ── 格式化工具栏（编辑态显示，Typora 式按钮组） ── */}
+      {view === 'edit' && canWrite && onSave && (
+        <div
+          className="shrink-0 flex items-center gap-0.5 px-4 h-8 text-neutral-600"
+          style={{ borderBottom: '1px solid var(--border-soft)', background: 'var(--bg-page)' }}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          {[
+            { icon: Heading1, tip: '标题（循环 H1-H6）', act: () => toggleHeading(cmRef.current!.view!) },
+            { divider: true },
+            { icon: Bold, tip: '加粗 (Ctrl+B)', act: () => wrapSelection(cmRef.current!.view!, '**') },
+            { icon: Italic, tip: '斜体 (Ctrl+I)', act: () => wrapSelection(cmRef.current!.view!, '*') },
+            { icon: Strikethrough, tip: '删除线', act: () => wrapSelection(cmRef.current!.view!, '~~') },
+            { icon: Quote, tip: '引用', act: () => toggleLinePrefix(cmRef.current!.view!, '> ') },
+            { icon: Code, tip: '行内代码', act: () => insertInlineCode(cmRef.current!.view!) },
+            { divider: true },
+            { icon: List, tip: '无序列表 (-)', act: () => toggleLinePrefix(cmRef.current!.view!, '- ') },
+            { icon: ListOrdered, tip: '有序列表 (1.)', act: () => toggleLinePrefix(cmRef.current!.view!, '1. ') },
+            { divider: true },
+            { icon: Link, tip: '链接', act: () => insertLink(cmRef.current!.view!) },
+            { icon: ImageIcon, tip: '图片', act: () => { recordEditorSelection(); setShowImageModal(true); } },
+            { icon: Minus, tip: '分割线 (---)', act: () => insertHorizontalRule(cmRef.current!.view!) },
+          ].map((b, i) =>
+            'divider' in b ? (
+              <div key={'div' + i} className="w-px h-4 bg-neutral-200 mx-1.5" />
+            ) : (
+              <button
+                key={b.tip}
+                type="button"
+                title={b.tip}
+                onClick={() => {
+                  const v = cmRef.current?.view;
+                  if (!v) return;
+                  (b as { act: (view: unknown) => void }).act(v);
+                  v.focus();
+                }}
+                className="inline-flex items-center justify-center w-7 h-6 rounded hover:bg-neutral-200 transition"
+              >
+                {(() => {
+                  const Ic = (b as { icon: LucideIcon }).icon;
+                  return <Ic size={14} />;
+                })()}
+              </button>
+            ),
+          )}
+        </div>
+      )}
 
       {/* ── 内容区：主内容 + TOC 侧栏（常驻） ── */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
