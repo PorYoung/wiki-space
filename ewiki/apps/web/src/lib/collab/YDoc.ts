@@ -74,6 +74,15 @@ export class CollabYDoc {
     this.awareness.on('update', this.handleAwarenessUpdate.bind(this));
     // B3: UndoManager 绑定 ytext —— 撤销历史仅含本地操作（undoManager 不跟踪远程更新）
     this.undoManager = new Y.UndoManager(this.ytext);
+
+    // ⚠️ P4-6 关键：本地 doc update → 广播给服务器
+    // y-codemirror.next 只负责 CM6 ↔ Y.Text 双向同步，不会自动把 Y.Doc update 发到服务器
+    // 服务器侧 syncProtocol.readSyncMessage 传 origin=this（见 handleSync），
+    // 所以 origin === this 的 update 是我们接收的远程更新 → 跳过，避免回显
+    this.doc.on('update', (update: Uint8Array, origin: unknown) => {
+      if (origin === this) return;
+      this.sendUpdate(update);
+    });
   }
 
   // -------------------------------------------------------------------------

@@ -92,18 +92,6 @@ function extractTocFromView(view: EditorView): TocItem[] {
   return toc;
 }
 
-// P4-6：根据 userId hash 生成固定色值（HSL），头像底圈颜色稳定
-const AVATAR_COLORS = [
-  '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e',
-  '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6',
-  '#a855f7', '#ec4899',
-];
-function hashColor(seed: string): string {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
-  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length]!;
-}
-
 export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: FileViewerProps): React.ReactElement {
   const collab = useCollab();
   // P4-6：协同模式必须 ytext 存在 + 已连 + 已收全量 synced 才启用 y-codemirror.next
@@ -119,6 +107,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
   const [showThemeMenu, setShowThemeMenu] = useState(false);
   const [showImageModal, setShowImageModal] = useState(false);
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
+  const [cursorPos, setCursorPos] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
 
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
@@ -294,10 +283,12 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     // P4-6：selection 变化 → 防抖广播 presence cursor
     base.push(
       EditorView.updateListener.of((update: ViewUpdate) => {
+        // 光标位置追踪（底部状态栏）—— 每次 view update 都更新，不受 selectionSet 限制
+        const sel = update.state.selection.main;
+        const line = update.state.doc.lineAt(sel.head);
+        setCursorPos({ line: line.number, col: sel.head - line.from + 1 });
+
         if (update.selectionSet) {
-          const sel = update.state.selection.main;
-          if (sel.empty) return; // 只广播有光标位置的 selection（折叠选择也有 head）
-          const line = update.state.doc.lineAt(sel.head);
           const lc = { line: line.number - 1, ch: sel.head - line.from };
           // 防抖 150ms + 同位置不重发（避免打字时每条按键都发）
           debounceSendCursor(lc);
@@ -418,27 +409,26 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
     requestAnimationFrame(() => view?.focus());
   };
 
-  // P4-6：协作者头像列表（最多 3 个 +N 折叠）
+  // P4-6：协作者数量（底部状态栏 + 工具栏 banner 用）
   const peersList = Array.from(collab.peers.values());
-  const shownPeers = peersList.slice(0, 3);
-  const extraCount = Math.max(0, peersList.length - 3);
+  const totalPeers = peersList.length + (collab.connected ? 1 : 0); // 含自己
 
   return (
     <section
       className="h-full min-h-0 flex flex-col min-w-0 overflow-hidden"
       style={{ background: 'var(--bg-surface)' }}
     >
-      {/* P4-6 CRDT 协同状态条（顶部） */}
+      {/* ── 工具栏（紧凑原型风格：左=协同 banner，右=按钮） ── */}
       <div
-        className="shrink-0 flex items-center justify-between gap-4 px-6 py-1.5 text-[11px]"
-        style={{ borderBottom: '1px solid var(--border-soft)', background: 'var(--bg-page)' }}
+        className="shrink-0 flex items-center justify-between gap-4 px-4 h-10"
+        style={{ borderBottom: '1px solid var(--border-soft)' }}
       >
-        <div className="flex items-center gap-2 text-neutral-400">
+        {/* 左：协同状态 inline banner */}
+        <div className="flex items-center gap-2 text-[12px]">
           {collab.connected ? (
             <span className="inline-flex items-center gap-1 text-emerald-600">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              协同在线
-              {peersList.length > 0 ? ` · 共 ${peersList.length + 1} 人编辑` : ' · 仅你一人'}
+              协同在线{peersList.length > 0 ? ` · ${totalPeers} 人` : ' · 仅你一人'}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 text-amber-600">
@@ -446,157 +436,125 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
               协同离线（仅本地编辑）
             </span>
           )}
+          {saveError && (
+            <span className="text-red-500 text-[11px] ml-1">· {saveError}</span>
+          )}
         </div>
-        {/* P4-6：在线协作者头像组 */}
-        {peersList.length > 0 && (
-          <div className="flex items-center -space-x-1.5">
-            {shownPeers.map((p) => (
-              <div
-                key={p.userId}
-                title={p.name}
-                className="w-5 h-5 rounded-full border border-white flex items-center justify-center text-[10px] font-semibold text-white shrink-0"
-                style={{ background: hashColor(p.userId) }}
-              >
-                {(p.name || p.userId).charAt(0).toUpperCase()}
-              </div>
-            ))}
-            {extraCount > 0 && (
-              <div
-                title={`还有 ${extraCount} 位协作者`}
-                className="w-5 h-5 rounded-full border border-white bg-neutral-300 flex items-center justify-center text-[10px] font-semibold text-neutral-600 shrink-0"
-              >
-                +{extraCount}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
 
-      {/* 头部：文件名 + 渲染主题 / 预览编辑切换 / 保存 */}
-      <div className="shrink-0 border-b px-6 pt-4 pb-3" style={{ borderColor: 'var(--border-soft)' }}>
-        <div className="flex items-center justify-between gap-3">
-          <h1 className="text-xl font-bold text-neutral-900 truncate">{file.title || file.path.split('/').pop()}</h1>
-          <div className="flex items-center gap-2 shrink-0">
-            {view === 'preview' && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setShowThemeMenu((s) => !s)}
-                  className="inline-flex items-center gap-1 h-7 px-2 rounded text-xs font-medium border border-neutral-200 hover:bg-neutral-50 transition"
-                >
-                  <Palette size={12} />
-                  <span>{RENDER_THEMES.find((t) => t.key === renderTheme)?.label ?? '经典'}</span>
-                  <ChevronDown size={12} />
-                </button>
-                {showThemeMenu && (
-                  <>
-                    <div className="fixed inset-0 z-20" onClick={() => setShowThemeMenu(false)} />
-                    <div className="absolute right-0 top-full mt-1 w-64 rounded-lg bg-white border border-neutral-200 shadow-xl z-30">
-                      <div className="px-3 py-2 border-b border-neutral-100 text-[11px] font-semibold text-neutral-500 uppercase tracking-wide">
-                        渲染主题
-                      </div>
-                      <div className="py-1 max-h-72 overflow-y-auto">
-                        {RENDER_THEMES.map((t) => {
-                          const Icon = t.Icon;
-                          const active = renderTheme === t.key;
-                          return (
-                            <button
-                              key={t.key}
-                              type="button"
-                              onClick={() => {
-                                setRenderTheme(t.key);
-                                setShowThemeMenu(false);
-                              }}
-                              className={`w-full flex items-center gap-2 px-3 py-2 text-left transition ${
-                                active ? 'bg-primary-50' : 'hover:bg-neutral-50'
-                              }`}
-                            >
-                              <Icon size={14} className={active ? 'text-primary-600' : 'text-neutral-400'} />
-                              <div className="min-w-0 flex-1">
-                                <div
-                                  className={`text-xs font-medium ${
-                                    active ? 'text-primary-700' : 'text-neutral-700'
-                                  }`}
-                                >
-                                  {t.label}
-                                </div>
-                                <div className="text-[10px] text-neutral-400 truncate">{t.desc}</div>
-                              </div>
-                              {active && <CheckCircle2 size={14} className="text-primary-600 shrink-0" />}
-                            </button>
-                          );
-                        })}
-                      </div>
+        {/* 右：紧凑按钮组 — 对齐原型 [插入图片] [经典▼] [预览|编辑] [已保存] */}
+        <div className="flex items-center gap-1">
+          {canWrite && onSave && view === 'edit' && (
+            <button
+              type="button"
+              onClick={() => {
+                recordEditorSelection();
+                setShowImageModal(true);
+              }}
+              title="插入图片 / 附件（Markdown 图片语法）"
+              className="inline-flex items-center gap-1 h-7 px-2 rounded text-[12px] text-neutral-600 hover:bg-neutral-100 transition"
+            >
+              <ImageIcon size={13} /> 插入图片
+            </button>
+          )}
+
+          {view === 'preview' && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowThemeMenu((s) => !s)}
+                className="inline-flex items-center gap-0.5 h-7 px-2 rounded text-[12px] text-neutral-600 hover:bg-neutral-100 transition"
+              >
+                <Palette size={11} />
+                {RENDER_THEMES.find((t) => t.key === renderTheme)?.label ?? '经典'}
+                <ChevronDown size={10} />
+              </button>
+              {showThemeMenu && (
+                <>
+                  <div className="fixed inset-0 z-20" onClick={() => setShowThemeMenu(false)} />
+                  <div className="absolute right-0 top-full mt-1 w-64 rounded-lg bg-white border border-neutral-200 shadow-xl z-30">
+                    <div className="px-3 py-2 border-b border-neutral-100 text-[11px] font-semibold text-neutral-500 uppercase tracking-wide">
+                      渲染主题
                     </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {canWrite && onSave && view === 'edit' && (
-              <button
-                type="button"
-                onClick={() => {
-                  recordEditorSelection();
-                  setShowImageModal(true);
-                }}
-                title="插入图片 / 附件（Markdown 图片语法）"
-                className="inline-flex items-center gap-1 h-7 px-2 rounded text-xs font-medium border border-neutral-200 hover:bg-neutral-50 transition"
-              >
-                <ImageIcon size={13} /> 插入图片
-              </button>
-            )}
-
-            <div className="bg-neutral-100 rounded-md p-0.5 inline-flex">
-              <button
-                type="button"
-                onClick={() => setView('preview')}
-                className={`inline-flex items-center gap-1 px-2.5 h-7 rounded text-xs font-medium transition ${
-                  view === 'preview'
-                    ? 'bg-white text-neutral-800 shadow-sm'
-                    : 'text-neutral-500 hover:text-neutral-800'
-                }`}
-              >
-                <Eye size={13} /> 预览
-              </button>
-              {canWrite && onSave && (
-                <button
-                  type="button"
-                  onClick={() => setView('edit')}
-                  title="双击内容可快速进入编辑"
-                  className={`inline-flex items-center gap-1 px-2.5 h-7 rounded text-xs font-medium transition ${
-                    view === 'edit'
-                      ? 'bg-white text-neutral-800 shadow-sm'
-                      : 'text-neutral-500 hover:text-neutral-800'
-                  }`}
-                >
-                  <PenTool size={13} /> 编辑
-                </button>
+                    <div className="py-1 max-h-72 overflow-y-auto">
+                      {RENDER_THEMES.map((t) => {
+                        const Icon = t.Icon;
+                        const active = renderTheme === t.key;
+                        return (
+                          <button
+                            key={t.key}
+                            type="button"
+                            onClick={() => {
+                              setRenderTheme(t.key);
+                              setShowThemeMenu(false);
+                            }}
+                            className={`w-full flex items-center gap-2 px-3 py-2 text-left transition ${
+                              active ? 'bg-primary-50' : 'hover:bg-neutral-50'
+                            }`}
+                          >
+                            <Icon size={14} className={active ? 'text-primary-600' : 'text-neutral-400'} />
+                            <div className="min-w-0 flex-1">
+                              <div className={`text-xs font-medium ${active ? 'text-primary-700' : 'text-neutral-700'}`}>
+                                {t.label}
+                              </div>
+                              <div className="text-[10px] text-neutral-400 truncate">{t.desc}</div>
+                            </div>
+                            {active && <CheckCircle2 size={14} className="text-primary-600 shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
               )}
             </div>
+          )}
 
+          {/* 预览/编辑 segmented control */}
+          <div className="bg-neutral-100 rounded-md p-0.5 inline-flex">
+            <button
+              type="button"
+              onClick={() => setView('preview')}
+              className={`inline-flex items-center gap-1 px-2 h-7 rounded text-[12px] font-medium transition ${
+                view === 'preview' ? 'bg-white text-neutral-800 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
+              }`}
+            >
+              <Eye size={12} /> 预览
+            </button>
             {canWrite && onSave && (
               <button
                 type="button"
-                className="btn-primary !h-7 !px-2.5 !text-xs disabled:opacity-60"
-                onClick={() => void doSave()}
-                disabled={saving || !dirty}
+                onClick={() => setView('edit')}
+                title="双击内容可快速进入编辑"
+                className={`inline-flex items-center gap-1 px-2 h-7 rounded text-[12px] font-medium transition ${
+                  view === 'edit' ? 'bg-white text-neutral-800 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
+                }`}
               >
-                <Save size={13} /> {saving ? '保存中…' : dirty ? '保存' : '已保存'}
+                <PenTool size={12} /> 编辑
               </button>
             )}
           </div>
+
+          {/* 保存 / 已保存 — 紧凑按钮，对齐原型绿色 pill */}
+          {canWrite && onSave && (
+            <button
+              type="button"
+              className={`inline-flex items-center gap-1 h-7 px-2 rounded text-[12px] font-medium transition ${
+                saving
+                  ? 'text-primary-600 bg-primary-50'
+                  : dirty
+                    ? 'text-amber-600 bg-amber-50 hover:bg-amber-100'
+                    : 'text-emerald-600 bg-emerald-50'
+              }`}
+              onClick={() => void doSave()}
+              disabled={saving || !dirty}
+            >
+              <Save size={12} /> {saving ? '保存中…' : dirty ? '保存' : '已保存'}
+            </button>
+          )}
         </div>
-        {dirty && (
-          <div className="mt-1.5 flex items-center gap-2 text-[11px] text-amber-600">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-            有未保存的修改（Ctrl/⌘+S 保存）
-            {saveError && <span className="text-red-500">· {saveError}</span>}
-          </div>
-        )}
       </div>
 
-      {/* 内容区 */}
+      {/* ── 内容区：主内容 + TOC 侧栏（常驻） ── */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {view === 'preview' ? (
           <div className="group flex-1 relative min-h-0">
@@ -626,30 +584,26 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
               extensions={extensions}
               readOnly={!canWrite || !onSave}
               editable={canWrite && !!onSave}
-              basicSetup={false} // 我们自己配（lineNumbers/highlightActiveLine/history/keymap）
+              basicSetup={false}
               placeholder="开始编写 Markdown 文档…"
               indentWithTab={true}
               onUpdate={(update) => {
-                // 非协同模式：每次 update 同步本地 buffer，用于 dirty 判定 + 预览 fallback TOC
-                // 协同模式：buffer 不需要实时跟 ytext 走（ytext 是权威源），但 onChange 仍触发 state 更新
                 setBuffer(update.state.doc.toString());
-                // 编辑态 TOC 实时刷新
                 if (update.docChanged || update.selectionSet) {
                   setTocFromEditor(extractTocFromView(update.view));
                 }
               }}
               onCreateEditor={(view) => {
-                // 初始化时用 CM6 view 提取一次 TOC
                 setTocFromEditor(extractTocFromView(view));
               }}
             />
           </div>
         )}
 
-        {/* TOC（预览态 + 编辑态都显示） */}
+        {/* TOC 侧栏 — 常驻显示，对齐原型 */}
         {tocItems.length > 0 && (
           <nav
-            className="hidden xl:flex w-56 shrink-0 flex-col pt-2 pl-4 pr-3 overflow-y-auto scrollbar-thin border-l"
+            className="hidden md:flex w-48 shrink-0 flex-col pt-3 pl-3 pr-2 overflow-y-auto scrollbar-thin border-l"
             style={{ borderColor: 'var(--border-soft)' }}
           >
             <div className="text-[10px] uppercase tracking-wider text-neutral-400 font-semibold mb-2 px-2">
@@ -659,9 +613,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
               {tocItems.map((item, idx) => (
                 <li
                   key={`${item.id}-${idx}`}
-                  style={{
-                    paddingLeft: item.level === 3 ? '12px' : item.level === 2 ? '4px' : '0',
-                  }}
+                  style={{ paddingLeft: item.level === 3 ? '12px' : item.level === 2 ? '4px' : '0' }}
                 >
                   <button
                     type="button"
@@ -680,6 +632,25 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
             </ul>
           </nav>
         )}
+      </div>
+
+      {/* ── 底部状态栏：行号/列号 + 协同人数 + 保存状态 ── */}
+      <div
+        className="shrink-0 flex items-center justify-between px-4 h-7 text-[11px] text-neutral-500"
+        style={{ borderTop: '1px solid var(--border-soft)' }}
+      >
+        <div className="flex items-center gap-3">
+          <span className="font-mono">L{cursorPos.line}, C{cursorPos.col}</span>
+          {peersList.length > 0 && (
+            <span>· {peersList.length} 位协作者</span>
+          )}
+          <span className="text-neutral-400">· {displayValue?.split('\n').length ?? 1} 行</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {saving && <span className="text-primary-600">保存中…</span>}
+          {!saving && dirty && <span className="text-amber-600">● 有未保存修改</span>}
+          {!saving && !dirty && <span className="text-emerald-600">✓ 已保存</span>}
+        </div>
       </div>
 
       <ImagePickerModal
