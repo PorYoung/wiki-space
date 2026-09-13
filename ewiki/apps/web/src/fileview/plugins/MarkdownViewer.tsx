@@ -1,18 +1,15 @@
 // ---------------------------------------------------------------------------
 // Markdown 查看器（§4.4 / §6.2 / P4-6 CRDT 协同）：
-//   - CodeMirror 6 + @codemirror/lang-markdown（lezer-markdown 语法树）做编辑
-//   - y-codemirror.next 绑定 Y.Text —— 实时协同光标 + 远程编辑无缝合并
-//   - 预览态：div 显示 markdownToHtml(file.content || localBuffer)
-//   - TOC：从 CM6 doc 的 lezer 语法树遍历 Heading 节点
-//   - 7 套渲染主题（预览 prose 皮肤） + 编辑区 githubLight/githubDark
-//   - 快捷键：Ctrl/⌘+S 保存、Ctrl/⌘+E 切换预览/编辑、Esc 回预览
+//   - 双编辑模式并行：
+//     · wysiwyg（默认）：@latentic/live-markdown — CM6 原生 WYSIWYG，
+//       Markdown 字符串 byte-for-byte 往返。完整 GFM 覆盖：表格/数学/
+//       Mermaid/TaskList/脚注/wiki-links。
+//     · source：CodeMirror 6 + @codemirror/lang-markdown（lezer 语法树）
+//       + typoraDecorations 手写隐藏。保留作为 fallback。
+//   - y-codemirror.next 绑定 Y.Text — 两种模式都复用同一协同通道
+//   - 预览态：markdownToHtml 渲染
+//   - 7 套渲染主题 + 快捷键：Ctrl+S 保存、Ctrl+E 切换预览/编辑
 //   - 双击进入编辑、协同状态条、插入图片弹层、未保存离开拦截
-//
-// P4-6 CRDT 协同 presence 链路：
-//   - 编辑器顶部显示协同状态：✅ N 人在线 / ⚠️ 协同离线
-//   - 编辑器右上渲染在线协作者头像（首字母 + 彩色圆底，hover 看名字）
-//   - yCollab(ytext, null, {undoManager:false}) 挂 CM6 —— 远程光标 + 实时合并
-//   - EditorView.updateListener 捕获 selectionSet → sendCursor({line,ch}) 广播
 // ---------------------------------------------------------------------------
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
@@ -25,6 +22,16 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { githubLight, githubDark } from '@uiw/codemirror-theme-github';
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { yCollab } from 'y-codemirror.next';
+// live-markdown — WYSIWYG 模式（默认）
+import {
+  CodeMirrorMarkdownEditor,
+  tableExtension,
+  mathExtension,
+  mermaidExtension,
+  footnoteExtension,
+  wikilinkExtension,
+  type MarkdownExtension,
+} from '@latentic/live-markdown';
 import {
   BookOpen,
   Bold,
@@ -117,6 +124,8 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
 
   const initial = file.content ?? '';
   const [view, setView] = useState<'preview' | 'edit'>('preview');
+  // 编辑器模式：wysiwyg（live-markdown，默认） / source（原生 CM6 + decorations，fallback）
+  const [editorMode, setEditorMode] = useState<'wysiwyg' | 'source'>('wysiwyg');
   const [buffer, setBuffer] = useState(initial);
   const [saved, setSaved] = useState(initial);
   const [saving, setSaving] = useState(false);
@@ -318,6 +327,28 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
       }),
     );
     return base;
+  }, [collabEnabled, collab?.ytext, collab?.awareness, collab?.undoManager]);
+
+  // ---------------------------------------------------------------------------
+  // live-markdown extensions — wysiwyg 模式（默认）
+  //   y-codemirror.next 通过 MarkdownExtension.extensions 注入到内部 CM6
+  // ---------------------------------------------------------------------------
+  const wysiwygExtensions = useMemo<MarkdownExtension[]>(() => {
+    const exts: MarkdownExtension[] = [
+      tableExtension(),
+      mathExtension,
+      mermaidExtension,
+      footnoteExtension,
+      wikilinkExtension,
+    ];
+    if (collabEnabled && collab?.ytext) {
+      exts.push({
+        name: '@ewiki/y-collab',
+        version: '1.0.0',
+        extensions: [yCollab(collab.ytext, collab.awareness ?? null, { undoManager: collab.undoManager ?? false })],
+      });
+    }
+    return exts;
   }, [collabEnabled, collab?.ytext, collab?.awareness, collab?.undoManager]);
 
   // ---------------------------------------------------------------------------
@@ -554,6 +585,30 @@ const peersList = Array.from(collab.peers.values());
             )}
           </div>
 
+          {/* 编辑器模式：WYSWYG / Source — 仅编辑态显示 */}
+          {view === 'edit' && (
+            <div className="bg-neutral-100 rounded-md p-0.5 inline-flex" title="编辑器模式">
+              <button
+                type="button"
+                onClick={() => setEditorMode('wysiwyg')}
+                className={`inline-flex items-center gap-1 px-2 h-7 rounded text-[12px] font-medium transition ${
+                  editorMode === 'wysiwyg' ? 'bg-white text-neutral-800 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
+                }`}
+              >
+                <PenTool size={12} /> WYSIWYG
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditorMode('source')}
+                className={`inline-flex items-center gap-1 px-2 h-7 rounded text-[12px] font-medium transition ${
+                  editorMode === 'source' ? 'bg-white text-neutral-800 shadow-sm' : 'text-neutral-500 hover:text-neutral-800'
+                }`}
+              >
+                <Code size={12} /> 源码
+              </button>
+            </div>
+          )}
+
           {/* 保存 / 已保存 — 紧凑按钮，对齐原型绿色 pill */}
           {canWrite && onSave && (
             <button
@@ -642,29 +697,39 @@ const peersList = Array.from(collab.peers.values());
           </div>
         ) : (
           <div className="flex-1 min-h-0 overflow-hidden">
-            {/* P4-6：CodeMirror 6 + y-codemirror.next 协同绑定 */}
-            <CodeMirror
-              ref={cmRef}
-              value={displayValue}
-              height="100%"
-              style={{ height: '100%' }}
-              theme={isDark ? githubDark : githubLight}
-              extensions={extensions}
-              readOnly={!canWrite || !onSave}
-              editable={canWrite && !!onSave}
-              basicSetup={false}
-              placeholder="开始编写 Markdown 文档…"
-              indentWithTab={true}
-              onUpdate={(update) => {
-                setBuffer(update.state.doc.toString());
-                if (update.docChanged || update.selectionSet) {
-                  setTocFromEditor(extractTocFromView(update.view));
-                }
-              }}
-              onCreateEditor={(view) => {
-                setTocFromEditor(extractTocFromView(view));
-              }}
-            />
+            {/* live-markdown WYSIWYG（默认）— 完整 GFM + 协同复用 */}
+            {editorMode === 'wysiwyg' ? (
+              <CodeMirrorMarkdownEditor
+                mode="wysiwyg"
+                value={displayValue}
+                onChange={setBuffer}
+                extensions={wysiwygExtensions}
+              />
+            ) : (
+              /* source 模式：原生 CM6 + typoraDecorations（fallback） */
+              <CodeMirror
+                ref={cmRef}
+                value={displayValue}
+                height="100%"
+                style={{ height: '100%' }}
+                theme={isDark ? githubDark : githubLight}
+                extensions={extensions}
+                readOnly={!canWrite || !onSave}
+                editable={canWrite && !!onSave}
+                basicSetup={false}
+                placeholder="开始编写 Markdown 文档…"
+                indentWithTab={true}
+                onUpdate={(update) => {
+                  setBuffer(update.state.doc.toString());
+                  if (update.docChanged || update.selectionSet) {
+                    setTocFromEditor(extractTocFromView(update.view));
+                  }
+                }}
+                onCreateEditor={(view) => {
+                  setTocFromEditor(extractTocFromView(view));
+                }}
+              />
+            )}
           </div>
         )}
 
