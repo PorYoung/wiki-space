@@ -277,7 +277,7 @@ function DocResults({ loading, items, total, query }: { loading: boolean; items:
         {items.map((doc) => (
           <Link
             key={doc.id}
-            to={`/projects/${doc.projectId}/browse?path=${encodeURIComponent(doc.path)}`}
+            to={`/read/${doc.id}`}
             className="block card-hover rounded-xl p-5 transition group"
           >
             <div className="flex items-start gap-4">
