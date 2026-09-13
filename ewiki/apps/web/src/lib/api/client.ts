@@ -32,6 +32,25 @@ export const tokenStore = {
   },
 };
 
+/** 从 JWT access token 解出 { sub, name? } — 仅取 payload 部分，不验签 */
+export function decodeAccessToken(token?: string | null): { sub: string; name?: string } | null {
+  const t = token ?? tokenStore.access;
+  if (!t) return null;
+  try {
+    const parts = t.split('.');
+    if (parts.length !== 3) return null;
+    // base64url → base64 → atob → JSON
+    const padded = parts[1]!.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(padded)) as Record<string, unknown>;
+    const sub = typeof payload.sub === 'string' ? payload.sub : '';
+    const name = typeof payload.name === 'string' ? payload.name : undefined;
+    if (!sub) return null;
+    return { sub, name };
+  } catch {
+    return null;
+  }
+}
+
 async function refreshTokens(): Promise<boolean> {
   const refresh = tokenStore.refresh;
   if (!refresh) return false;

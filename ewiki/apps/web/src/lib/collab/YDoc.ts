@@ -67,9 +67,12 @@ export class CollabYDoc {
     this.doc = new Y.Doc();
     this.ytext = this.doc.getText('content');
     this.awareness = new awarenessProtocol.Awareness(this.doc);
-    // P4-6：设本地 user state（y-codemirror.next 会读取显示远程光标名）
+    // P4-6：设本地 user state（y-codemirror.next 会读取显示远程光标名 + 颜色）
     if (localUser) {
-      this.awareness.setLocalStateField('user', { name: localUser.name, id: localUser.userId });
+      const hash = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
+      const PALETTE = ['#ef4444','#f97316','#f59e0b','#84cc16','#22c55e','#14b8a6','#06b6d4','#3b82f6','#6366f1','#8b5cf6','#a855f7','#ec4899'];
+      const color = PALETTE[hash(localUser.userId) % PALETTE.length]!;
+      this.awareness.setLocalStateField('user', { name: localUser.name, id: localUser.userId, color });
     }
     this.awareness.on('update', this.handleAwarenessUpdate.bind(this));
     // B3: UndoManager 绑定 ytext —— 撤销历史仅含本地操作（undoManager 不跟踪远程更新）

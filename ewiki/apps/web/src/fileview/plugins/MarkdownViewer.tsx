@@ -410,7 +410,18 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
   };
 
   // P4-6：协作者数量（底部状态栏 + 工具栏 banner 用）
-  const peersList = Array.from(collab.peers.values());
+  // P4-6：根据 userId 稳定哈希颜色 — 协作者头像 + awareness cursor 共用
+const PEER_COLORS = [
+  '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e',
+  '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6',
+  '#a855f7', '#ec4899',
+];
+function getPeerColor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return PEER_COLORS[Math.abs(h) % PEER_COLORS.length]!;
+}
+const peersList = Array.from(collab.peers.values());
   const totalPeers = peersList.length + (collab.connected ? 1 : 0); // 含自己
 
   return (
@@ -418,30 +429,19 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
       className="h-full min-h-0 flex flex-col min-w-0 overflow-hidden"
       style={{ background: 'var(--bg-surface)' }}
     >
-      {/* ── 工具栏（紧凑原型风格：左=协同 banner，右=按钮） ── */}
+      {/* ── 工具栏（紧凑原型风格：左=文件名，右=按钮） ── */}
       <div
         className="shrink-0 flex items-center justify-between gap-4 px-4 h-10"
         style={{ borderBottom: '1px solid var(--border-soft)' }}
       >
-        {/* 左：协同状态 inline banner */}
-        <div className="flex items-center gap-2 text-[12px]">
-          {collab.connected ? (
-            <span className="inline-flex items-center gap-1 text-emerald-600">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              协同在线{peersList.length > 0 ? ` · ${totalPeers} 人` : ' · 仅你一人'}
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 text-amber-600">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              协同离线（仅本地编辑）
-            </span>
-          )}
+        {/* 左：空或显示文件操作占位（原型此处也是空的） */}
+        <div className="flex items-center gap-2 text-[12px] text-neutral-500">
           {saveError && (
-            <span className="text-red-500 text-[11px] ml-1">· {saveError}</span>
+            <span className="text-red-500 text-[11px]">保存失败：{saveError}</span>
           )}
         </div>
 
-        {/* 右：紧凑按钮组 — 对齐原型 [插入图片] [经典▼] [预览|编辑] [已保存] */}
+        {/* 右：紧凑按钮组 — 对齐原型 */}
         <div className="flex items-center gap-1">
           {canWrite && onSave && view === 'edit' && (
             <button
@@ -634,17 +634,40 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
         )}
       </div>
 
-      {/* ── 底部状态栏：行号/列号 + 协同人数 + 保存状态 ── */}
+      {/* ── 底部状态栏：行号/列号 + 协同状态 + 保存状态 + 协作者头像 ── */}
       <div
-        className="shrink-0 flex items-center justify-between px-4 h-7 text-[11px] text-neutral-500"
+        className="shrink-0 flex items-center justify-between px-4 h-7 text-[11px]"
         style={{ borderTop: '1px solid var(--border-soft)' }}
       >
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 text-neutral-500">
           <span className="font-mono">L{cursorPos.line}, C{cursorPos.col}</span>
-          {peersList.length > 0 && (
-            <span>· {peersList.length} 位协作者</span>
-          )}
           <span className="text-neutral-400">· {displayValue?.split('\n').length ?? 1} 行</span>
+          <span className="w-px h-3 bg-neutral-200" />
+          {collab.connected ? (
+            <span className="inline-flex items-center gap-1 text-emerald-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              协同在线·{totalPeers}人
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-amber-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              协同离线
+            </span>
+          )}
+          {peersList.length > 0 && (
+            <span className="inline-flex items-center -space-x-1">
+              {peersList.slice(0, 4).map((p) => (
+                <span
+                  key={p.userId}
+                  title={p.name}
+                  className="w-4 h-4 rounded-full border border-white text-[8px] font-bold text-white flex items-center justify-center shrink-0"
+                  style={{ background: getPeerColor(p.userId) }}
+                >
+                  {(p.name || p.userId).charAt(0).toUpperCase()}
+                </span>
+              ))}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {saving && <span className="text-primary-600">保存中…</span>}

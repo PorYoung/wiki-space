@@ -10,6 +10,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import * as Y from 'yjs';
 import type * as awarenessProtocol from 'y-protocols/awareness';
 import { CollabYDoc, type ConnectionState, type Peer } from './YDoc';
+import { decodeAccessToken } from '../api/client';
 
 export interface CollabContextValue {
   /** Yjs 文档 —— 供 y-codemirror.next 绑定 */
@@ -92,13 +93,15 @@ export function CollabProvider({ docId, kind = 'text', children }: ProviderProps
     }
 
     // 从缓存取或新建 —— 缓存命中时刷新 lastAccess（延长 TTL）
+    const local = decodeAccessToken();
+    const localUser = local ? { userId: local.sub, name: local.name ?? local.sub.slice(0, 8) } : undefined;
     let entry = instanceCache.get(docId);
     if (!entry) {
       const instance = new CollabYDoc(docId, {
         onStatus: (s: ConnectionState) => setConnected(s === 'connected'),
         onPeers: (p) => setPeers(p),
         onSynced: () => setSynced(true),
-      });
+      }, localUser);
       entry = { instance, lastAccess: Date.now() };
       instanceCache.set(docId, entry);
     } else {
