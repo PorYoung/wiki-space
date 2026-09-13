@@ -629,8 +629,8 @@ const peersList = Array.from(collab.peers.values());
         </div>
       </div>
 
-      {/* ── 格式化工具栏（编辑态显示，Typora 式按钮组） ── */}
-      {view === 'edit' && canWrite && onSave && (
+      {/* ── 格式化工具栏（source 模式显示；wysiwyg 由 live-markdown 内置） ── */}
+      {view === 'edit' && editorMode === 'source' && canWrite && onSave && (
         <div
           className="shrink-0 flex items-center gap-0.5 px-4 h-8 text-neutral-600"
           style={{ borderBottom: '1px solid var(--border-soft)', background: 'var(--bg-page)' }}
