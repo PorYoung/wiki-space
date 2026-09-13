@@ -29,6 +29,8 @@ export interface CollabContextValue {
   synced: boolean;
   /** MarkdownViewer 专用：广播本地光标位置 */
   sendCursor: (cursor: { line: number; ch: number } | null) => void;
+  /** 当前登录用户（自己）— 用于底部协同列表显示 "我" */
+  localUser: { userId: string; name: string } | null;
 }
 
 const CollabContext = createContext<CollabContextValue | null>(null);
@@ -82,6 +84,10 @@ export function CollabProvider({ docId, kind = 'text', children }: ProviderProps
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
   const [synced, setSynced] = useState(false);
   const instanceRef = useRef<CollabYDoc | null>(null);
+  const localUser = useMemo(() => {
+    const t = decodeAccessToken();
+    return t ? { userId: t.sub, name: t.name ?? t.sub.slice(0, 8) } : null;
+  }, []);
 
   useEffect(() => {
     // P4-6 guard：binary 文件不创建 YDoc + ws，直接 return
@@ -138,8 +144,9 @@ export function CollabProvider({ docId, kind = 'text', children }: ProviderProps
       peers,
       synced,
       sendCursor,
+      localUser,
     }),
-    [connected, peers, synced, sendCursor],
+    [connected, peers, synced, sendCursor, localUser],
   );
 
   return <CollabContext.Provider value={value}>{children}</CollabContext.Provider>;

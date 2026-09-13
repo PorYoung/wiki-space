@@ -246,20 +246,18 @@ export class CollabYDoc {
   // -------------------------------------------------------------------------
 
   /**
-   * Awareness update 回调——本地变化广播二进制消息；他人变化更新 peers 状态
-   * 事件签名: ({ added, updated, removed }: { added: number[], updated: number[], removed: number[] }, conn: unknown)
+   * Awareness update 回调
+   *   - conn === this.awareness → 本地变化（y-codemirror.next setLocalStateField）→ 广播
+   *   - 否则: 远端变化 → 更新 peer 的 cursor/name（不负责 add/remove — 由 JSON presence join/leave 管理）
    */
   private handleAwarenessUpdate(
     { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
     conn: unknown,
   ): void {
-    // conn === this.awareness 表示本地变化（y-codemirror.next 调用 setLocalStateField 时触发）
     if (conn === this.awareness) {
       if (this.ws?.readyState !== WebSocket.OPEN) return;
-      // P4-6：编码 awareness update 并广播（msgType=1）——服务器透传二进制给其他客户端
       const changed = added.concat(updated);
       if (changed.length === 0) return;
-      // encodeAwarenessUpdate(awareness, clients) 返回 Uint8Array body
       const body = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changed);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, 1); // messageAwareness
@@ -267,31 +265,31 @@ export class CollabYDoc {
       this.ws.send(encoding.toUint8Array(enc));
       return;
     }
-    // 他人变化：从 awareness states 提取 user 信息更新 peers map
-    // getStates 是 Awareness 实例方法，返回 Map<clientId, state>
+
+    // 远端 awareness 变化: 只更新已有 peer 的 cursor + name
+    // ⚠️ 不再负责 add/delete peer — JSON presence join/leave 是单一权威源
     const states = this.awareness.getStates();
     let peersChanged = false;
-    // 更新/添加 —— 跳过自己的 clientID，peers 只记录远端协作者
     for (const clientId of added.concat(updated)) {
-      if (clientId === this.awareness.clientID) continue; // ← 自己不算 peer
-      const state = states.get(clientId) as { user?: { name: string; id: string } } | undefined;
+      if (clientId === this.awareness.clientID) continue; // 跳过自己
+      const state = states.get(clientId) as { user?: { name: string; id: string; color?: string }; cursor?: unknown } | undefined;
       const userId = state?.user?.id;
-      const name = state?.user?.name;
-      if (!userId || !name) continue;
+      if (!userId) continue;
+      // 只更新已有 peer 的 cursor + name（新 peer 必须由 JSON presence join 创建）
       const existing = this.peers.get(userId);
-      if (!existing) {
-        this.peers.set(userId, { userId, name, cursor: null, joinedAt: Date.now() });
-        peersChanged = true;
-      } else if (existing.name !== name) {
-        existing.name = name;
+      if (existing) {
+        if (state?.cursor !== undefined) existing.cursor = (state.cursor as Peer['cursor']) ?? null;
+        if (state?.user?.name && existing.name !== state.user.name) {
+          existing.name = state.user.name;
+        }
         peersChanged = true;
       }
     }
-    // 移除（客户端断开时会触发 removeAwarenessStates 广播 removed）
-    // 注意：awareness 的 state 在 removed 触发时已经被删除，所以我们无法从 awareness
-    // 查到对应的 userId。保守策略：JSON presence 的 leave 事件负责删 peers，
-    // 这里 awareness 只处理 added/updated，避免误删。
+
+    // removed 清理 —— ⚠️ 注意: peers Map key 是 userId 不是 clientId，所以这里 delete 永远不命中
+    // 真正删除靠 JSON presence leave 事件。awareness removed 仅兜底（同 userId 多 tab 不会误删）
     void removed;
+
     if (peersChanged) {
       this.callbacks.onPeers?.(new Map(this.peers));
     }

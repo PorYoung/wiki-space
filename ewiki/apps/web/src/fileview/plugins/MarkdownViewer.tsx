@@ -123,6 +123,7 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
   const [saveError, setSaveError] = useState<string | null>(null);
   const [renderTheme, setRenderTheme] = useState('plain');
   const [showThemeMenu, setShowThemeMenu] = useState(false);
+  const [showCollabPopover, setShowCollabPopover] = useState(false);
   const [showImageModal, setShowImageModal] = useState(false);
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
   const [cursorPos, setCursorPos] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
@@ -710,31 +711,87 @@ const peersList = Array.from(collab.peers.values());
           <span className="font-mono">L{cursorPos.line}, C{cursorPos.col}</span>
           <span className="text-neutral-400">· {displayValue?.split('\n').length ?? 1} 行</span>
           <span className="w-px h-3 bg-neutral-200" />
-          {collab.connected ? (
-            <span className="inline-flex items-center gap-1 text-emerald-600">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              协同在线·{totalPeers}人
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 text-amber-600">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              协同离线
-            </span>
-          )}
-          {peersList.length > 0 && (
-            <span className="inline-flex items-center -space-x-1">
-              {peersList.slice(0, 4).map((p) => (
-                <span
-                  key={p.userId}
-                  title={p.name}
-                  className="w-4 h-4 rounded-full border border-white text-[8px] font-bold text-white flex items-center justify-center shrink-0"
-                  style={{ background: getPeerColor(p.userId) }}
-                >
-                  {(p.name || p.userId).charAt(0).toUpperCase()}
+          {/* 协同状态 + 下拉列表（点击展开） */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowCollabPopover((s) => !s)}
+              className="inline-flex items-center gap-1 hover:bg-neutral-100 px-1.5 h-5 rounded transition"
+              title="点击查看协作者列表"
+            >
+              {collab.connected ? (
+                <span className="inline-flex items-center gap-1 text-emerald-600">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  协同在线·{totalPeers}人
                 </span>
-              ))}
-            </span>
-          )}
+              ) : (
+                <span className="inline-flex items-center gap-1 text-amber-600">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  协同离线
+                </span>
+              )}
+              {peersList.length > 0 && (
+                <span className="inline-flex items-center -space-x-0.5 ml-1">
+                  {peersList.slice(0, 3).map((p) => (
+                    <span
+                      key={p.userId}
+                      title={p.name}
+                      className="w-3.5 h-3.5 rounded-full border border-white text-[7px] font-bold text-white flex items-center justify-center shrink-0"
+                      style={{ background: getPeerColor(p.userId) }}
+                    >
+                      {(p.name || p.userId).charAt(0).toUpperCase()}
+                    </span>
+                  ))}
+                </span>
+              )}
+            </button>
+            {showCollabPopover && (
+              <>
+                <div className="fixed inset-0 z-20" onClick={() => setShowCollabPopover(false)} />
+                <div className="absolute left-0 bottom-full mb-1 w-56 rounded-lg bg-white border border-neutral-200 shadow-xl z-30 text-neutral-800 text-xs max-h-72 overflow-y-auto">
+                  <div className="px-3 py-2 border-b border-neutral-100 text-[10px] uppercase tracking-wide text-neutral-500 font-semibold">
+                    协作者（{totalPeers}）
+                  </div>
+                  <ul className="py-1">
+                    {/* 自己 */}
+                    {collab.localUser && (
+                      <li className="flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-50">
+                        <span
+                          className="w-5 h-5 rounded-full border border-white text-[9px] font-bold text-white flex items-center justify-center shrink-0"
+                          style={{ background: getPeerColor(collab.localUser.userId) }}
+                        >
+                          {collab.localUser.name.charAt(0).toUpperCase()}
+                        </span>
+                        <span className="flex-1 truncate">
+                          {collab.localUser.name}
+                          <span className="ml-1 text-[10px] text-neutral-400">(我)</span>
+                        </span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      </li>
+                    )}
+                    {/* 远端 peers */}
+                    {peersList.map((p) => (
+                      <li key={p.userId} className="flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-50">
+                        <span
+                          className="w-5 h-5 rounded-full border border-white text-[9px] font-bold text-white flex items-center justify-center shrink-0"
+                          style={{ background: getPeerColor(p.userId) }}
+                        >
+                          {(p.name || p.userId).charAt(0).toUpperCase()}
+                        </span>
+                        <span className="flex-1 truncate">{p.name || p.userId}</span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      </li>
+                    ))}
+                    {!collab.localUser && peersList.length === 0 && (
+                      <li className="px-3 py-2 text-neutral-400 text-center">
+                        暂无协作者
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              </>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {saving && <span className="text-primary-600">保存中…</span>}
