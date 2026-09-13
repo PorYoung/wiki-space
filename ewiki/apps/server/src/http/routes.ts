@@ -2196,6 +2196,20 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       meta: { role },
     });
 
+    // 通知被邀请人
+    const [inviter] = await db.select({ name: users.name }).from(users).where(eq(users.id, userId)).limit(1);
+    const roleLabel: Record<string, string> = { owner: '所有者', maintainer: '维护者', editor: '编辑者', guest: '访客' };
+    await db.insert(notifications).values({
+      userId: targetUser.id,
+      type: 'project.invite',
+      payload: {
+        projectId,
+        title: '项目邀请',
+        message: `${inviter?.name ?? '有人'} 邀请你加入项目「${project.name}」（角色：${roleLabel[role] ?? role}）`,
+        link: `/projects/${projectId}/browse`,
+      },
+    });
+
     return c.json(member, 201);
   });
 

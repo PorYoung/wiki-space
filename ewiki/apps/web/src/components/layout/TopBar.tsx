@@ -15,7 +15,7 @@ import { useTheme } from '../../theme/ThemeProvider';
 export interface NotificationItem {
   id: string;
   userId: string;
-  type: string; // sync.error | publish.finished | import.finished | import.failed | team.invite
+  type: string; // sync.error | publish.finished | import.finished | import.failed | team.invite | project.invite
   payload: { projectId?: string; title?: string; message?: string; link?: string };
   readAt: string | null;
   createdAt: string;
@@ -95,7 +95,8 @@ export function notificationIcon(type: string): typeof Bell {
     case 'publish.finished': return ExternalLink;
     case 'import.finished':
     case 'import.failed': return Download;
-    case 'team.invite': return Users;
+    case 'team.invite':
+    case 'project.invite': return Users;
     default: return GitBranch;
   }
 }

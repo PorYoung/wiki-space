@@ -120,7 +120,8 @@ export type NotificationType =
   | 'import.failed'
   | 'export.finished'
   | 'export.failed'
-  | 'team.invite';
+  | 'team.invite'
+  | 'project.invite';
 
 export interface NotificationInput {
   userId: string;
