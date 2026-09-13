@@ -215,10 +215,18 @@ function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
     const msgType = decoding.readVarUint(decoder);
     switch (msgType) {
       case 0: {
-        // messageSync：合并增量并广播（CRDT 保证收敛，SDD 5.3）
+        // messageSync：合并增量并广播给房间其他客户端（CRDT 保证收敛）
+        // ⚠️ 关键：必须广播！只回 reply 给发送者 SyncStep1 响应不够 ——
+        // 其他在线客户端也要收到这个 update 来同步他们的本地 doc
         const reply = encoding.createEncoder();
         encoding.writeVarUint(reply, 0);
         syncProtocol.readSyncMessage(decoder, reply, doc, ws);
+        // 原样转发给房间其他客户端（二进制 payload 已包含 msgType=0）
+        for (const peer of collabRooms.get(room) ?? []) {
+          if (peer !== ws && peer.readyState === WebSocket.OPEN) {
+            peer.send(data);
+          }
+        }
         if (encoding.length(reply) > 1) ws.send(encoding.toUint8Array(reply));
         break;
       }
