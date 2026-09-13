@@ -242,6 +242,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const accessToken = await signAccessToken(config.JWT_SECRET, {
       sub: user.id,
       globalRole: user.globalRole,
+      name: user.name,
     });
     const refreshToken = generateRefreshToken();
     await db.insert(refreshTokens).values({
@@ -284,6 +285,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const accessToken = await signAccessToken(config.JWT_SECRET, {
       sub: user.id,
       globalRole: user.globalRole,
+      name: user.name,
     });
     const newRefresh = generateRefreshToken();
     await db.insert(refreshTokens).values({

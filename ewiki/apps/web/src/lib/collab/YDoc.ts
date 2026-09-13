@@ -52,6 +52,8 @@ export class CollabYDoc {
   private manualClose = false;
   private synced = false;
   private peers = new Map<string, Peer>();
+  /** 当前登录用户的 userId — 用于过滤自己的 presence join（多 tab 场景） */
+  private readonly myUserId: string | null;
 
   /** B3: 150ms 内连续 update 合并成一次 ws.send，降低服务器压力 */
   private static readonly FLUSH_INTERVAL = 150;
@@ -64,6 +66,7 @@ export class CollabYDoc {
     /** P4-6：可选本地用户信息，用于 awareness 本地 state */
     localUser?: { userId: string; name: string },
   ) {
+    this.myUserId = localUser?.userId ?? null;
     this.doc = new Y.Doc();
     this.ytext = this.doc.getText('content');
     this.awareness = new awarenessProtocol.Awareness(this.doc);
@@ -307,6 +310,8 @@ export class CollabYDoc {
       return;
     }
     if (msg.type !== 'presence' || !msg.userId) return;
+    // 跳过自己的 join（多 tab 场景：tab2 join 会被服务器广播给 tab1）
+    if (msg.userId === this.myUserId) return;
 
     if (msg.event === 'join') {
       this.peers.set(msg.userId, {

@@ -24,9 +24,9 @@ export function verifyPassword(password: string, stored: string): boolean {
 // ---- 访问令牌（HS256；EdDSA 升级见 SDD 8-9 待确认） ----
 export async function signAccessToken(
   secret: string,
-  payload: { sub: string; globalRole: string },
+  payload: { sub: string; globalRole: string; name?: string },
 ): Promise<string> {
-  return await new SignJWT({ globalRole: payload.globalRole })
+  return await new SignJWT({ globalRole: payload.globalRole, name: payload.name ?? '' })
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(payload.sub)
     .setIssuedAt()
@@ -37,9 +37,9 @@ export async function signAccessToken(
 export async function verifyAccessToken(
   secret: string,
   token: string,
-): Promise<{ sub: string; globalRole: string }> {
+): Promise<{ sub: string; globalRole: string; name?: string }> {
   const { payload } = await jwtVerify(token, secretKey(secret), { algorithms: ['HS256'] });
-  return { sub: String(payload.sub), globalRole: String(payload['globalRole'] ?? 'user') };
+  return { sub: String(payload.sub), globalRole: String(payload['globalRole'] ?? 'user'), name: typeof payload['name'] === 'string' ? payload['name'] : undefined };
 }
 
 // ---- 刷新令牌（明文一次性返回，SHA-256 落库，SDD 4.1） ----

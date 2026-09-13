@@ -410,7 +410,7 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
     });
     await audit(db, { actorId: user.id, action: 'kb.sample_created', resourceType: 'project', resourceId: project.id, meta: { name: project.name } });
 
-    const accessToken = await signAccessToken(config.JWT_SECRET, { sub: user.id, globalRole: user.globalRole });
+    const accessToken = await signAccessToken(config.JWT_SECRET, { sub: user.id, globalRole: user.globalRole, name: user.name });
     const refreshToken = generateRefreshToken();
     await db.insert(refreshTokens).values({
       userId: user.id,
