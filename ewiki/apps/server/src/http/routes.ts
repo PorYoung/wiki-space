@@ -976,6 +976,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const projectId = c.req.query('projectId');
     const status = c.req.query('status');
     const kind = c.req.query('kind');
+    const q = c.req.query('q');
     const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1') || 1));
     const pageSize = Math.min(500, Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '500') || 500)));
     const uid = c.get('userId') as string;
@@ -991,9 +992,18 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     if (status) conditions.push(eq(documents.status, status));
     // 文件管理重构 §4.1-F1：按 kind facet 过滤（缺省全部；非法值忽略）
     if (kind === 'text' || kind === 'binary') conditions.push(eq(documents.kind, kind));
+    if (q) {
+      const like = '%' + q + '%';
+      conditions.push(sql`(
+        ${documents.path} ILIKE ${like} OR
+        ${documents.title} ILIKE ${like} OR
+        array_to_string(${documents.tags}, ',') ILIKE ${like} OR
+        (${documents.kind} = 'text' AND ${documents.content} ILIKE ${like})
+      )`);
+    }
     const where = and(...conditions);
     const total = await getCachedCount(
-      `global:${projectId ?? 'all'}:${status ?? ''}:${kind ?? ''}:${c.get('globalRole') === 'admin' ? 'admin' : uid}`,
+      `global:${projectId ?? 'all'}:${status ?? ''}:${kind ?? ''}:${q ?? ''}:${c.get('globalRole') === 'admin' ? 'admin' : uid}`,
       async () => {
         const [totalRow] = await db
           .select({ count: sql<number>`count(*)::int` })
@@ -1028,12 +1038,26 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .limit(pageSize)
       .offset((page - 1) * pageSize);
     // 文件管理重构 §5.4：binary 项附带短期签名 rawUrl（img/iframe 直接消费，不必走 Bearer 头）
-    const items = rows.map(({ content, kind: k, ...row }) => ({
-      ...row,
-      kind: k,
-      summary: documentSummary(content),
-      rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
-    }));
+    const items = rows.map(({ content, kind: k, ...row }) => {
+      const summary = documentSummary(content);
+      let snippet: string | null = null;
+      if (q && content) {
+        const text = content.replace(/[#*`_>\-!\[\]()]/g, '');
+        const idx = text.toLowerCase().indexOf(q.toLowerCase());
+        if (idx >= 0) {
+          const start = Math.max(0, idx - 40);
+          const end = Math.min(text.length, idx + q.length + 80);
+          snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+        }
+      }
+      return {
+        ...row,
+        kind: k,
+        summary,
+        snippet,
+        rawUrl: k === 'binary' ? buildRawUrl(config.JWT_SECRET, '/api/v1', row, uid, config.RAW_URL_TTL_SECONDS) : null,
+      };
+    });
     return c.json({ items, page, pageSize, total });
   });
 

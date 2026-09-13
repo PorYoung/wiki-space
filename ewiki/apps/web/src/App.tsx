@@ -7,6 +7,7 @@ import { tokenStore } from './lib/api/client';
 // 路由级 code-split（首屏只加载登录/跳转逻辑，页面按需拉取 chunk）
 const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
+const SearchPage = lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })));
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
 const LibraryPage = lazy(() => import('./pages/LibraryPage').then((m) => ({ default: m.LibraryPage })));
 const BrowsePage = lazy(() => import('./pages/BrowsePage').then((m) => ({ default: m.BrowsePage })));
@@ -44,6 +45,7 @@ export default function App(): React.ReactElement {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/" element={tokenStore.access ? <RequireAuth><HomePage /></RequireAuth> : <Navigate to="/login" replace />} />
+        <Route path="/search" element={tokenStore.access ? <RequireAuth><SearchPage /></RequireAuth> : <Navigate to="/login" replace />} />
         <Route element={<RequireAuth><Layout /></RequireAuth>}>
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/library" element={<LibraryPage />} />
