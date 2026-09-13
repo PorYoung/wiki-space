@@ -152,7 +152,7 @@ server.on('upgrade', async (req, socket, head) => {
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
-    if (url.pathname === '/collab') setupCollab(ws, url, payload);
+    if (url.pathname === '/collab' || url.pathname.startsWith('/collab/')) setupCollab(ws, url, payload);
     else setupEvents(ws);
   });
 });
@@ -173,7 +173,9 @@ function setupEvents(ws: WsSocket): void {
 }
 
 function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
-  const docId = url.searchParams.get('doc') ?? '';
+  // 支持两种格式：/collab?doc=<id> 或 /collab/<id>（y-websocket 默认格式）
+  const pathDocId = url.pathname.split('/').filter(Boolean)[1];
+  const docId = pathDocId ?? url.searchParams.get('doc') ?? '';
   if (!docId) {
     ws.close();
     return;
@@ -191,14 +193,9 @@ function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
   startSnapshotTimer(room);
   broadcastToOthers(room, ws, { type: 'presence', event: 'join', userId, name, docId });
 
-  // SDD 5.3 协同通道（P4-6 CRDT 改造）：服务器主动下发全量状态 + 自身 state vector，
-  // 客户端立刻看到历史状态（无需先回复 step2），并根据服务器 vector 发送自己的增量。
-  const enc = encoding.createEncoder();
-  encoding.writeVarUint(enc, 0);
-  syncProtocol.writeSyncStep2(enc, doc); // 服务器全量 → 客户端立刻看到历史状态
-  syncProtocol.writeSyncStep1(enc, doc); // 服务器 state vector → 客户端发它的增量
-  ws.send(encoding.toUint8Array(enc));
-
+  // y-websocket 客户端在 onopen 时主动发 SyncStep1，
+  // 后端收到后 readSyncMessage 自动回 SyncStep2（全量），无需主动推送。
+  // 主动推送合并消息会导致客户端解码 "Unexpected end of array"。
   ws.on('message', (data: Buffer, isBinary: boolean) => {
     if (!isBinary) {
       try {
@@ -216,25 +213,22 @@ function setupCollab(ws: WsSocket, url: URL, payload: JWTPayload): void {
     switch (msgType) {
       case 0: {
         // messageSync：合并增量并广播给房间其他客户端（CRDT 保证收敛）
-        // ⚠️ 关键：必须广播！只回 reply 给发送者 SyncStep1 响应不够 ——
-        // 其他在线客户端也要收到这个 update 来同步他们的本地 doc
         const reply = encoding.createEncoder();
         encoding.writeVarUint(reply, 0);
         syncProtocol.readSyncMessage(decoder, reply, doc, ws);
+        const replyBytes = encoding.toUint8Array(reply);
         // 原样转发给房间其他客户端（二进制 payload 已包含 msgType=0）
+        const syncData = Buffer.from(data);
         for (const peer of collabRooms.get(room) ?? []) {
-          if (peer !== ws && peer.readyState === WebSocket.OPEN) {
-            peer.send(data);
-          }
+          if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(syncData);
         }
-        if (encoding.length(reply) > 1) ws.send(encoding.toUint8Array(reply));
+        if (encoding.length(reply) > 1) ws.send(replyBytes);
         break;
       }
       case 1: {
-        // P4-6 CRDT awareness：二进制 awareness update 原样转发到房间其他客户端
-        // 协议：第 1 字节 msgType=1，剩余 payload 就是 awareness 二进制体（直接透传即可）
+        // messageAwareness：二进制 awareness update 转发到房间其他客户端
         for (const peer of collabRooms.get(room) ?? []) {
-          if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(data);
+          if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(Buffer.from(data));
         }
         break;
       }

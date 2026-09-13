@@ -53,6 +53,9 @@ importers:
       y-protocols:
         specifier: ^1.0.6
         version: 1.0.7(yjs@13.6.32)
+      y-websocket:
+        specifier: ^3.1.0
+        version: 3.1.0(yjs@13.6.32)
       yjs:
         specifier: ^13.6.0
         version: 13.6.32
@@ -226,6 +229,9 @@ importers:
       y-protocols:
         specifier: 1.0.6
         version: 1.0.6(yjs@13.6.0)
+      y-websocket:
+        specifier: ^3.1.0
+        version: 3.1.0(yjs@13.6.0)
       yjs:
         specifier: 13.6.0
         version: 13.6.0
@@ -3749,6 +3755,12 @@ packages:
     peerDependencies:
       yjs: ^13.0.0
 
+  y-websocket@3.1.0:
+    resolution: {integrity: sha512-ZNzwH84Ysxv7zjpFNZHjTJvrBZgcAqMljTe+6zrWciAML9LQ18aVylyPNH9faxCXqEOV8I0JY4TGtrIHFX+Xwg==}
+    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
+    peerDependencies:
+      yjs: ^13.5.6
+
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
@@ -6950,9 +6962,26 @@ snapshots:
       lib0: 0.2.99
       yjs: 13.6.0
 
+  y-protocols@1.0.6(yjs@13.6.32):
+    dependencies:
+      lib0: 0.2.99
+      yjs: 13.6.32
+
   y-protocols@1.0.7(yjs@13.6.32):
     dependencies:
       lib0: 0.2.117
+      yjs: 13.6.32
+
+  y-websocket@3.1.0(yjs@13.6.0):
+    dependencies:
+      lib0: 0.2.117
+      y-protocols: 1.0.6(yjs@13.6.0)
+      yjs: 13.6.0
+
+  y-websocket@3.1.0(yjs@13.6.32):
+    dependencies:
+      lib0: 0.2.117
+      y-protocols: 1.0.6(yjs@13.6.32)
       yjs: 13.6.32
 
   yallist@3.1.1: {}
