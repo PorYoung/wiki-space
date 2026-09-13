@@ -271,8 +271,9 @@ export class CollabYDoc {
     // getStates 是 Awareness 实例方法，返回 Map<clientId, state>
     const states = this.awareness.getStates();
     let peersChanged = false;
-    // 更新/添加
+    // 更新/添加 —— 跳过自己的 clientID，peers 只记录远端协作者
     for (const clientId of added.concat(updated)) {
+      if (clientId === this.awareness.clientID) continue; // ← 自己不算 peer
       const state = states.get(clientId) as { user?: { name: string; id: string } } | undefined;
       const userId = state?.user?.id;
       const name = state?.user?.name;
