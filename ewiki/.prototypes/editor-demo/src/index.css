@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+.lm-editor {
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  color: #1f2937;
+}
+
+.lm-editor h1 { font-size: 1.8em; font-weight: 700; margin: 0.6em 0 0.3em; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.15em; }
+.lm-editor h2 { font-size: 1.5em; font-weight: 700; margin: 0.5em 0 0.2em; }
+.lm-editor h3 { font-size: 1.25em; font-weight: 600; margin: 0.4em 0 0.15em; }
+
+.lm-editor blockquote {
+  border-left: 3px solid #d1d5db;
+  padding-left: 12px;
+  margin: 0.3em 0;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.lm-editor pre {
+  background: #1f2937;
+  color: #e5e7eb;
+  border-radius: 6px;
+  padding: 0.8em 1em;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.9em;
+  overflow-x: auto;
+}
+
+.lm-editor code {
+  background: #f3f4f6;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.9em;
+}
+
+.lm-editor pre code { background: transparent; padding: 0; }
+
+.lm-editor table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
+.lm-editor th, .lm-editor td { border: 1px solid #e5e7eb; padding: 6px 12px; text-align: left; }
+.lm-editor th { background: #f9fafb; font-weight: 600; }
+
+.lm-editor a { color: #2563eb; }
+.lm-editor hr { border: none; border-top: 1px solid #e5e7eb; margin: 1em 0; }
+.lm-editor img { max-width: 100%; border-radius: 4px; }
+.lm-editor ul, .lm-editor ol { padding-left: 1.5em; }
+.lm-editor .cm-gutters { display: none; }

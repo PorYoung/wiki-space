@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>修复说明 · 初始化版本留痕 — ewiki</title>
+<style>
+  :root {
+    --bg: #f7f8f7;
+    --ink: #191c1b;
+    --ink-soft: #3d4543;
+    --muted: #5f6a67;
+    --hairline: #dde1df;
+    --paper: #ffffff;
+    --code-bg: #eef0ef;
+    --accent: #0f6f5c;
+    --sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15.5px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .doc { max-width: 1000px; margin: 0 auto; padding: 56px 32px 72px; }
+  .kicker {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  h1 {
+    font-size: clamp(30px, 3.4vw, 42px);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+    margin: 14px 0 16px;
+    max-width: 22em;
+  }
+  .lede { font-size: 17px; color: var(--ink-soft); max-width: 46em; margin: 0 0 22px; }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 8px 28px;
+    padding-top: 14px;
+    border-top: 1px solid var(--hairline);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  section { margin-top: 56px; }
+  h2 {
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--muted);
+    margin: 0 0 18px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  p { max-width: 46em; margin: 0 0 14px; color: var(--ink-soft); }
+  p b, li b { color: var(--ink); }
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: var(--ink);
+  }
+  ol.causes { margin: 0; padding: 0 0 0 1.4em; max-width: 46em; }
+  ol.causes li { margin-bottom: 14px; color: var(--ink-soft); }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 14px; }
+  th, td {
+    text-align: left; vertical-align: top;
+    padding: 9px 12px 9px 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+  th { font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  td { color: var(--ink-soft); }
+  td code { white-space: nowrap; }
+  .ok { color: var(--accent); font-weight: 600; }
+  .dash { color: #a7afac; }
+  .note {
+    border-top: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+    padding: 12px 2px;
+    font-size: 14px;
+    color: var(--muted);
+    max-width: 46em;
+    margin: 6px 0 18px;
+  }
+  ul.plain { margin: 0; padding: 0 0 0 1.2em; max-width: 46em; }
+  ul.plain li { margin-bottom: 10px; color: var(--ink-soft); }
+  .files { font-family: var(--mono); font-size: 12.5px; line-height: 2; color: var(--ink-soft); }
+  .colophon {
+    margin-top: 72px;
+    padding-top: 16px;
+    border-top: 1px solid var(--hairline);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+  @media (max-width: 640px) {
+    .doc { padding: 40px 20px 56px; }
+    table { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<main class="doc">
+
+  <header class="cover">
+    <div class="kicker">EWIKI · 修复说明 / FIX NOTE</div>
+    <h1>初始化推送未在平台留痕</h1>
+    <p class="lede">新建文档库自动初始化仓库后，Gitea 可见建仓与推送记录，但平台「活动」页的版本历史与动态流没有任何体现。本页记录根因、修复内容与验证结果。</p>
+    <div class="meta-row">
+      <span>日期 2026-09-12</span>
+      <span>模块 apps/server · scripts</span>
+      <span>状态 已修复 · 已验证</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>01 · 现象</h2>
+    <p><b>Gitea 侧（正常）：</b>新建库自动创建仓库 <code>root/test-wiki</code>、main 分支，并推送提交 <code>9930af44f6</code>「chore: 初始化文档库（4 篇模板文档）」。</p>
+    <p><b>平台侧（异常）：</b>项目活动页停在「版本历史」空状态「暂无版本记录」；动态流同样看不到这次初始化与推送。</p>
+  </section>
+
+  <section>
+    <h2>02 · 根因</h2>
+    <ol class="causes">
+      <li><b>初始化提交没有写版本快照。</b>建库链路把推送结果只写入 <code>sync_jobs</code>（stats.init = true）与审计 <code>audit_logs</code>；而「版本历史」按文档聚合 <code>document_versions</code>，该表没有对应行，页面必然为空。</li>
+      <li><b>自动提交的 hash 从未回填。</b>平台内新建 / 保存文档会真实 commit + push，但返回的 commitHash 只进 <code>sync_jobs</code>；<code>document_versions.commit_hash</code> 从未被写入 —— 修复前全库为 NULL。</li>
+      <li><b>初始化推送没有进动态流。</b><code>activities</code> 只在建项目时写入一条 create，「同步 / 推送」类事件没有记录（PRD F49 的「同步」维度缺失）。</li>
+    </ol>
+    <p class="note">数据源对应关系：版本历史 ← <code>document_versions</code>（按文档聚合、按时间合并）；活动动态 ← <code>activities</code>（verb 驱动筛选与配色）。修复前这两条链路各缺一段写入，页面因此「无记录」。</p>
+  </section>
+
+  <section>
+    <h2>03 · 修复</h2>
+    <table>
+      <thead><tr><th style="width:30%">触发动作</th><th style="width:32%">修复前</th><th>修复后</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>建库 + Git 自动初始化推送</td>
+          <td class="dash">版本表无行；动态流只有「创建项目」</td>
+          <td>每篇模板文档写入 v1 快照（<code>commit_hash</code> = 初始化提交、message = 提交信息、作者 = 建库人）；动态流补一条「同步」记录（meta.init = true）</td>
+        </tr>
+        <tr>
+          <td>平台内新建文档（有内容）</td>
+          <td class="dash">无版本快照</td>
+          <td>落库即生成 v1 快照；推送成功回填 <code>commit_hash</code></td>
+        </tr>
+        <tr>
+          <td>平台内保存文档</td>
+          <td class="dash">版本行 <code>commit_hash</code> 恒为 NULL</td>
+          <td>推送成功后回填 <code>commit_hash</code>；未填「保存说明」时以 Git 提交信息兜底显示</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="files">
+      apps/server/src/http/routes.ts —— 建库初始化 / 新建 / 保存 三处留痕与回填<br>
+      apps/server/src/http/routes-platform.ts —— DocEffectResult 回传提交信息（兜底文案）<br>
+      scripts/e2e-platform.mjs —— 新增 P6o / P6p / P6q 三条验收
+    </p>
+  </section>
+
+  <section>
+    <h2>04 · 验证</h2>
+    <table>
+      <thead><tr><th style="width:34%">验证项</th><th style="width:14%">结果</th><th>证据</th></tr></thead>
+      <tbody>
+        <tr><td>全量 e2e 平台验收</td><td class="ok">61 / 62</td><td>新增 P6o（初始化 v1 快照）、P6p（版本 hash 回填）、P6q（动态流「同步」）全部通过；唯一失败的 P5b 属于另一项进行中改造的旧断言，与本修复无关</td></tr>
+        <tr><td>专项链路（新项目 <code>验证初始化留痕-jwun</code>）</td><td class="ok">11 / 11</td><td>建库推送 → 4 篇 v1 快照 → 动态流「同步」→ 保存回填 v2，全部通过</td></tr>
+        <tr><td>Gitea 双向核对</td><td class="ok">一致</td><td>提交 <code>838805b15596</code>（初始化）与 <code>2635403db073</code>（保存）在平台与 Gitea 两侧 hash 完全一致</td></tr>
+        <tr><td>数据库落盘核对</td><td class="ok">一致</td><td><code>document_versions</code>：4 × v1（<code>838805b1…</code>）+ 1 × v2（<code>2635403d…</code>），作者与 message 齐备</td></tr>
+        <tr><td>修复后冒烟（热重载后复测）</td><td class="ok">PASS</td><td>v1 4/4、v2 回填 1/1、同步动态 1 条</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>05 · 边界与说明</h2>
+    <ul class="plain">
+      <li>本次修复对「新建」生效；已存在的历史项目（如 <code>test-git-wiki</code>）不会自动追补初始化快照，如需回填可另行处理。</li>
+      <li>改动未提交 Git —— 工作区已有其他在途改动，为避免混提交，留待统一整理。</li>
+    </ul>
+  </section>
+
+  <footer class="colophon">
+    <span>ewiki 工作区导出 · 2026-09-12</span>
+    <span>依据 working tree（HEAD 8e93e17 + 在途改动）</span>
+  </footer>
+
+</main>
+</body>
+</html>
