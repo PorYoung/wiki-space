@@ -1,6 +1,6 @@
 # 团队 · 文档归属 · 分级权限 · 设计与落地规划
 
-> 状态：**已实施并通过验收（2026-09-14）**——B0 止血 + B1 主体已落地，见 §12 实施记录；B2 收敛项待办。
+> 状态：**已实施并通过验收，B0 + B1 + B2 全部落地（2026-09-14）**，见 §12 实施记录。
 > 关联：`docs/PRD.md`（F35 发布）、`docs/DESIGN.md`（§3.2 数据模型）、`specs/EXT-PLATFORM-PLAN.md`（通知链路 ADR-P3）、`apps/server/scripts/e2e-platform.mjs`（验收基线 P7–P9）
 > 证据约定：文中所有现状结论均以 `file:line` 标注，已逐行核实。范围：ewiki（apps/server + apps/web + packages/db + packages/shared）。
 
@@ -497,13 +497,13 @@ ALTER TABLE projects ADD CONSTRAINT projects_team_scope_check
 
 ### 12.3 B2 收敛待办（未完成项 → 2026-09-14 已全部落地）
 
-> 状态：2026-09-14 会话「继续项目功能迭代收敛」完成 B2 全部 4 项功能收敛 + 验证（见 §12.6）。遗留仅剩 git 提交。
+> 状态：2026-09-14 会话「继续项目功能迭代收敛」完成 B2 全部 4 项功能收敛 + 验证（见 §12.6）；改动已随 `a29d353` 提交入库。
 
 1. ~~**F6 完整版**~~（✅ 完成）：`GET /api/v1/projects/:id/members` 在团队归属库时下发 `teamMembers`（团队继承成员，仅 active，屏蔽顺带 online/lastActive 对游客暴露）；MembersPage 渲染只读「团队继承成员」分区（来源徽标 + 团队角色 + 加入时间，管理收敛到团队页）。个人库返回空数组。
 2. ~~**admin 批量归位脚本**~~（✅ 完成）：`apps/server/src/admin-team-reassign.ts`（CLI，`pnpm --filter @ewiki/server run admin:team-reassign -- --team <id> [--user <email>] [--visibility <档位>] [--dry-run]`）。幂等（跳过已归位 owner_type='team'）；目标团队存在/未归档校验；非法档位校验；`--dry-run` 仅预告影响范围。已在真实 db 演练（命中 119 个待归位个人库，逐条 dry-run 正确）。
 3. ~~**团队发现目录**~~（✅ 完成）：新增 `GET /api/v1/teams/discover?q=`（internal + 未归档；支持 name/description/slug 模糊搜）；T3 详情与 T6 成员列表对 internal 团队开放登录用户只读（成员 online/lastActive 对游客屏蔽）；`GET /teams/:id/projects` 对 internal 游客只放行 public-\* 库（不穿透 team/private）。TeamPage 加「我的团队 / 发现」分段（发现 Tab 有 Compass 空态），卡片标注可见性/未加入态。
 4. ~~**`public-write` 滥用治理**~~（✅ 收敛确认）：§11-2 明确限流/敏感词划归独立专项；本期确认「审计（visibility_change 记 from/to）+ 版本历史（documentVersions 每写一版本、可回滚）」双兜底已完备，文档写路径 `denyIfNot(access.canWrite)` 正确收口 public-write。不做激进限流；新增 e2e P10q 锁定「写路径版本历史 ≥1」可观测。
-5. （⏳ 未提交，见任务 11）：本次改动（B0+B1+B2）仍在工作区，待本机安全 git 提交。
+5. ~~**git 提交**~~（✅ 完成）：B0+B1+B2 全部改动已随 `a29d353` 提交入库（该提交信息前缀为 docs，实际包含全部功能实现代码）。
 
 ### 12.6 B2 实施记录（2026-09-14 晚）
 
