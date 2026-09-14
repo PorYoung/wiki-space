@@ -25,6 +25,17 @@ const EnvSchema = z.object({
   EWIKI_BASE_DOMAIN: z.string().default('ewiki.yfzx.cn'),
   SITE_ADDRESS_MODE: z.enum(['subdomain', 'subpath']).default('subdomain'),
   ENCRYPTION_KEY: z.string().min(16),
+  // ---- 检索（SEARCH-VECTOR-DESIGN §9.1）----
+  SEARCH_FTS_CONFIG: z.enum(['chinese_zh', 'simple']).default('chinese_zh'),
+  SEARCH_SEMANTIC_MIN_SCORE: z.coerce.number().min(0).max(0.95).default(0.3),
+  SEARCH_INDEX_DEBOUNCE_SECONDS: z.coerce.number().min(0).max(600).default(30),
+  EMBEDDING_PROVIDER: z.enum(['none', 'openai-compatible']).default('none'),
+  EMBEDDING_BASE_URL: z.string().default(''),
+  EMBEDDING_API_KEY: z.string().default(''),
+  EMBEDDING_MODEL: z.string().default('bge-m3'),
+  EMBEDDING_DIM: z.coerce.number().int().min(1).default(1024),
+  EMBEDDING_BATCH_SIZE: z.coerce.number().int().min(1).default(32),
+  EMBEDDING_TIMEOUT_MS: z.coerce.number().int().default(10000),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

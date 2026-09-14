@@ -8,11 +8,28 @@ import {
 import { apiFetch, decodeAccessToken } from '../lib/api/client';
 import { isPublicScope, visibilityLabel } from '../lib/visibility';
 import { useTheme } from '../theme/ThemeProvider';
-import type { Document, Project } from '@ewiki/shared';
+import type { Project } from '@ewiki/shared';
 
-interface SearchDocument extends Document {
-  summary: string | null;
-  snippet: string | null;
+type SearchMode = 'auto' | 'keyword' | 'semantic';
+
+/** GET /api/v1/search 结果项（SEARCH-VECTOR-DESIGN §7.1）：snippet 已服务端转义，仅 <em> 为安全标签 */
+interface SearchHitItem {
+  documentId: string;
+  projectId: string;
+  projectName?: string | null;
+  path: string;
+  title: string;
+  snippet: string;
+  score: number;
+  reason: 'keyword' | 'semantic' | 'hybrid';
+  heading?: string | null;
+}
+
+interface SearchResponse {
+  items: SearchHitItem[];
+  hasMore: boolean;
+  tookMs: number;
+  degraded?: 'vector-disabled' | 'provider-not-configured';
 }
 
 function highlightText(text: string, keyword: string): React.ReactNode {
@@ -64,6 +81,8 @@ export function SearchPage(): React.ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
   const { appearance, toggleAppearance } = useTheme();
   const query = searchParams.get('q') ?? '';
+  const modeParam = searchParams.get('mode');
+  const mode: SearchMode = modeParam === 'keyword' || modeParam === 'semantic' ? modeParam : 'auto';
   const [inputValue, setInputValue] = useState(query);
   const [activeTab, setActiveTab] = useState<SearchTab>('docs');
   const [focused, setFocused] = useState(false);
@@ -79,11 +98,13 @@ export function SearchPage(): React.ReactElement {
     setInputValue(query);
   }, [query]);
 
+  // 文档页签走统一检索端点（keyword/semantic/hybrid；/documents?q= 保留给首页联想）
   const { data: docsData, isLoading: docsLoading } = useQuery({
-    queryKey: ['search-docs', query],
-    queryFn: () => apiFetch<{ items: SearchDocument[]; total: number; page: number; pageSize: number }>(
-      `/api/v1/documents?q=${encodeURIComponent(query)}&page=1&pageSize=20`
-    ),
+    queryKey: ['search-docs', query, mode],
+    queryFn: () =>
+      apiFetch<SearchResponse>(
+        `/api/v1/search?q=${encodeURIComponent(query)}&mode=${mode}&limit=20`
+      ),
     enabled: query.length > 0,
     staleTime: 30_000,
   });
@@ -106,13 +127,21 @@ export function SearchPage(): React.ReactElement {
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (inputValue.trim()) {
-      setSearchParams({ q: inputValue.trim() });
+      setSearchParams({ q: inputValue.trim(), ...(mode !== 'auto' ? { mode } : {}) });
     }
   };
 
+  const changeMode = (m: SearchMode) => {
+    setActiveMode(m);
+    setSearchParams({ q: query, ...(m !== 'auto' ? { mode: m } : {}) });
+  };
+  // activeMode 跟随 URL（浏览器后退同步）
+  const [activeMode, setActiveMode] = useState<SearchMode>(mode);
+  useEffect(() => setActiveMode(mode), [mode]);
+
   const goHome = () => navigate('/');
 
-  const docCount = docsData?.total ?? 0;
+  const docCount = docsData ? docsData.items.length + (docsData.hasMore ? 20 : 0) : 0;
   const projectCount = filteredProjects.length;
 
   const headerStyle: React.CSSProperties = {
@@ -261,9 +290,15 @@ export function SearchPage(): React.ReactElement {
           <DocResults
             loading={docsLoading}
             items={docsData?.items ?? []}
-            total={docCount}
+            hasMore={docsData?.hasMore ?? false}
+            tookMs={docsData?.tookMs ?? 0}
+            degraded={docsData?.degraded}
+            mode={activeMode}
+            onModeChange={changeMode}
             query={query}
-            projectName={(pid: string) => projectsData?.items.find((p) => p.id === pid)?.name ?? pid.slice(0, 8)}
+            projectName={(pid: string, fallback?: string | null) =>
+              projectsData?.items.find((p) => p.id === pid)?.name ?? fallback ?? pid.slice(0, 8)
+            }
           />
         ) : activeTab === 'projects' ? (
           <ProjectResults
@@ -375,12 +410,33 @@ function EmptySearchState() {
   );
 }
 
-function DocResults({ loading, items, total, query, projectName }: {
+const MODE_TABS: Array<{ key: SearchMode; label: string; hint: string }> = [
+  { key: 'auto', label: '自动', hint: '关键词 + 语义融合' },
+  { key: 'keyword', label: '关键词', hint: '全文精确匹配' },
+  { key: 'semantic', label: '语义', hint: '按含义召回（需知识库开启向量检索）' },
+];
+
+function SnippetHtml({ html }: { html: string }) {
+  // 服务端已 HTML 转义正文、仅 <em> 为高亮标签（PgSearchService.decodeHeadline / highlightTerms）
+  return (
+    <p
+      className="text-sm leading-relaxed line-clamp-2"
+      style={{ color: 'var(--text-secondary)' }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+function DocResults({ loading, items, hasMore, tookMs, degraded, mode, onModeChange, query, projectName }: {
   loading: boolean;
-  items: SearchDocument[];
-  total: number;
+  items: SearchHitItem[];
+  hasMore: boolean;
+  tookMs: number;
+  degraded?: 'vector-disabled' | 'provider-not-configured';
+  mode: SearchMode;
+  onModeChange: (m: SearchMode) => void;
   query: string;
-  projectName: (pid: string) => string;
+  projectName: (pid: string, fallback?: string | null) => string;
 }) {
   if (loading) {
     return (
@@ -419,20 +475,48 @@ function DocResults({ loading, items, total, query, projectName }: {
 
   return (
     <div>
-      <p
-        className="text-sm mb-5"
-        style={{
-          color: 'var(--text-muted)',
-          animation: 'fade-in 0.3s ease-out both',
-        }}
-      >
-        找到 <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{total}</span> 个相关文档
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <p className="text-sm" style={{ color: 'var(--text-muted)', animation: 'fade-in 0.3s ease-out both' }}>
+          找到 <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{items.length}{hasMore ? '+' : ''}</span> 个相关文档
+          {tookMs > 0 ? <span> · {tookMs} ms</span> : null}
+        </p>
+        {/* 检索模式切换（SEARCH-VECTOR-DESIGN §8） */}
+        <div className="flex items-center gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-subtle)' }}>
+          {MODE_TABS.map(({ key, label, hint }) => (
+            <button
+              key={key}
+              type="button"
+              title={hint}
+              onClick={() => onModeChange(key)}
+              className="px-3 py-1 text-xs font-medium rounded-md transition-all duration-200 active:scale-95"
+              style={{
+                background: mode === key ? 'var(--bg-surface)' : 'transparent',
+                color: mode === key ? 'var(--color-primary-700)' : 'var(--text-muted)',
+                boxShadow: mode === key ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {degraded ? (
+        <div
+          className="text-xs px-3 py-2 rounded-lg mb-4"
+          style={{ background: 'var(--bg-subtle)', color: 'var(--text-muted)' }}
+        >
+          {degraded === 'provider-not-configured'
+            ? '语义检索不可用：平台未配置嵌入服务（EMBEDDING_PROVIDER），已自动切换为关键词检索'
+            : '检索范围内暂无开启向量检索的知识库，已自动切换为关键词检索'}
+        </div>
+      ) : null}
+
       <div className="space-y-2 animate-stagger">
         {items.map((doc, idx) => (
           <Link
-            key={doc.id}
-            to={`/read/${doc.id}?q=${encodeURIComponent(query)}&pos=${idx}`}
+            key={doc.documentId}
+            to={`/read/${doc.documentId}?q=${encodeURIComponent(query)}&pos=${idx}`}
             className="block card-hover rounded-xl p-4 transition-all duration-200 group hover:shadow-md hover:-translate-y-px"
           >
             <div className="flex items-start gap-4">
@@ -443,25 +527,48 @@ function DocResults({ loading, items, total, query, projectName }: {
                 {(() => { const t = typeIcon(doc.path); return t.icon; })()}
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="text-base font-medium mb-1.5 truncate transition-colors duration-200 group-hover:text-primary-600" style={{ color: 'var(--text-primary)' }}>
-                  {highlightText(doc.title || doc.path.split('/').pop() || '未命名', query)}
-                </h3>
-                <p className="text-sm leading-relaxed line-clamp-2" style={{ color: 'var(--text-secondary)' }}>
-                  {doc.snippet
-                    ? highlightText(doc.snippet, query)
-                    : doc.summary || doc.path}
-                </p>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <h3 className="text-base font-medium truncate transition-colors duration-200 group-hover:text-primary-600" style={{ color: 'var(--text-primary)' }}>
+                    {highlightText(doc.title || doc.path.split('/').pop() || '未命名', query)}
+                  </h3>
+                  {doc.reason === 'semantic' ? (
+                    <span
+                      className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                      style={{ background: 'var(--color-primary-50)', color: 'var(--color-primary-600)' }}
+                      title="语义相似召回"
+                    >
+                      语义
+                    </span>
+                  ) : doc.reason === 'hybrid' ? (
+                    <span
+                      className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                      style={{ background: 'var(--color-primary-50)', color: 'var(--color-primary-600)' }}
+                      title="关键词与语义双路命中"
+                    >
+                      混合
+                    </span>
+                  ) : null}
+                </div>
+                {doc.snippet ? (
+                  <SnippetHtml html={doc.snippet} />
+                ) : (
+                  <p className="text-sm line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{doc.path}</p>
+                )}
                 <div className="flex items-center gap-3 mt-3 text-xs" style={{ color: 'var(--text-muted)' }}>
                   <span className="flex items-center gap-1">
                     <FolderOpen size={12} />
-                    {projectName(doc.projectId)}
+                    {projectName(doc.projectId, doc.projectName)}
                   </span>
-                  <span className="flex items-center gap-1">
-                    <Clock size={12} />
-                    {relativeTime(doc.updatedAt)}
-                  </span>
-                  {doc.wordCount ? (
-                    <span>{doc.wordCount.toLocaleString()} 字</span>
+                  {doc.heading ? (
+                    <span className="flex items-center gap-1" title={doc.heading}>
+                      <BookOpen size={12} />
+                      {doc.heading}
+                    </span>
+                  ) : null}
+                  {mode !== 'keyword' ? (
+                    <span title="检索器打分（关键词相关度 / 语义相似度 / RRF 融合分）">
+                      score {doc.score.toFixed(3)}
+                    </span>
                   ) : null}
                   <ChevronRight
                     size={14}

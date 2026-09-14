@@ -152,6 +152,17 @@ export const UpdateProjectSchema = z
   .strict();
 export type UpdateProjectBody = z.infer<typeof UpdateProjectSchema>;
 
+/** 检索配置（SEARCH-VECTOR-DESIGN §5.1）：knowledge-base 粒度开关；
+ *   fts 默认开（生成列零管道）；vector 默认关（embedding 按需外呼）。 */
+export const SearchConfigSchema = z.object({
+  fts: z.boolean().default(true),
+  vector: z.boolean().default(false),
+});
+export type SearchConfig = z.infer<typeof SearchConfigSchema>;
+
+export const UpdateSearchConfigSchema = z.object({ vector: z.boolean() }).strict();
+export type UpdateSearchConfigBody = z.infer<typeof UpdateSearchConfigSchema>;
+
 /** 归属转移（TEAM-PERMISSIONS-DESIGN §5.2 P3'）：个人 → 团队 / 团队 → 个人（本人） */
 export const TransferProjectSchema = z
   .object({

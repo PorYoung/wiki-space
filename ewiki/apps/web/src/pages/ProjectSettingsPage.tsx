@@ -696,6 +696,187 @@ function AiClassifySection({ projectId, canWrite }: { projectId: string; canWrit
   );
 }
 
+// ---- 向量检索（SEARCH-VECTOR-DESIGN §6.3 / §8）：知识库粒度开关 + 自动构建进度 ----
+interface IndexBuild {
+  id: string;
+  kind: 'vector' | 'vector-rebuild';
+  status: 'pending' | 'running' | 'done' | 'failed' | 'canceled';
+  totalDocs: number;
+  doneDocs: number;
+  failedDocs: number;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+interface SearchIndexInfo {
+  searchConfig: { fts: boolean; vector: boolean };
+  stats: { total_docs: number; total_chunks: number; pending_chunks: number };
+  builds: IndexBuild[];
+}
+
+const BUILD_STATUS_META: Record<IndexBuild['status'], { label: string; cls: string }> = {
+  pending: { label: '排队中', cls: 'bg-amber-50 text-amber-700' },
+  running: { label: '构建中', cls: 'bg-primary-50 text-primary-700' },
+  done: { label: '已完成', cls: 'bg-emerald-50 text-emerald-700' },
+  failed: { label: '失败', cls: 'bg-rose-50 text-rose-700' },
+  canceled: { label: '已取消', cls: 'bg-neutral-100 text-neutral-500' },
+};
+
+function VectorSearchSection({ projectId, canManage }: { projectId: string; canManage: boolean }): React.ReactElement {
+  const queryClient = useQueryClient();
+  const showToast = useShowToast();
+
+  const infoQuery = useQuery<SearchIndexInfo>({
+    queryKey: ['search-index', projectId],
+    queryFn: () => apiFetch<SearchIndexInfo>(`/api/v1/projects/${projectId}/search-index`),
+    enabled: !!projectId,
+    // 构建进行中 3s 轮询进度（对齐导入任务轮询风格）
+    refetchInterval: (query) => {
+      const builds = query.state.data?.builds ?? [];
+      return builds.some((b) => b.status === 'pending' || b.status === 'running') ? 3000 : false;
+    },
+  });
+
+  const configMutation = useMutation({
+    mutationFn: (vector: boolean) =>
+      apiFetch<{ searchConfig: { fts: boolean; vector: boolean } }>(`/api/v1/projects/${projectId}/search-config`, {
+        method: 'PUT',
+        body: JSON.stringify({ vector }),
+      }),
+    onSuccess: (data) => {
+      showToast(data.searchConfig.vector ? '向量检索已开启，构建任务已入队' : '向量检索已关闭');
+      void queryClient.invalidateQueries({ queryKey: ['search-index', projectId] });
+    },
+    onError: async (err) => {
+      // EMBEDDING_NOT_CONFIGURED（422）：提示管理员配置嵌入服务
+      const msg = err instanceof Error ? err.message : '';
+      showToast(/EMBEDDING/.test(msg) ? '平台未配置嵌入服务（EMBEDDING_PROVIDER），无法开启' : '配置更新失败，请重试');
+    },
+  });
+
+  const rebuildMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ build: IndexBuild }>(`/api/v1/projects/${projectId}/search-index/rebuild`, { method: 'POST' }),
+    onSuccess: () => {
+      showToast('重建任务已入队（现有向量将清空重算）');
+      void queryClient.invalidateQueries({ queryKey: ['search-index', projectId] });
+    },
+    onError: () => showToast('重建任务创建失败'),
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/projects/${projectId}/search-index/cancel`, { method: 'POST' }),
+    onSuccess: () => {
+      showToast('已取消构建');
+      void queryClient.invalidateQueries({ queryKey: ['search-index', projectId] });
+    },
+    onError: () => showToast('取消失败'),
+  });
+
+  const info = infoQuery.data;
+  const vectorEnabled = info?.searchConfig.vector ?? false;
+  const activeBuild = info?.builds.find((b) => b.status === 'pending' || b.status === 'running') ?? null;
+  const latestBuild = info?.builds[0] ?? null;
+  const progress = activeBuild && activeBuild.totalDocs > 0
+    ? Math.round((activeBuild.doneDocs / activeBuild.totalDocs) * 100)
+    : 0;
+
+  return (
+    <section className="card p-6">
+      <SectionHeader
+        icon={<Sparkles size={15} />}
+        title="向量检索（语义搜索）"
+        desc="按含义召回段落级内容；开启后文档变更自动进入索引队列，无需手工触发"
+      />
+
+      <div className="flex items-center gap-4 p-4 rounded-lg border" style={{ borderColor: 'var(--border-soft)' }}>
+        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-100 to-blue-100 flex items-center justify-center shrink-0">
+          <Sparkles size={16} className="text-cyan-600" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-neutral-800">语义检索</div>
+          <div className="text-[11px] text-neutral-500 mt-0.5">
+            {vectorEnabled
+              ? `已开启 · ${info?.stats.total_chunks ?? 0} 个段落向量${info?.stats.pending_chunks ? `（${info.stats.pending_chunks} 待嵌入）` : ''}`
+              : '未开启 · 全站搜索将以关键词模式运行'}
+          </div>
+        </div>
+        {canManage ? (
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-primary-500 shrink-0"
+            checked={vectorEnabled}
+            disabled={configMutation.isPending || infoQuery.isLoading}
+            onChange={(e) => configMutation.mutate(e.target.checked)}
+          />
+        ) : (
+          <span className="text-[11px] text-neutral-400 shrink-0">仅维护者可配置</span>
+        )}
+      </div>
+
+      {/* 数据外发提示（spec §9 安全边界）：开启即告知内容将送至所配置嵌入服务 */}
+      {vectorEnabled && (
+        <div className="mt-3 rounded-lg border px-3 py-2 text-[11px] text-amber-700 bg-amber-50/70 border-amber-200">
+          开启后，本库文档内容将分批发送至平台配置的嵌入服务用于生成向量（内网部署时数据不出集群）。
+        </div>
+      )}
+
+      {/* 构建进度卡 */}
+      {activeBuild ? (
+        <div className="mt-4 p-4 rounded-lg border" style={{ borderColor: 'var(--border-soft)' }}>
+          <div className="flex items-center justify-between text-xs mb-2">
+            <span className="font-medium text-neutral-700">
+              {activeBuild.kind === 'vector-rebuild' ? '全量重建' : '初始构建'} · {BUILD_STATUS_META[activeBuild.status].label}
+            </span>
+            {canManage ? (
+              <button
+                type="button"
+                className="text-[11px] text-rose-600 hover:underline disabled:opacity-40"
+                disabled={cancelMutation.isPending}
+                onClick={() => cancelMutation.mutate()}
+              >
+                取消
+              </button>
+            ) : null}
+          </div>
+          <div className="h-2 rounded-full bg-neutral-100 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-primary-500 transition-all duration-500"
+              style={{ width: `${Math.max(4, progress)}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between mt-2 text-[11px] text-neutral-500">
+            <span>{activeBuild.doneDocs} / {activeBuild.totalDocs || '?'} 篇{activeBuild.failedDocs ? ` · 失败 ${activeBuild.failedDocs}` : ''}</span>
+            <span>{progress}%</span>
+          </div>
+        </div>
+      ) : latestBuild ? (
+        <div className="mt-4 flex items-center justify-between text-[11px] text-neutral-500">
+          <span>
+            上次构建：<span className={`px-1.5 py-0.5 rounded-full ${BUILD_STATUS_META[latestBuild.status].cls}`}>
+              {BUILD_STATUS_META[latestBuild.status].label}
+            </span>
+            {latestBuild.finishedAt ? ` · ${relativeTime(latestBuild.finishedAt)}` : ''}
+            {latestBuild.error ? ` · ${latestBuild.error}` : ''}
+          </span>
+          {vectorEnabled && canManage ? (
+            <button
+              type="button"
+              className="text-primary-600 hover:underline disabled:opacity-40"
+              disabled={rebuildMutation.isPending}
+              onClick={() => rebuildMutation.mutate()}
+            >
+              重新构建
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 // ---- 外部导入（EXT-PLATFORM Step2：folder / web-crawler 已可用；Notion 等深度连接器后期适配器接入） ----
 interface ImportJob {
   id: string;
@@ -1019,7 +1200,12 @@ export function ProjectSettingsPage(): React.ReactElement {
                 canManage={canManage}
               />
             )}
-            {activeTab === 'ai' && <AiClassifySection projectId={projectId!} canWrite={canWrite} />}
+            {activeTab === 'ai' && (
+              <div className="space-y-6">
+                <AiClassifySection projectId={projectId!} canWrite={canWrite} />
+                <VectorSearchSection projectId={projectId!} canManage={canManage} />
+              </div>
+            )}
             {activeTab === 'import' && <ExternalImportSection projectId={projectId!} canWrite={canWrite} />}
             {activeTab === 'danger' && <DangerZoneSection projectId={projectId!} projectName={project?.name} canDelete={canDelete} />}
           </div>

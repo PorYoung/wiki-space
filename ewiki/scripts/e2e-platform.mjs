@@ -764,6 +764,139 @@ async function main() {
       verResp.status === 200 && versions.length >= 1, `versions=${versions.length}`);
   }
 
+  // ---------------------------------------------------------------------------
+  // ---- P11 全文检索 + 向量检索 + 索引自动化管线（SEARCH-VECTOR-DESIGN 验收） ----
+  // 前置：postgres 为检索扩展镜像（pgvector + zhparser，迁移 0008）；
+  //       server/worker 配置 EMBEDDING_PROVIDER=openai-compatible 指向 mock 嵌入服务
+  //       （scripts/mock-embedding-server.mjs，dim=1024，GET /stats 返回嵌入计数）；
+  //       SEARCH_INDEX_DEBOUNCE_SECONDS 建议为小值（本地验证 3s）以缩短用例等待。
+  // ---------------------------------------------------------------------------
+  {
+    const waitFor = async (check, { timeoutMs = 25_000, intervalMs = 500 } = {}) => {
+      const deadline = Date.now() + timeoutMs;
+      let last = null;
+      do {
+        last = await check();
+        if (last) return last;
+        await new Promise((r) => setTimeout(r, intervalMs));
+      } while (Date.now() < deadline);
+      return last;
+    };
+
+    // P11-0 建库 + 两篇中文文档（FTS 生成列随写即时生效，无需等待队列）
+    const sp = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST',
+      body: { name: `检索验证库-${runId}`, storage: { kind: 'local' } },
+    });
+    const spId = sp.json?.project?.id ?? sp.json?.id;
+    const docA = await req(`/api/v1/projects/${spId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '部署/上线手册.md', content: '# 上线手册\n\n## 发布流程\n\n本项目采用蓝绿发布策略，发布前必须完成回滚演练与监控告警检查。\n\n## 回滚步骤\n\n回滚时切换网关流量到上一版本，观察核心指标恢复正常。' },
+    });
+    const docB = await req(`/api/v1/projects/${spId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '架构/检索设计.md', content: '# 检索设计\n\n全文检索使用 PostgreSQL 生成列与 zhparser 中文分词，语义检索基于 pgvector 向量索引与嵌入服务自动构建。' },
+    });
+    const docAId = docA.json?.id;
+    const docBId = docB.json?.id;
+
+    // P11a 全文检索：中文分词命中 + ts_headline 高亮（生成列即时可见，零队列）
+    const kw = await req(`/api/v1/search?q=${encodeURIComponent('蓝绿发布')}&mode=keyword`, { token: ctx.alice });
+    const kwHit = (kw.json?.items ?? []).find((it) => it.documentId === docAId);
+    record('P11a', '全文检索：中文分词命中 + 高亮 snippet（生成列随写即时生效）',
+      kw.status === 200 && !!kwHit && /<em>/.test(kwHit.snippet ?? ''),
+      `status=${kw.status} hit=${!!kwHit} snippet=${(kwHit?.snippet ?? '').slice(0, 60)}`);
+
+    // P11b 权限隔离：bob（无该私库权限）检索私库独有词不可见（readableProjectIdsSql 单一口径）
+    const kwBob = await req(`/api/v1/search?q=${encodeURIComponent('蓝绿发布')}&mode=keyword`, { token: ctx.bob });
+    const bobLeak = (kwBob.json?.items ?? []).some((it) => it.documentId === docAId);
+    record('P11b', '权限隔离：无权限库内容不出现在检索结果（含 snippet 不泄露）',
+      kwBob.status === 200 && !bobLeak, `status=${kwBob.status} leak=${bobLeak}`);
+
+    // P11c 增量更新：内容新增独立词 → 索引自动更新可见（自动提交队列 latest-wins）
+    const saved = await req(`/api/v1/documents/${docAId}`, {
+      token: ctx.alice, method: 'PUT',
+      body: { content: '# 上线手册\n\n## 发布流程\n\n本项目采用蓝绿发布策略，发布前必须完成回滚演练与监控告警检查。\n\n## 回滚步骤\n\n回滚时切换网关流量到上一版本，观察核心指标恢复正常。\n\n灰度放量期间保持双跑道配置同步。', baseVersionNo: 1 },
+    });
+    const kwIncr = await waitFor(async () => {
+      const r = await req(`/api/v1/search?q=${encodeURIComponent('灰度放量')}&mode=keyword`, { token: ctx.alice });
+      return (r.json?.items ?? []).some((it) => it.documentId === docAId) ? r : null;
+    });
+    record('P11c', '增量更新：编辑后新词自动进入索引（防抖合并后可见）',
+      saved.status === 200 && !!kwIncr, `save=${saved.status} indexed=${!!kwIncr}`);
+
+    // P11d 语义降级：未开启向量的库上请求 semantic → 自动降级关键词并带 degraded 标记
+    const degraded = await req(`/api/v1/search?q=${encodeURIComponent('检索设计')}&mode=semantic&projectId=${spId}`, { token: ctx.alice });
+    record('P11d', '降级链：未开启向量时 semantic 自动降级 keyword 且响应带 degraded',
+      degraded.status === 200 && degraded.json?.degraded === 'vector-disabled',
+      `status=${degraded.status} degraded=${degraded.json?.degraded}`);
+
+    // P11e 开启向量 → 自动提交全量构建（无需任何手工步骤）并等待完成
+    const enable = await req(`/api/v1/projects/${spId}/search-config`, {
+      token: ctx.alice, method: 'PUT', body: { vector: true },
+    });
+    const buildDone = await waitFor(async () => {
+      const r = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
+      const b = r.json?.builds?.[0];
+      return b && (b.status === 'done' || b.status === 'failed' || b.status === 'canceled') ? r.json : null;
+    }, { timeoutMs: 40_000 });
+    const latestBuild = buildDone?.builds?.[0];
+    record('P11e', '自动构建：开启向量后自动全量回填（2 文档 → chunks 就绪）',
+      enable.status === 200 && latestBuild?.status === 'done' &&
+        (buildDone?.stats?.total_chunks ?? 0) > 0 && (buildDone?.stats?.total_docs ?? 0) === 2,
+      `enable=${enable.status} build=${latestBuild?.status} chunks=${buildDone?.stats?.total_chunks} docs=${buildDone?.stats?.total_docs}`);
+
+    // P11f 语义检索：mode=semantic 返回 reason=semantic + 标题链 heading（mock 嵌入为词面重叠相似度）
+    // 限定本项目：全局语义检索会混入历史 run 的同名同内容文档（mock 向量确定性同分）
+    const sem = await req(`/api/v1/search?q=${encodeURIComponent('回滚步骤怎么做')}&mode=semantic&projectId=${spId}`, { token: ctx.alice });
+    const semTop = (sem.json?.items ?? [])[0];
+    record('P11f', '语义检索：chunk 级召回聚合到文档（reason=semantic + heading 标题链）',
+      sem.status === 200 && semTop?.documentId === docAId && semTop?.reason === 'semantic' &&
+        String(semTop?.heading ?? '').includes('回滚'),
+      `status=${sem.status} top=${semTop?.path} reason=${semTop?.reason} heading=${semTop?.heading}`);
+
+    // P11g 重命名零重嵌：仅改 title（内容哈希未变）→ mock 嵌入服务计数不增加（§6.2-3 哈希去重）
+    const statsBefore = await fetch(`${process.env.MOCK_EMBEDDING_BASE ?? 'http://localhost:3090'}/stats`).then((r) => r.json());
+    await req(`/api/v1/documents/${docBId}`, { token: ctx.alice, method: 'PATCH', body: { title: '检索设计 v2' } });
+    await waitFor(async () => {
+      const r = await req(`/api/v1/search?q=${encodeURIComponent('检索设计 v2')}&mode=keyword`, { token: ctx.alice });
+      return (r.json?.items ?? []).some((it) => it.documentId === docBId);
+    });
+    await new Promise((r) => setTimeout(r, 1500)); // 等 reindex 任务消化
+    const statsAfter = await fetch(`${process.env.MOCK_EMBEDDING_BASE ?? 'http://localhost:3090'}/stats`).then((r) => r.json());
+    record('P11g', '增量去重：重命名（title 变更、内容不变）触发索引刷新但零重复嵌入',
+      statsAfter.texts === statsBefore.texts, `texts ${statsBefore.texts} → ${statsAfter.texts}`);
+
+    // P11h 删除：软删后索引自动清除（关键词不再命中 + chunk 数下降）
+    const chunksBefore = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
+    const del = await req(`/api/v1/documents/${docBId}`, { token: ctx.alice, method: 'DELETE' });
+    const afterDel = await waitFor(async () => {
+      const r = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
+      return (r.json?.stats?.total_chunks ?? 0) < (chunksBefore.json?.stats?.total_chunks ?? 0) ? r.json?.stats : null;
+    }, { timeoutMs: 20_000 });
+    const kwDel = await req(`/api/v1/search?q=${encodeURIComponent('zhparser')}&mode=keyword`, { token: ctx.alice });
+    const delLeak = (kwDel.json?.items ?? []).some((it) => it.documentId === docBId);
+    record('P11h', '删除：软删后向量 chunk 自动清除，且关键词不再命中',
+      del.status === 200 && !!afterDel && !delLeak,
+      `del=${del.status} chunks=${chunksBefore.json?.stats?.total_chunks}→${afterDel?.total_chunks} leak=${delLeak}`);
+
+    // P11i 管理端检索统计（M3）：/admin/system 下发 search 分区
+    const sys = await req('/api/v1/admin/system', { token: ctx.admin });
+    record('P11i', '管理端检索统计：chunk 规模/向量库数/分词配置可见',
+      sys.status === 200 && typeof sys.json?.search?.totalChunks === 'number' && sys.json?.search?.totalChunks > 0,
+      `status=${sys.status} search=${JSON.stringify(sys.json?.search ?? null).slice(0, 140)}`);
+
+    // P11j 未配置 Provider 的开启请求被拒（气隙安全缺省）：以无向量库重试开关 → 若平台已配置 Provider 则跳过
+    if (sys.json?.search?.embeddingProvider === 'none') {
+      const denied = await req(`/api/v1/projects/${ctx.sampleProjectId}/search-config`, {
+        token: ctx.alice, method: 'PUT', body: { vector: true },
+      });
+      record('P11j', '安全缺省：EMBEDDING_PROVIDER=none 时开启向量被拒（422）', denied.status === 422, `status=${denied.status}`);
+    } else {
+      record('P11j', '安全缺省：平台已配置嵌入服务（跳过 422 负向断言）', true, `provider=${sys.json?.search?.embeddingProvider}`);
+    }
+  }
+
   const passed = results.filter((r) => r.pass).length;
   const summary = {
     startedAt: new Date(t0).toISOString(),

@@ -2,11 +2,25 @@
 // PostgreSQL 实现；国产库触发时按方言新增实现（MySQL 系 = 自研 SKIP LOCKED 队列 +
 // GET_LOCK + 事件表轮询 + FULLTEXT ngram；PG 系国产库直兼容）。
 
-export type QueueName = 'sync' | 'publish' | 'ai-classify' | 'import' | 'export' | 'compensate' | 'gc-blob';
+export type QueueName =
+  | 'sync'
+  | 'publish'
+  | 'ai-classify'
+  | 'import'
+  | 'export'
+  | 'compensate'
+  | 'gc-blob'
+  | 'search-index'
+  | 'search-build'
+  | 'search-reconcile';
 
 export interface JobEnqueueOptions {
   /** 幂等键：同键任务去重（如 sync = projectId:commitHash，SDD 4.3 O1） */
   idempotencyKey?: string;
+  /** pg-boss singletonKey：窗口期内同键任务合并（SEARCH-VECTOR-DESIGN §6.2 防抖） */
+  singletonKey?: string;
+  /** singletonKey 去重窗口（秒）：窗口内同键 send 被去重，窗口过后可再投递 */
+  singletonSeconds?: number;
   delayMs?: number;
 }
 
@@ -38,30 +52,82 @@ export interface EventBus {
   subscribe(channel: EventChannel, handler: (payload: unknown) => void): Promise<void>;
 }
 
-export interface SearchDocument {
-  id: string;
-  projectId: string;
-  title: string;
-  content: string;
-}
+// ---------------------------------------------------------------------------
+// 检索（SEARCH-VECTOR-DESIGN §5.2 / §7）：全文（tsvector）+ 语义（pgvector）+ 混合（RRF）。
+//   权限过滤在路由层物化为 projectIds 后传入（readableProjectIdsSql 单一口径），
+//   端口保持对 DB 方案无感知（国产库边界，SDD ADR-11）。
+// ---------------------------------------------------------------------------
 
-export interface SearchQueryOptions {
+export type SearchMode = 'auto' | 'keyword' | 'semantic';
+
+export interface SearchRequest {
+  q: string;
+  mode: SearchMode;
+  /** 权限解析后的可读项目集合；缺省 = 全部可读项目 */
+  projectIds?: string[];
+  /** 单库内检索（与 projectIds 互斥使用） */
   projectId?: string;
+  tags?: string[];
   limit?: number;
+  offset?: number;
 }
 
 export interface SearchHit {
-  id: string;
+  documentId: string;
   projectId: string;
+  path: string;
   title: string;
+  /** 含 <em> 高亮标记 */
   snippet: string;
+  score: number;
+  reason: 'keyword' | 'semantic' | 'hybrid';
+  /** 语义命中 chunk 的标题链（如 "部署/回滚"） */
+  heading?: string | null;
 }
 
-/** 全文检索（F08/F44；替换实现 = Meilisearch 适配器，PRD Phase 2 路径） */
+export interface SearchResponse {
+  items: SearchHit[];
+  hasMore: boolean;
+  tookMs: number;
+  /** 降级说明：请求了 semantic/hybrid 但目标库未开启向量或未配置 Provider */
+  degraded?: 'vector-disabled' | 'provider-not-configured';
+}
+
+/** 全文检索（F08/F44；替换实现 = Meilisearch/Qdrant 适配器，SEARCH-VECTOR-DESIGN ADR-S1/S2 升级路径） */
 export interface SearchService {
-  indexDocument(doc: SearchDocument): Promise<void>;
-  removeDocument(id: string): Promise<void>;
-  query(q: string, opts?: SearchQueryOptions): Promise<SearchHit[]>;
+  search(req: SearchRequest): Promise<SearchResponse>;
+}
+
+export interface EmbeddingSettings {
+  provider: string; // 'none' | 'openai-compatible'
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  dim: number;
+  batchSize: number;
+  timeoutMs: number;
+}
+
+/** 嵌入 Provider（SEARCH-VECTOR-DESIGN ADR-S5）：接口在 shared、openai-compatible 实现内置于
+ *  shared/adapters（纯 fetch，server 查询侧与 worker 索引侧共用）；none = 向量能力整体下线。 */
+export interface EmbeddingProvider {
+  id: string;
+  dim: number;
+  /** 批量嵌入；实现内部分批（settings.batchSize）与超时控制 */
+  embed(texts: string[]): Promise<number[][]>;
+}
+
+/** 从 env 解析嵌入配置（server/worker 共用；worker 直读 process.env 的既有约定） */
+export function loadEmbeddingSettings(env: NodeJS.ProcessEnv = process.env): EmbeddingSettings {
+  return {
+    provider: env.EMBEDDING_PROVIDER?.trim() || 'none',
+    baseUrl: (env.EMBEDDING_BASE_URL?.trim() || '').replace(/\/+$/, ''),
+    apiKey: env.EMBEDDING_API_KEY?.trim() || '',
+    model: env.EMBEDDING_MODEL?.trim() || 'bge-m3',
+    dim: Math.max(1, Math.floor(Number(env.EMBEDDING_DIM ?? '1024') || 1024)),
+    batchSize: Math.max(1, Math.floor(Number(env.EMBEDDING_BATCH_SIZE ?? '32') || 32)),
+    timeoutMs: Math.max(1000, Math.floor(Number(env.EMBEDDING_TIMEOUT_MS ?? '10000') || 10000)),
+  };
 }
 
 // ---------------------------------------------------------------------------

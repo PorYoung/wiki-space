@@ -3,6 +3,8 @@ import {
   bigint,
   boolean,
   check,
+  customType,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -16,6 +18,21 @@ import {
 // 领域枚举用 text + CHECK 表达（Drizzle 侧由 packages/shared 枚举守卫）。
 
 const ts = (name: string) => timestamp(name, { withTimezone: true });
+
+// ---- 检索扩展类型（SEARCH-VECTOR-DESIGN §5.1） ----
+/** tsvector（全文检索生成列驱动类型） */
+const tsvector = customType<{ data: string; driverData: string }>({ dataType: () => 'tsvector' });
+/** pgvector 定长向量；pg 驱动序列化为 '[1,2,3]' 字面量 */
+const vectorCol = customType<{ data: number[]; driverData: string }>({
+  dataType: () => 'vector(1024)', // 维度固定 1024（bge-m3 等）；换模型/维度 = vector-rebuild 全量重建（开放问题 Q1）
+  toDriver: (v) => `[${v.join(',')}]`,
+});
+
+/** 知识库检索开关（ADR-S4/需求 1.2-6）：fts 随写自动增量（生成列）；vector 按库显式开启 */
+export interface ProjectSearchConfig {
+  fts: boolean;
+  vector: boolean;
+}
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -120,6 +137,11 @@ export const projects = pgTable(
     ownerType: text('owner_type').notNull().default('user'), // user | team
     ownerTeamId: uuid('owner_team_id').references(() => teams.id), // 仅 owner_type='team' 时非空
     archived: boolean('archived').notNull().default(false),
+    // 检索开关（SEARCH-VECTOR-DESIGN §5.1）：{fts:true,vector:false} 缺省；vector 开启触发自动全量构建
+    searchConfig: jsonb('search_config')
+      .$type<ProjectSearchConfig>()
+      .notNull()
+      .default({ fts: true, vector: false }),
     deletedAt: ts('deleted_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
@@ -199,12 +221,20 @@ export const documents = pgTable(
     tags: text('tags').array().notNull().default([]), // 文档标签（PLAN 3.4 标签三维 / 5.2.1）
     wordCount: integer('word_count').notNull().default(0),
     updatedBy: uuid('updated_by').references(() => users.id),
+    // 全文索引生成列（ADR-S1）：title 权重 A / content 权重 B，随写自动更新 = 天然增量零管道。
+    // 分词配置 chinese_zh 由迁移 0008 保证存在（zhparser 可用则中文分词，否则 COPY simple 兜底）。
+    searchVector: tsvector('search_vector').generatedAlwaysAs(sql`
+      setweight(coalesce(to_tsvector('chinese_zh', coalesce(title, '')), ''::tsvector), 'A') ||
+      setweight(coalesce(to_tsvector('chinese_zh', coalesce(content, '')), ''::tsvector), 'B')
+    `),
     deletedAt: ts('deleted_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [
     unique('documents_project_path_uq').on(t.projectId, t.path),
+    index('documents_search_vector_gin').using('gin', t.searchVector),
+    index('documents_title_trgm_gin').using('gin', sql`${t.title} gin_trgm_ops`),
     check('documents_kind_check', sql`${t.kind} IN ('text','binary')`),
     check(
       'documents_storage_ref_check',
@@ -428,3 +458,66 @@ export const auditLogs = pgTable('audit_logs', {
   meta: jsonb('meta').notNull().default({}),
   createdAt: ts('created_at').notNull().defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// 向量索引（SEARCH-VECTOR-DESIGN §5.1 / ADR-S2、ADR-S3）
+//   chunk 级语义检索：markdown 感知切分（shared chunkMarkdown），检索按文档聚合取最大分。
+//   content_hash 支撑增量去重（未变 chunk 不重复 embedding）；embedding 可空 =
+//   「待嵌入」（构建中断/模型切换），由 search-reconcile 对账补齐，无需额外状态表。
+// ---------------------------------------------------------------------------
+
+export const documentChunks = pgTable(
+  'document_chunks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    // 冗余 project_id：权限预过滤直接落在 chunk 表，不 join documents（ADR-S4）
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chunkNo: integer('chunk_no').notNull(),
+    content: text('content').notNull(),
+    contentHash: text('content_hash').notNull(), // sha256(content)；增量去重键
+    headingPath: text('heading_path'), // 所在标题链（"部署/回滚"），进 snippet 上下文
+    embedding: vectorCol('embedding'), // 1024 维；NULL=待嵌入
+    embeddingModel: text('embedding_model'), // 产出模型；换模型重建的判定键（R6）
+    tokenCount: integer('token_count').notNull().default(0),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    unique('document_chunks_doc_no_uq').on(t.documentId, t.chunkNo),
+    index('document_chunks_project_idx').on(t.projectId, t.documentId),
+    index('document_chunks_embedding_hnsw').using('hnsw', t.embedding.op('vector_cosine_ops')),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// 构建台账（§6.3 自动构建）：仿 ai_classify_runs；cursor_doc 断点续跑游标。
+// ---------------------------------------------------------------------------
+
+export const indexBuilds = pgTable(
+  'index_builds',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull().default('vector'), // vector | vector-rebuild
+    status: text('status').notNull().default('pending'), // pending | running | done | failed | canceled
+    totalDocs: integer('total_docs').notNull().default(0),
+    doneDocs: integer('done_docs').notNull().default(0),
+    failedDocs: integer('failed_docs').notNull().default(0),
+    cursorDoc: uuid('cursor_doc'), // 续跑游标（按 id 排序的下一个起点）
+    error: text('error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+  },
+  (t) => [
+    check('index_builds_kind_check', sql`${t.kind} IN ('vector','vector-rebuild')`),
+    check('index_builds_status_check', sql`${t.status} IN ('pending','running','done','failed','canceled')`),
+  ],
+);

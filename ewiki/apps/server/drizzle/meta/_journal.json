@@ -57,6 +57,13 @@
       "when": 1789386726042,
       "tag": "0007_long_rick_jones",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789400206246,
+      "tag": "0008_search_and_vector",
+      "breakpoints": true
     }
   ]
 }

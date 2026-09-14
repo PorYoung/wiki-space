@@ -29,6 +29,7 @@ import {
 import { verifyAccessToken } from '../auth/utils.js';
 import { projectAccess, denyIfNot } from '../lib/permissions.js';
 import { docStorageEffectsBatch } from './routes-platform.js';
+import { enqueueSearchIndex } from '@ewiki/shared';
 import { buildRawUrl, verifyRawToken } from '../lib/raw-sign.js';
 import { effectiveMime } from '../lib/sniff.js';
 
@@ -129,11 +130,17 @@ async function resolveRenamePath(projectId: string, p: string): Promise<string> 
   throw new HTTPException(409, { message: 'RENAME_EXHAUSTED: 无法生成不冲突的文件名' });
 }
 
-async function broadcast(projectId: string, payload: Record<string, unknown>): Promise<void> {
+async function broadcast(
+  deps: AppDeps,
+  projectId: string,
+  payload: Record<string, unknown> & { documentId?: string },
+): Promise<void> {
   await db.execute(sql`select pg_notify(${sql.raw(`'ewiki_events'`)}, ${JSON.stringify({
     channel: 'sync',
     payload: { room: `project:${projectId}`, event: 'document.updated', payload },
   })})`);
+  // 索引自动入队（SEARCH-VECTOR-DESIGN §6.1）：上传/替换/删除统一漏斗
+  if (payload.documentId) await enqueueSearchIndex(deps.boss, payload.documentId);
 }
 
 type DbLike = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
@@ -153,6 +160,8 @@ async function nextVersionNo(documentId: string, tx: DbLike = db): Promise<numbe
 export function registerFileRoutes(app: Hono, deps: AppDeps): void {
   const { config } = deps;
   const store = getBlobStore(deps);
+  const broadcastEvent = (projectId: string, payload: Record<string, unknown> & { documentId?: string }) =>
+    broadcast(deps, projectId, payload);
 
   // ---- 上传预检：逐项 accept / conflict / reject ----
   app.post(`${API}/projects/:id/files/upload-session`, async (c) => {
@@ -372,7 +381,7 @@ export function registerFileRoutes(app: Hono, deps: AppDeps): void {
       `docs(${result.doc.path}): 上传文件（${me.name}）`,
     );
 
-    await broadcast(projectId, {
+    await broadcastEvent(projectId, {
       documentId: result.doc.id,
       path: result.doc.path,
       created: !result.replaced,
@@ -484,7 +493,7 @@ export function registerFileRoutes(app: Hono, deps: AppDeps): void {
       `docs(${existing.path}): 上传新版本（${me.name}）`,
     );
 
-    await broadcast(existing.projectId, {
+    await broadcastEvent(existing.projectId, {
       documentId: existing.id,
       path: existing.path,
       versionNo,

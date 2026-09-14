@@ -775,11 +775,51 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
     const [{ c: siteCount } = { c: 0 }] = (await db.execute(sql`select count(*)::int as c from publish_sites`)) as unknown as Array<{ c: number }>;
     const [{ c: connCount } = { c: 0 }] = (await db.execute(sql`select count(*)::int as c from storage_connections`)) as unknown as Array<{ c: number }>;
 
+    // ---- 检索统计（SEARCH-VECTOR-DESIGN M3）：chunk 规模 / 向量库数 / 待嵌入缺口 / 分词配置 ----
+    const [searchStats] = (
+      (await db.execute(sql`
+        SELECT
+          (SELECT count(*)::int FROM document_chunks) AS total_chunks,
+          (SELECT count(*)::int FROM document_chunks WHERE embedding IS NULL) AS pending_chunks,
+          (SELECT count(*)::int FROM projects WHERE deleted_at IS NULL AND search_config->>'vector' = 'true') AS vector_projects,
+          (SELECT count(*)::int FROM index_builds WHERE status IN ('pending','running')) AS active_builds,
+          (SELECT coalesce(sum(failed_docs), 0)::int FROM index_builds WHERE status = 'done') AS build_failed_docs,
+          EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'chinese_zh'
+                  AND cfgparser = (SELECT oid FROM pg_ts_parser WHERE prsname = 'zhparser')) AS zhparser
+      `)) as unknown as Array<{
+        total_chunks: number;
+        pending_chunks: number;
+        vector_projects: number;
+        active_builds: number;
+        build_failed_docs: number;
+        zhparser: boolean;
+      }>
+    ) ?? {
+      total_chunks: 0,
+      pending_chunks: 0,
+      vector_projects: 0,
+      active_builds: 0,
+      build_failed_docs: 0,
+      zhparser: false,
+    };
+
     return c.json({
       db: {
         version: dbInfo?.version?.split(' on ')[0] ?? 'PostgreSQL',
         bytes: Number(dbInfo?.bytes ?? 0),
         tables: tableRows,
+      },
+      search: {
+        ftsConfig: config.SEARCH_FTS_CONFIG,
+        zhparser: searchStats?.zhparser ?? false,
+        embeddingProvider: config.EMBEDDING_PROVIDER,
+        embeddingModel: config.EMBEDDING_MODEL,
+        embeddingDim: config.EMBEDDING_DIM,
+        totalChunks: Number(searchStats?.total_chunks ?? 0),
+        pendingChunks: Number(searchStats?.pending_chunks ?? 0),
+        vectorProjects: Number(searchStats?.vector_projects ?? 0),
+        activeBuilds: Number(searchStats?.active_builds ?? 0),
+        buildFailedDocs: Number(searchStats?.build_failed_docs ?? 0),
       },
       storage: {
         nasRoot,

@@ -7,14 +7,18 @@ import {
   basenameOf,
   CreateProjectSchema,
   CreateTeamSchema,
+  enqueueSearchIndex,
   extOf,
   resolveFileType,
   TransferProjectSchema,
   UpdateProjectSchema,
+  UpdateSearchConfigSchema,
   UpdateTeamMemberSchema,
   UpdateTeamSchema,
 } from '@ewiki/shared';
 import { renderDocPage } from '@ewiki/render';
+import { createEmbeddingProvider } from '@ewiki/shared';
+import { PgSearchService } from '../adapters/pg/search.js';
 import type { AppDeps } from './app.js';
 import {
   generateRefreshToken,
@@ -28,9 +32,11 @@ import {
   activities,
   aiClassifyRuns,
   auditLogs,
+  documentChunks,
   documentLinks,
   documentVersions,
   documents,
+  indexBuilds,
   exportJobs,
   importJobs,
   notifications,
@@ -65,7 +71,7 @@ import { registerStarterRoutes } from './routes-starter.js';
 import { docStorageEffects, docStorageEffectsBatch, registerPlatformRoutes, type DocEffectResult } from './routes-platform.js';
 import { registerFileRoutes } from './routes-files.js';
 import { buildRawUrl } from '../lib/raw-sign.js';
-import { checkProjectTransfer, denyIfNot, projectAccess, readableProjectIdsSql, teamAccess, type TeamRole } from '../lib/permissions.js';
+import { checkProjectTransfer, denyIfNot, projectAccess, readableProjectIds, readableProjectIdsSql, teamAccess, type TeamRole } from '../lib/permissions.js';
 
 // ---- 发布模板元数据（PLAN 3.5 / 5.2.1：服务端权威源，ThemesPage / PublishPage 从此拉取） ----
 // 与原型 Themes.jsx TEMPLATE_META / mock data.js:853-897 对齐
@@ -221,6 +227,19 @@ function byteLength(s: string): number {
 /** 路由注册（SDD 4.2 清单的骨架实现；未列出的端点随层 4 迭代补充） */
 export function registerRoutes(app: Hono, deps: AppDeps): void {
   const { config, db, boss } = deps;
+
+  // ---- 检索（SEARCH-VECTOR-DESIGN §5.2/§7.1）：EmbeddingProvider 按 env 选择，
+  //      'none' = 向量能力整体下线（语义分支自动降级关键词）；查询侧嵌入走同 Provider ----
+  const embeddings = createEmbeddingProvider({
+    provider: config.EMBEDDING_PROVIDER,
+    baseUrl: config.EMBEDDING_BASE_URL,
+    apiKey: config.EMBEDDING_API_KEY,
+    model: config.EMBEDDING_MODEL,
+    dim: config.EMBEDDING_DIM,
+    batchSize: config.EMBEDDING_BATCH_SIZE,
+    timeoutMs: config.EMBEDDING_TIMEOUT_MS,
+  });
+  const searchService = new PgSearchService(db, embeddings, config.SEARCH_FTS_CONFIG);
 
   // ---- 健康（SYS） ----
   app.get('/healthz', (c) => c.json({ ok: true }));
@@ -1356,6 +1375,48 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json({ items, page, pageSize, total });
   });
 
+  // ---- 全局检索（DESIGN SE1；SEARCH-VECTOR-DESIGN §7.1）：keyword/semantic/hybrid ----
+  // 权限单一口径：readableProjectIdsSql 物化为白名单数组下推（permissions.ts 强制复用）；
+  // 单库检索走 projectAccess.canRead 精确校验。首页联想仍走 /documents?q=（廉价前缀匹配）。
+  app.get('/api/v1/search', async (c) => {
+    const uid = c.get('userId') as string;
+    const q = c.req.query('q') ?? '';
+    const modeParam = c.req.query('mode');
+    const mode = modeParam === 'keyword' || modeParam === 'semantic' ? modeParam : 'auto';
+    const projectId = c.req.query('projectId') || undefined;
+    const tags = (c.req.query('tags') ?? '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    const limit = Math.min(50, Math.max(1, Math.floor(Number(c.req.query('limit') ?? '20') || 20)));
+    const offset = Math.max(0, Math.floor(Number(c.req.query('offset') ?? '0') || 0));
+
+    if (projectId) {
+      const access = await projectAccess(projectId, uid, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+
+    const projectIds = c.get('globalRole') !== 'admin' ? await readableProjectIds(uid) : undefined;
+    if (projectIds && projectIds.length === 0) {
+      return c.json({ items: [], hasMore: false, tookMs: 0, ...(mode !== 'keyword' ? { degraded: 'vector-disabled' as const } : {}) });
+    }
+
+    const res = await searchService.search({ q, mode, projectId, tags: tags.length ? tags : undefined, limit, offset, projectIds });
+
+    // 附带项目名（SearchPage 结果卡片展示，免前端二次请求）
+    const projectIdsInItems = [...new Set(res.items.map((it) => it.projectId))];
+    const nameRows = projectIdsInItems.length
+      ? await db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIdsInItems))
+      : [];
+    const nameById = new Map(nameRows.map((r) => [r.id, r.name]));
+
+    return c.json({
+      ...res,
+      items: res.items.map((it) => ({ ...it, projectName: nameById.get(it.projectId) ?? null })),
+    });
+  });
+
   // ---- 项目详情增强（P3 扩展：附带统计） ----
   // 覆盖已有 GET /api/v1/projects/:id — 通过 docs_count 子查询补充统计
   // 注：已有 routes 中 projectsRoute.get('/:id') 是轻量版；这里不覆盖，保持独立查询
@@ -1643,6 +1704,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       },
     })})`);
 
+    // 索引自动入队（SEARCH-VECTOR-DESIGN §6.1）：singletonKey 防抖合并连击保存，latest-wins
+    await enqueueSearchIndex(boss, existing.id);
+
     return c.json({ ok: true, document: updated, version: nextVersion, effects });
   });
 
@@ -1863,6 +1927,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       },
     })})`);
 
+    // 版本回滚 = 内容变更 → 索引重建（chunk 哈希去重，未变段落零 embedding）
+    await enqueueSearchIndex(boss, existing.id);
+
     return c.json({ ok: true, restored: true, version: nextVersion, restoredFrom: versionNo, effects });
   });
 
@@ -1980,6 +2047,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       },
     })})`);
 
+    await enqueueSearchIndex(boss, doc!.id);
+
     return c.json({ ...doc, effects }, 201);
   });
 
@@ -2046,6 +2115,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         payload: { documentId: existing.id, path: existing.path, deleted: true, by: meUser?.name ?? '', byId: userId },
       },
     })})`);
+
+    // 软删 → 清除向量 chunk（执行侧按 deletedAt 分流；全文生成列由查询侧 deleted_at 过滤兜底）
+    await enqueueSearchIndex(boss, existing.id);
 
     return c.json({ ok: true, effects });
   });
@@ -2165,6 +2237,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       },
     })})`);
 
+    // title 变更需刷新全文权重（生成列随写自动更新）；向量 chunk 哈希未变 → 零 embedding
+    await enqueueSearchIndex(boss, existing.id);
+
     return c.json({ ok: true, document: updated, effects });
   });
 
@@ -2239,6 +2314,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         payload: { folder: from, folderTo: to, moved: true, documentIds: updates.map((u) => u.id), by: meUser?.name ?? '', byId: userId },
       },
     })})`);
+
+    // 路径前缀变更：title/content 未动，FTS 生成列随写自动更新，向量按哈希去重零成本
+    await enqueueSearchIndex(boss, updates.map((u) => u.id));
     await db.insert(auditLogs).values({
       actorId: userId,
       action: 'folder.rename',
@@ -2302,6 +2380,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         payload: { folder, deleted: true, documentIds: affected.map((r) => r.id), by: meUser?.name ?? '', byId: userId },
       },
     })})`);
+
+    // 级联软删 → 批量清除向量 chunk
+    await enqueueSearchIndex(boss, affected.map((r) => r.id));
     await db.insert(auditLogs).values({
       actorId: userId,
       action: 'folder.delete',
@@ -2389,6 +2470,138 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json(updated);
   });
 
+  // ---- 检索配置（SEARCH-VECTOR-DESIGN §6.3）：向量 = 知识库粒度 opt-in ----
+  // 开启时校验 EmbeddingProvider 已配置，并自动投递全量构建任务（pending → worker 消费）；
+  // 关闭时立即生效（查询预过滤），chunk 留存待重建复用（取消构建 + 保留数据，避免误关重嵌成本）。
+  app.put('/api/v1/projects/:id/search-config', async (c) => {
+    const projectId = c.req.param('id')!;
+    const userId = c.get('userId') as string;
+    const parsed = UpdateSearchConfigSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ code: 'VALIDATION_FAILED', message: 'VALIDATION_FAILED', fields: parsed.error.flatten().fieldErrors }, 400);
+    }
+    const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+    denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改检索配置');
+
+    if (parsed.data.vector && config.EMBEDDING_PROVIDER === 'none') {
+      return c.json(
+        { code: 'EMBEDDING_NOT_CONFIGURED', message: '未配置嵌入服务（EMBEDDING_PROVIDER），无法开启向量检索' },
+        422,
+      );
+    }
+
+    const [project] = await db
+      .select({ searchConfig: projects.searchConfig })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    const next = { fts: true, vector: parsed.data.vector };
+    await db.update(projects).set({ searchConfig: next, updatedAt: new Date() }).where(eq(projects.id, projectId));
+
+    let build: typeof indexBuilds.$inferSelect | null = null;
+    if (parsed.data.vector && !project.searchConfig.vector) {
+      const [row] = await db
+        .insert(indexBuilds)
+        .values({ projectId, kind: 'vector', status: 'pending' })
+        .returning();
+      build = row ?? null;
+      await boss.send('search-build', { buildId: build!.id }, { singletonKey: build!.id });
+    }
+
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.search_config_change',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { from: project.searchConfig, to: next },
+    });
+
+    return c.json({ searchConfig: next, build });
+  });
+
+  // ---- 构建状态查询（设置页进度卡 / 管理端统计）----
+  app.get('/api/v1/projects/:id/search-index', async (c) => {
+    const projectId = c.req.param('id')!;
+    const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
+    denyIfNot(access.canRead);
+
+    const [project] = await db
+      .select({ searchConfig: projects.searchConfig })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+
+    const [stats] = (
+      (await db.execute(sql`
+        SELECT
+          (SELECT count(*)::int FROM documents WHERE project_id = ${projectId} AND deleted_at IS NULL AND kind = 'text') AS total_docs,
+          (SELECT count(*)::int FROM document_chunks WHERE project_id = ${projectId}) AS total_chunks,
+          (SELECT count(*)::int FROM document_chunks WHERE project_id = ${projectId} AND embedding IS NULL) AS pending_chunks
+      `)) as unknown as Array<{ total_docs: number; total_chunks: number; pending_chunks: number }>
+    ) ?? { total_docs: 0, total_chunks: 0, pending_chunks: 0 };
+
+    const builds = await db
+      .select()
+      .from(indexBuilds)
+      .where(eq(indexBuilds.projectId, projectId))
+      .orderBy(desc(indexBuilds.createdAt))
+      .limit(10);
+
+    return c.json({ searchConfig: project.searchConfig, stats, builds });
+  });
+
+  // ---- 重新构建（换模型/修复）：清空 chunk 重跑（vector-rebuild）----
+  app.post('/api/v1/projects/:id/search-index/rebuild', async (c) => {
+    const projectId = c.req.param('id')!;
+    const userId = c.get('userId') as string;
+    const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+    denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可重建索引');
+    if (config.EMBEDDING_PROVIDER === 'none') {
+      return c.json({ code: 'EMBEDDING_NOT_CONFIGURED', message: '未配置嵌入服务，无法重建向量索引' }, 422);
+    }
+
+    const [project] = await db
+      .select({ searchConfig: projects.searchConfig })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    if (!project.searchConfig.vector) {
+      return c.json({ code: 'VECTOR_DISABLED', message: '该知识库未开启向量检索' }, 409);
+    }
+
+    const [build] = await db
+      .insert(indexBuilds)
+      .values({ projectId, kind: 'vector-rebuild', status: 'pending' })
+      .returning();
+    await boss.send('search-build', { buildId: build!.id }, { singletonKey: build!.id });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.search_index_rebuild',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { buildId: build!.id },
+    });
+    return c.json({ build }, 201);
+  });
+
+  // ---- 取消构建：worker 每批检查 status，canceled 即停 ----
+  app.post('/api/v1/projects/:id/search-index/cancel', async (c) => {
+    const projectId = c.req.param('id')!;
+    const userId = c.get('userId') as string;
+    const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+    denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可取消构建');
+    const updated = await db
+      .update(indexBuilds)
+      .set({ status: 'canceled', finishedAt: new Date() })
+      .where(and(eq(indexBuilds.projectId, projectId), inArray(indexBuilds.status, ['pending', 'running'])))
+      .returning({ id: indexBuilds.id });
+    return c.json({ ok: true, canceled: updated.length });
+  });
+
   // ---- DELETE projects/:id（PLAN 5.2.1：ProjectLayout 更多菜单 / 设置危险区删除项目） ----
   // 软删（projects.deletedAt）：与 documents 一致，列表与详情查询均带 isNull(deletedAt)
   // 过滤，删除后项目自然从全站消失；关联文档不级联物理删除，保留恢复可能。
@@ -2413,6 +2626,14 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .update(projects)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
       .where(eq(projects.id, projectId));
+
+    // 向量索引回收（SEARCH-VECTOR-DESIGN §6.1）：软删后查询侧已不可见（权限预过滤含
+    // projects.deleted_at），这里清 chunk 与取消活跃构建仅为空间/任务回收
+    await db.delete(documentChunks).where(eq(documentChunks.projectId, projectId));
+    await db
+      .update(indexBuilds)
+      .set({ status: 'canceled', finishedAt: new Date() })
+      .where(and(eq(indexBuilds.projectId, projectId), inArray(indexBuilds.status, ['pending', 'running'])));
 
     const userId = c.get('userId') as string;
     await db.insert(activities).values({

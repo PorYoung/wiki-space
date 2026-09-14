@@ -30,6 +30,10 @@ import type { BlobStore } from '@ewiki/storage';
 import { runBlobGC } from '@ewiki/server/src/lib/blob-gc.js';
 import { extractDocLinks, resolveFileType, type ImportDocPayload, type Job } from '@ewiki/shared';
 import type { ClassifyProvider, ImportProvider, Notifier, NotificationType } from '@ewiki/shared';
+import { createEmbeddingProvider, enqueueSearchIndex, loadEmbeddingSettings } from '@ewiki/shared';
+import { documentChunks, indexBuilds } from '@ewiki/db';
+import { gt, ne } from 'drizzle-orm';
+import { reindexDocument, type ReindexDeps } from './search-indexer.js';
 import { renderSite, type SiteAsset } from '@ewiki/render';
 import { pipeline } from 'node:stream/promises';
 
@@ -70,6 +74,24 @@ function getBlobStore(): BlobStore {
   }
   return blobStoreSingleton;
 }
+
+// ---------------------------------------------------------------------------
+// 向量索引（SEARCH-VECTOR-DESIGN §6）：EmbeddingProvider 注册表（ADR-S5，仿 ClassifyProvider）。
+//   EMBEDDING_PROVIDER=none（默认）→ embeddings=null：search-index 仅做 chunk 清理/结构对齐，
+//   search-build/reconcile 直接短路 —— 向量能力整体下线，零外呼。
+// ---------------------------------------------------------------------------
+
+const embeddingSettings = loadEmbeddingSettings(process.env);
+const embeddings: Awaited<ReturnType<typeof createEmbeddingProvider>> = createEmbeddingProvider(embeddingSettings);
+if (embeddingSettings.provider !== 'none' && !embeddings) {
+  log('unknown embedding provider, vector search disabled', { provider: embeddingSettings.provider });
+}
+const reindexDeps: ReindexDeps = {
+  db,
+  embeddings,
+  embeddingModel: embeddingSettings.model,
+  batchSize: embeddingSettings.batchSize,
+};
 
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
 
@@ -213,7 +235,7 @@ async function upsertFileDoc(
 async function harvestDocsFromDir(
   projectId: string,
   root: string,
-): Promise<{ docsUpserted: number; docsRemoved: number }> {
+): Promise<{ docsUpserted: number; docsRemoved: number; changedDocIds: string[] }> {
   const found: Array<{ rel: string; abs: string }> = [];
   await walkFiles(root, root, found);
 
@@ -235,6 +257,7 @@ async function harvestDocsFromDir(
   // 后端实际文件内容哈希：供下方「内容一致但状态滞后」的状态机对账使用
   const fileHash = new Map<string, string>();
   let docsUpserted = 0;
+  const changedDocIds: string[] = [];
   for (const f of found) {
     const ft = resolveFileType(f.rel);
     const buffer = await fs.readFile(f.abs);
@@ -256,10 +279,12 @@ async function harvestDocsFromDir(
 
     if (payload.kind === 'binary') {
       // 二进制 documents + document_versions 必须同事务成对写
-      await db.transaction((tx) => upsertFileDoc(tx, projectId, f.rel, payload, 'synced'));
+      const r = await db.transaction((tx) => upsertFileDoc(tx, projectId, f.rel, payload, 'synced'));
+      changedDocIds.push(r.documentId);
     } else {
       // 文本通道沿用历史行为：不产生 document_versions（Git 历史即版本史）
-      await upsertFileDoc(db, projectId, f.rel, payload, 'synced');
+      const r = await upsertFileDoc(db, projectId, f.rel, payload, 'synced');
+      changedDocIds.push(r.documentId);
     }
     docsUpserted++;
   }
@@ -270,6 +295,7 @@ async function harvestDocsFromDir(
   for (const [docPath, info] of existingHash) {
     if (!info.deleted && !seen.has(docPath)) {
       await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, info.id));
+      changedDocIds.push(info.id);
       docsRemoved++;
     }
   }
@@ -287,7 +313,7 @@ async function harvestDocsFromDir(
       .where(inArray(documents.id, reconciledIds));
   }
 
-  return { docsUpserted, docsRemoved };
+  return { docsUpserted, docsRemoved, changedDocIds };
 }
 
 async function notifySyncStatus(projectId: string, status: string): Promise<void> {
@@ -410,6 +436,7 @@ async function syncProject(
   const out = {
     docsUpserted: 0,
     docsRemoved: 0,
+    changedDocIds: [] as string[],
     links: 0,
     commitHash: null as string | null,
     noop: false,
@@ -453,6 +480,9 @@ async function syncProject(
       await fs.access(dir).catch(() => fs.mkdir(dir, { recursive: true }));
       Object.assign(out, await harvestDocsFromDir(project.id, dir));
     }
+    // 检索索引自动入队（SEARCH-VECTOR-DESIGN §6.1）：远端增删改 → 索引增量（防抖合并）
+
+    if (out.changedDocIds.length > 0) await enqueueSearchIndex(boss, out.changedDocIds);
 
     out.links = await rebuildProjectLinks(project.id);
     // Git 后端：远端未前进且文档零增删即为无增量同步（重复手动同步属正常成功路径，不再撞唯一约束）
@@ -831,12 +861,13 @@ async function handleAiClassify(job: Job): Promise<void> {
 const toPosixPath = (p: string): string => p.replace(/\\/g, '/');
 
 /** 导入 sink 落库：复用 upsertFileDoc；二进制同事务成对写 documents + document_versions */
-async function upsertImportedDoc(projectId: string, docPath: string, payload: ImportDocPayload): Promise<void> {
+async function upsertImportedDoc(projectId: string, docPath: string, payload: ImportDocPayload): Promise<string> {
   if (payload.kind === 'binary') {
-    await db.transaction((tx) => upsertFileDoc(tx, projectId, docPath, payload, 'modified'));
-    return;
+    const r = await db.transaction((tx) => upsertFileDoc(tx, projectId, docPath, payload, 'modified'));
+    return r.documentId;
   }
-  await upsertFileDoc(db, projectId, docPath, payload, 'modified');
+  const r = await upsertFileDoc(db, projectId, docPath, payload, 'modified');
+  return r.documentId;
 }
 
 /** 剥除 HTML → 纯文本，并从 URL 推导文档 path（URL path 优先，空则域名 slug） */
@@ -927,14 +958,19 @@ async function handleImport(job: Job): Promise<void> {
   await db.update(importJobs).set({ status: 'running', error: null }).where(eq(importJobs.id, data.importJobId));
 
   const provider = importProviders[data.importer];
+  const importedDocIds: string[] = [];
   try {
     if (!provider) throw new Error(`importer not supported: ${data.importer}`);
     const result = await provider.run(params, {
-      upsertDoc: (docPath, payload) => upsertImportedDoc(data.projectId!, docPath, payload),
+      upsertDoc: async (docPath, payload) => {
+        importedDocIds.push(await upsertImportedDoc(data.projectId!, docPath, payload));
+      },
       onProgress: async (done) => {
         await db.update(importJobs).set({ progress: done }).where(eq(importJobs.id, data.importJobId!));
       },
     });
+    // 导入文档自动入队索引（SEARCH-VECTOR-DESIGN §6.1 导入器行）
+    await enqueueSearchIndex(boss, importedDocIds);
 
     const binaryCount = result.binary ?? 0;
     await db
@@ -1189,9 +1225,180 @@ async function handleGcBlob(job: Job): Promise<void> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// search-index / search-build / search-reconcile（SEARCH-VECTOR-DESIGN §6.2–§6.4）
+//   同一文档并发重建由队列 singletonKey 防抖窗口约束 + reindexDocument 幂等（DELETE+INSERT
+//   事务原子）兜底；偶发并发重复只造成冗余嵌入调用，不产生错误状态。
+// ---------------------------------------------------------------------------
+
+async function handleSearchIndex(job: Job): Promise<void> {
+  const data = job.data as { documentId?: string };
+  if (!data.documentId) throw new Error('VALIDATION_FAILED: documentId required');
+  const out = await reindexDocument(reindexDeps, data.documentId);
+  log('search-index done', { jobId: job.id, documentId: data.documentId, ...out });
+}
+
+async function handleSearchBuild(job: Job): Promise<void> {
+  const data = job.data as { buildId?: string };
+  if (!data.buildId) throw new Error('VALIDATION_FAILED: buildId required');
+  const [build] = await db.select().from(indexBuilds).where(eq(indexBuilds.id, data.buildId)).limit(1);
+  if (!build) throw new Error('index build not found: ' + data.buildId);
+  if (build.status === 'canceled' || build.status === 'done') {
+    log('search-build idempotent skip', { buildId: build.id, status: build.status });
+    return;
+  }
+
+  // 单库互斥：取消该库其他活跃构建（重复开启/重建只保留本次）
+  await db
+    .update(indexBuilds)
+    .set({ status: 'canceled', finishedAt: new Date() })
+    .where(
+      and(
+        eq(indexBuilds.projectId, build.projectId),
+        inArray(indexBuilds.status, ['pending', 'running']),
+        ne(indexBuilds.id, build.id),
+      ),
+    );
+
+  // vector-rebuild：换模型/修复 → 清空现有 chunk 全量重跑（ADR-S2 维度/模型一致性）
+  if (build.kind === 'vector-rebuild') {
+    await db.delete(documentChunks).where(eq(documentChunks.projectId, build.projectId));
+  }
+
+  const totalRows = (await db.execute(
+    // 空内容文档永不产出 chunk，排除出 total 避免进度卡尾
+    dsql`SELECT count(*)::int AS total FROM documents
+         WHERE project_id = ${build.projectId} AND deleted_at IS NULL AND kind = 'text' AND coalesce(content, '') <> ''`,
+  )) as unknown as Array<{ total: number }>;
+  const total = totalRows[0]?.total ?? 0;
+  await db
+    .update(indexBuilds)
+    .set({ status: 'running', startedAt: new Date(), totalDocs: total })
+    .where(eq(indexBuilds.id, build.id));
+
+  const BATCH = 50;
+  let failed = 0;
+  // 游标用本地变量推进（DB 行的 cursorDoc 仅作断点续跑快照；闭包内读 build.cursorDoc 会永远拿到旧值死循环）
+  let cursor = build.cursorDoc ?? null;
+  try {
+    for (;;) {
+      // 每批前检查取消（设置页 cancel 置 status，worker 下一批感知即停）
+      const [cur] = await db
+        .select({ status: indexBuilds.status })
+        .from(indexBuilds)
+        .where(eq(indexBuilds.id, build.id))
+        .limit(1);
+      if (!cur || cur.status === 'canceled') {
+        log('search-build canceled', { buildId: build.id });
+        return;
+      }
+      const rows = await db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(
+          and(
+            eq(documents.projectId, build.projectId),
+            isNull(documents.deletedAt),
+            eq(documents.kind, 'text'),
+            cursor ? gt(documents.id, cursor) : undefined,
+          ),
+        )
+        .orderBy(documents.id)
+        .limit(BATCH);
+      if (rows.length === 0) break;
+
+      for (const r of rows) {
+        try {
+          await reindexDocument(reindexDeps, r.id);
+        } catch (err) {
+          // 单文档失败不中断整体构建：计数 + 后续由 search-index 队列重试（哈希去重只补缺口）
+          failed++;
+          log('search-build doc failed', { buildId: build.id, documentId: r.id, err: String(err) });
+        }
+      }
+      cursor = rows[rows.length - 1]!.id;
+      await db
+        .update(indexBuilds)
+        .set({ doneDocs: dsql`${indexBuilds.doneDocs} + ${rows.length}`, cursorDoc: cursor })
+        .where(eq(indexBuilds.id, build.id));
+    }
+    await db
+      .update(indexBuilds)
+      .set({
+        status: 'done',
+        finishedAt: new Date(),
+        error: failed > 0 ? failed + ' docs failed (queued for retry)' : null,
+      })
+      .where(eq(indexBuilds.id, build.id));
+    log('search-build finished', { buildId: build.id, projectId: build.projectId, total, failed });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await db
+      .update(indexBuilds)
+      .set({ status: 'failed', error: msg.slice(0, 500), finishedAt: new Date() })
+      .where(eq(indexBuilds.id, build.id));
+    throw err;
+  }
+}
+
+/** 夜间对账（§6.4）：缺失/待补/模型不符 → 入队修复；悬挂 chunk（软删/二进制）→ 删除。 */
+async function handleSearchReconcile(job: Job): Promise<void> {
+  if (!embeddings) {
+    log('search-reconcile skipped: embedding provider not configured');
+    return;
+  }
+  const vectorProjects = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(isNull(projects.deletedAt), dsql`${projects.searchConfig}->>'vector' = 'true'`));
+
+  let queuedDocs = 0;
+  let removedChunks = 0;
+  for (const p of vectorProjects) {
+    // 悬挂：chunk 指向软删 / 二进制文档（harvest 软删竞态、kind 转换残留）
+    const deleted = await db
+      .delete(documentChunks)
+      .where(
+        dsql`${documentChunks.documentId} IN (
+          SELECT c.document_id FROM document_chunks c
+          JOIN documents d ON d.id = c.document_id
+          WHERE c.project_id = ${p.id} AND (d.deleted_at IS NOT NULL OR d.kind = 'binary')
+        )`,
+      )
+      .returning({ id: documentChunks.id });
+    removedChunks += deleted.length;
+
+    // 缺失/待补/模型不符（R6）：无合格 chunk、存在 NULL embedding、或 embedding_model 非当前模型
+    const stale = (await db.execute(
+      dsql`SELECT d.id FROM documents d
+           WHERE d.project_id = ${p.id} AND d.deleted_at IS NULL AND d.kind = 'text' AND coalesce(d.content, '') <> ''
+           AND (
+             NOT EXISTS (
+               SELECT 1 FROM document_chunks c WHERE c.document_id = d.id AND c.embedding_model = ${embeddingSettings.model}
+             )
+             OR EXISTS (
+               SELECT 1 FROM document_chunks c
+               WHERE c.document_id = d.id AND (c.embedding IS NULL OR c.embedding_model <> ${embeddingSettings.model})
+             )
+           )
+           LIMIT 500`,
+    )) as unknown as Array<{ id: string }>;
+    if (stale.length > 0) {
+      await enqueueSearchIndex(boss, stale.map((r) => r.id));
+      queuedDocs += stale.length;
+    }
+  }
+  log('search-reconcile finished', {
+    jobId: job.id,
+    projects: vectorProjects.length,
+    queuedDocs,
+    removedChunks,
+  });
+}
+
 async function main(): Promise<void> {
   await boss.start();
-  for (const q of ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob']) {
+  for (const q of ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile']) {
     await boss.createQueue(q);
   }
 
@@ -1215,13 +1422,28 @@ async function main(): Promise<void> {
   await boss.work('gc-blob', { batchSize: 1 }, async (jobs) => {
     for (const j of jobs) await handleGcBlob({ id: j.id, queue: 'gc-blob', data: j.data });
   });
+  // 检索：增量索引批量 2（防抖窗口已合并同文档）；构建/对账串行
+  await boss.work('search-index', { batchSize: 2 }, async (jobs) => {
+    for (const j of jobs) await handleSearchIndex({ id: j.id, queue: 'search-index', data: j.data });
+  });
+  await boss.work('search-build', { batchSize: 1 }, async (jobs) => {
+    for (const j of jobs) await handleSearchBuild({ id: j.id, queue: 'search-build', data: j.data });
+  });
+  await boss.work('search-reconcile', { batchSize: 1 }, async (jobs) => {
+    for (const j of jobs) await handleSearchReconcile({ id: j.id, queue: 'search-reconcile', data: j.data });
+  });
 
   // 定时任务：每日 03:00 发布调度检查（PRD F35）
   await boss.schedule('publish', '0 3 * * *', { trigger: 'daily' });
   // 定时任务：每日 03:00 Blob GC（设计文档 §7.4 —— blob 垃圾累积风险对策）
   await boss.schedule('gc-blob', '0 3 * * *', {});
+  // 定时任务：每日 04:00 检索索引对账自愈（SEARCH-VECTOR-DESIGN §6.4）
+  await boss.schedule('search-reconcile', '0 4 * * *', {});
 
-  log('worker started', { queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob'] });
+  log('worker started', {
+    queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile'],
+    embedding: embeddings ? embeddingSettings.provider + ':' + embeddingSettings.model + '@' + embeddingSettings.dim : 'disabled',
+  });
 }
 
 main().catch((err) => {

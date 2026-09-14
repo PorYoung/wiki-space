@@ -118,6 +118,16 @@ export function readableProjectIdsSql(uid: string) {
   ))`;
 }
 
+/** 「我可读的全部项目 id」物化为数组：检索（GET /api/v1/search）等需要把可读集合
+ *  作为白名单参数下推的场景（SEARCH-VECTOR-DESIGN §7.1）。与 readableProjectIdsSql
+ *  同一口径 —— 本函数只是该子查询的执行形态，禁止另行手写可见性条件。 */
+export async function readableProjectIds(uid: string): Promise<string[]> {
+  const rows = (await db.execute(
+    sql`select id from ${readableProjectIdsSql(uid)} as t(id)`,
+  )) as unknown as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
 // ---------------------------------------------------------------------------
 // 团队访问（TEAM-PERMISSIONS-DESIGN §3.6）
 // ---------------------------------------------------------------------------

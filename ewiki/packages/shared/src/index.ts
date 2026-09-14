@@ -4,3 +4,5 @@ export * from './links.js';
 export * from './filetypes.js';
 export * from './tar.js';
 export * from './filter.js';
+export * from './search.js';
+export * from './adapters/embedding.js';

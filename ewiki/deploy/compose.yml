@@ -51,7 +51,12 @@ services:
       replicas: 2
 
   postgres:
-    image: postgres:16
+    # 检索扩展镜像（SEARCH-VECTOR-DESIGN §9.2）：postgres:16 + pgvector + zhparser
+    # 构建见 deploy/postgres/Dockerfile；CI 构建推送私有 registry，气隙环境 docker save/load 导入
+    image: registry/ewiki/pg16-search:${TAG:-latest}
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
     environment:
       POSTGRES_USER: ewiki
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ewiki}
