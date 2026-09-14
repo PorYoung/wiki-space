@@ -59,6 +59,9 @@ export interface SearchRuntimeFlags {
   embeddings: EmbeddingProvider | null;
   vectorEnabled: boolean;
   semanticMinScore: number;
+  /** 当前嵌入模型（G4/SEARCH-REACH-MULTIKB §5.3）：语义比对仅在 embedding_model
+   *  与之一致的 chunk 上进行 —— 换模型过渡期旧向量自动退出语义召回（由对账/修复重建回归） */
+  embeddingModel: string;
 }
 
 export class PgSearchService implements SearchService {
@@ -101,7 +104,7 @@ export class PgSearchService implements SearchService {
     const semByDoc = new Map<string, SemRow>();
     if (effectiveMode !== 'keyword') {
       try {
-        const rows = (await this.semanticSearch(q, req, minScore, runtime.embeddings)).filter((r) => r.score >= minScore);
+        const rows = (await this.semanticSearch(q, req, minScore, runtime)).filter((r) => r.score >= minScore);
         for (const r of rows) {
           const best = semByDoc.get(r.document_id);
           if (!best || r.score > best.score) semByDoc.set(r.document_id, r);
@@ -230,10 +233,10 @@ export class PgSearchService implements SearchService {
     q: string,
     req: SearchRequest,
     minScore: number,
-    embeddings: EmbeddingProvider | null,
+    runtime: SearchRuntimeFlags,
   ): Promise<SemRow[]> {
-    if (!embeddings) return [];
-    const [vec] = await embeddings.embed([q]);
+    if (!runtime.embeddings) return [];
+    const [vec] = await runtime.embeddings.embed([q]);
     if (!vec) return [];
     const vecText = `[${vec.join(',')}]`;
     const fetchN = 96; // chunk 级候选池，文档聚合后约 30~60 个文档
@@ -251,6 +254,7 @@ export class PgSearchService implements SearchService {
         FROM document_chunks c
         JOIN documents d ON d.id = c.document_id
         WHERE c.embedding IS NOT NULL
+          AND c.embedding_model = ${runtime.embeddingModel}
           AND d.deleted_at IS NULL
           ${scopeSql}
         ORDER BY c.embedding <=> ${vecText}::vector

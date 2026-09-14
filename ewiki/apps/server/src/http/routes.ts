@@ -238,6 +238,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         embeddings: resolveEmbeddings(settings),
         vectorEnabled: settings.vectorEnabled,
         semanticMinScore: settings.semanticMinScore,
+        embeddingModel: settings.model,
       };
     },
     config.SEARCH_FTS_CONFIG,
@@ -1399,12 +1400,50 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       denyIfNot(access.canRead);
     }
 
-    const projectIds = c.get('globalRole') !== 'admin' ? await readableProjectIds(uid) : undefined;
-    if (projectIds && projectIds.length === 0) {
-      return c.json({ items: [], hasMore: false, tookMs: 0, ...(mode !== 'keyword' ? { degraded: 'vector-disabled' as const } : {}) });
+    // scope 解析（SEARCH-REACH-MULTIKB §5.1）：可读集合 ∩ 请求 projectIds（交集安全：
+    // 未授权库静默剔除，与"无结果"不可区分）；缺省 = 全部可读库
+    const requestedIds = (c.req.query('projectIds') ?? '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, 50);
+    let readable: string[] | null = null; // null = admin 不限
+    if (c.get('globalRole') !== 'admin') {
+      readable = await readableProjectIds(uid);
+      if (readable.length === 0) {
+        return c.json({ items: [], hasMore: false, tookMs: 0, ...(mode !== 'keyword' ? { degraded: 'vector-disabled' as const } : {}) });
+      }
+    }
+    let projectIds: string[] | undefined;
+    if (projectId) {
+      projectIds = undefined; // 单库路径走精确校验，不再叠加白名单
+    } else if (requestedIds.length > 0) {
+      projectIds = readable ? requestedIds.filter((id) => readable!.includes(id)) : requestedIds;
+    } else {
+      projectIds = readable ?? undefined;
     }
 
     const res = await searchService.search({ q, mode, projectId, tags: tags.length ? tags : undefined, limit, offset, projectIds });
+
+    // coverage（§5.2）：范围内 逐库 语义覆盖与构建中状态（透明化，不做排序补偿）
+    const scopeForCoverage = projectId ? [projectId] : projectIds;
+    const [cov] = (
+      (await db.execute(sql`
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE search_config->>'vector' = 'true') AS semantic,
+               count(*) FILTER (WHERE EXISTS (
+                 SELECT 1 FROM index_builds b WHERE b.project_id = p.id AND b.status IN ('pending','running')
+               )) AS building
+        FROM projects p
+        WHERE p.deleted_at IS NULL
+          ${scopeForCoverage ? sql`AND p.id IN (${sql.join(scopeForCoverage.map((x) => sql`${x}`), sql`, `)})` : sql``}
+      `)) as unknown as Array<{ total: number; semantic: number; building: number }>
+    ) ?? { total: 0, semantic: 0, building: 0 };
+    const coverage = {
+      readableProjects: Number(cov?.total ?? 0),
+      semanticProjects: Number(cov?.semantic ?? 0),
+      buildingProjects: Number(cov?.building ?? 0),
+    };
 
     // 附带项目名（SearchPage 结果卡片展示，免前端二次请求）
     const projectIdsInItems = [...new Set(res.items.map((it) => it.projectId))];
@@ -1415,8 +1454,120 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
 
     return c.json({
       ...res,
+      coverage,
       items: res.items.map((it) => ({ ...it, projectName: nameById.get(it.projectId) ?? null })),
     });
+  });
+
+  // ---- 语义覆盖明细（§4 可发现性）：可读范围内逐库向量开关/构建中状态 ----
+  app.get('/api/v1/search/coverage', async (c) => {
+    const uid = c.get('userId') as string;
+    const runtime = await getSearchSettings(db, process.env);
+    const readable = c.get('globalRole') !== 'admin' ? await readableProjectIds(uid) : null;
+    const rows = (await db.execute(sql`
+      SELECT p.id, p.name,
+             (p.search_config->>'vector') = 'true' AS vector_enabled,
+             EXISTS (
+               SELECT 1 FROM index_builds b WHERE b.project_id = p.id AND b.status IN ('pending','running')
+             ) AS building
+      FROM projects p
+      WHERE p.deleted_at IS NULL
+        ${readable ? sql`AND p.id IN (${sql.join(readable.map((x) => sql`${x}`), sql`, `)})` : sql``}
+      ORDER BY p.name
+      LIMIT 200
+    `)) as unknown as Array<{ id: string; name: string; vector_enabled: boolean; building: boolean }>;
+    return c.json({
+      globalEnabled: runtime.vectorEnabled,
+      provider: runtime.provider,
+      projects: rows.map((r) => ({ id: r.id, name: r.name, vectorEnabled: r.vector_enabled, building: r.building })),
+    });
+  });
+
+  // ---- 相关文档（§3 语义触点）：文档自身 chunk 逐个 HNSW + RRF 聚合 ----
+  app.get('/api/v1/documents/:id/related', async (c) => {
+    const uid = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const limit = Math.min(20, Math.max(1, Math.floor(Number(c.req.query('limit') ?? '5') || 5)));
+    const scope = c.req.query('scope') === 'project' ? 'project' : 'global';
+
+    const [doc] = await db
+      .select({ id: documents.id, projectId: documents.projectId, deletedAt: documents.deletedAt })
+      .from(documents)
+      .where(eq(documents.id, id))
+      .limit(1);
+    if (!doc || doc.deletedAt) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    const access = await projectAccess(doc.projectId, uid, c.get('globalRole') as string);
+    denyIfNot(access.canRead);
+
+    const runtime = await getSearchSettings(db, process.env);
+    if (!runtime.vectorEnabled || runtime.provider === 'none' || !resolveEmbeddings(runtime)) {
+      return c.json({ items: [] });
+    }
+    const projectIds = scope === 'project' ? [doc.projectId] : c.get('globalRole') !== 'admin' ? await readableProjectIds(uid) : undefined;
+    if (projectIds && projectIds.length === 0) return c.json({ items: [] });
+    const scopeSql = projectIds ? sql`AND c.project_id IN (${sql.join(projectIds.map((x) => sql`${x}`), sql`, `)})` : sql``;
+
+    // 源向量：文档自身代表性 chunk（按 token 降序取前 8；pg 驱动返回 vector 为 '[..]' 文本）
+    const srcChunks = (await db.execute(
+      sql`SELECT embedding FROM document_chunks
+          WHERE document_id = ${id} AND embedding IS NOT NULL AND embedding_model = ${runtime.model}
+          ORDER BY token_count DESC LIMIT 8`,
+    )) as unknown as Array<{ embedding: string }>;
+    if (srcChunks.length === 0) return c.json({ items: [] });
+
+    interface RelRow {
+      document_id: string;
+      project_id: string;
+      heading_path: string | null;
+      score: number;
+      path: string;
+      title: string | null;
+    }
+    const rrf = new Map<string, { score: number; best: RelRow }>();
+    for (const src of srcChunks) {
+      const vecText = src.embedding;
+      const rows = (await db.execute(sql`
+        SELECT c.document_id, c.project_id, c.heading_path,
+               1 - (c.embedding <=> ${vecText}::vector) AS score,
+               d.path, d.title
+        FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE c.embedding IS NOT NULL
+          AND c.embedding_model = ${runtime.model}
+          AND c.document_id <> ${id}
+          AND d.deleted_at IS NULL
+          ${scopeSql}
+        ORDER BY c.embedding <=> ${vecText}::vector
+        LIMIT 16
+      `)) as unknown as RelRow[];
+      rows.forEach((r, idx) => {
+        const cur = rrf.get(r.document_id) ?? { score: 0, best: r };
+        cur.score += 1 / (60 + idx + 1);
+        if (r.score > cur.best.score) cur.best = r;
+        rrf.set(r.document_id, cur);
+      });
+    }
+
+    const minScore = runtime.semanticMinScore;
+    const items = [...rrf.entries()]
+      .filter(([, v]) => v.best.score >= minScore)
+      .sort((a, b) => b[1].score - a[1].score)
+      .slice(0, limit)
+      .map(([documentId, v]) => ({
+        documentId,
+        projectId: v.best.project_id,
+        path: v.best.path,
+        title: v.best.title ?? v.best.path.split('/').pop() ?? '(无标题)',
+        score: Math.round(v.best.score * 1000) / 1000,
+        reason: 'semantic' as const,
+        heading: v.best.heading_path,
+      }));
+
+    const nameRows = items.length
+      ? await db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, items.map((it) => it.projectId)))
+      : [];
+    const nameById2 = new Map(nameRows.map((r) => [r.id, r.name]));
+    return c.json({ items: items.map((it) => ({ ...it, projectName: nameById2.get(it.projectId) ?? null })) });
   });
 
   // ---- 项目详情增强（P3 扩展：附带统计） ----

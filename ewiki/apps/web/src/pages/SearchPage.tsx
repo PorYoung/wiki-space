@@ -30,6 +30,14 @@ interface SearchResponse {
   hasMore: boolean;
   tookMs: number;
   degraded?: 'vector-disabled' | 'provider-not-configured';
+  coverage?: { semanticProjects: number; readableProjects: number; buildingProjects: number };
+}
+
+interface ScopeProject {
+  id: string;
+  name: string;
+  vectorEnabled: boolean;
+  building: boolean;
 }
 
 function highlightText(text: string, keyword: string): React.ReactNode {
@@ -98,12 +106,23 @@ export function SearchPage(): React.ReactElement {
     setInputValue(query);
   }, [query]);
 
+  // 语义覆盖明细（R3 可发现性）：空态引导 + 范围选择器标注
+  const coverageQuery = useQuery({
+    queryKey: ['search-coverage'],
+    queryFn: () =>
+      apiFetch<{ globalEnabled: boolean; provider: string; projects: Array<{ id: string; name: string; vectorEnabled: boolean; building: boolean }> }>(
+        '/api/v1/search/coverage'
+      ),
+    staleTime: 60_000,
+  });
+
   // 文档页签走统一检索端点（keyword/semantic/hybrid；/documents?q= 保留给首页联想）
+  const selectedProjectIds = (searchParams.get('projects') ?? '').split(',').map((t) => t.trim()).filter(Boolean);
   const { data: docsData, isLoading: docsLoading } = useQuery({
-    queryKey: ['search-docs', query, mode],
+    queryKey: ['search-docs', query, mode, selectedProjectIds.join(',')],
     queryFn: () =>
       apiFetch<SearchResponse>(
-        `/api/v1/search?q=${encodeURIComponent(query)}&mode=${mode}&limit=20`
+        `/api/v1/search?q=${encodeURIComponent(query)}&mode=${mode}&limit=20${selectedProjectIds.length ? `&projectIds=${encodeURIComponent(selectedProjectIds.join(','))}` : ''}`
       ),
     enabled: query.length > 0,
     staleTime: 30_000,
@@ -133,7 +152,18 @@ export function SearchPage(): React.ReactElement {
 
   const changeMode = (m: SearchMode) => {
     setActiveMode(m);
-    setSearchParams({ q: query, ...(m !== 'auto' ? { mode: m } : {}) });
+    setSearchParams({ q: query, ...(m !== 'auto' ? { mode: m } : {}), ...(selectedProjectIds.length ? { projects: selectedProjectIds.join(',') } : {}) });
+  };
+
+  const toggleProjectScope = (pid: string) => {
+    const next = selectedProjectIds.includes(pid)
+      ? selectedProjectIds.filter((x) => x !== pid)
+      : [...selectedProjectIds, pid];
+    setSearchParams({
+      q: query,
+      ...(activeMode !== 'auto' ? { mode: activeMode } : {}),
+      ...(next.length ? { projects: next.join(',') } : {}),
+    });
   };
   // activeMode 跟随 URL（浏览器后退同步）
   const [activeMode, setActiveMode] = useState<SearchMode>(mode);
@@ -293,9 +323,13 @@ export function SearchPage(): React.ReactElement {
             hasMore={docsData?.hasMore ?? false}
             tookMs={docsData?.tookMs ?? 0}
             degraded={docsData?.degraded}
+            coverage={docsData?.coverage}
             mode={activeMode}
             onModeChange={changeMode}
             query={query}
+            scopeProjects={coverageQuery.data?.projects ?? []}
+            selectedProjectIds={selectedProjectIds}
+            onToggleProjectScope={toggleProjectScope}
             projectName={(pid: string, fallback?: string | null) =>
               projectsData?.items.find((p) => p.id === pid)?.name ?? fallback ?? pid.slice(0, 8)
             }
@@ -341,6 +375,8 @@ function EmptySearchState() {
       </h2>
       <p className="text-sm mb-8 max-w-md" style={{ color: 'var(--text-muted)' }}>
         跨项目检索文档、项目与已发布站点 · 支持全文与标签定位
+        <br />
+        开启知识库的向量检索后，可按含义语义召回段落内容
       </p>
 
       {/* 快捷检索入口 */}
@@ -427,17 +463,32 @@ function SnippetHtml({ html }: { html: string }) {
   );
 }
 
-function DocResults({ loading, items, hasMore, tookMs, degraded, mode, onModeChange, query, projectName }: {
+function DocResults({ loading, items, hasMore, tookMs, degraded, coverage, mode, onModeChange, query, scopeProjects, selectedProjectIds, onToggleProjectScope, projectName }: {
   loading: boolean;
   items: SearchHitItem[];
   hasMore: boolean;
   tookMs: number;
   degraded?: 'vector-disabled' | 'provider-not-configured';
+  coverage?: SearchResponse['coverage'];
   mode: SearchMode;
   onModeChange: (m: SearchMode) => void;
   query: string;
+  scopeProjects: ScopeProject[];
+  selectedProjectIds: string[];
+  onToggleProjectScope: (pid: string) => void;
   projectName: (pid: string, fallback?: string | null) => string;
 }) {
+  const [scopeOpen, setScopeOpen] = useState(false);
+  const scopeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!scopeOpen) return;
+    const onDocMouseDown = (e: MouseEvent): void => {
+      if (scopeRef.current && !scopeRef.current.contains(e.target as Node)) setScopeOpen(false);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [scopeOpen]);
+
   if (loading) {
     return (
       <div className="space-y-4">
@@ -479,9 +530,64 @@ function DocResults({ loading, items, hasMore, tookMs, degraded, mode, onModeCha
         <p className="text-sm" style={{ color: 'var(--text-muted)', animation: 'fade-in 0.3s ease-out both' }}>
           找到 <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{items.length}{hasMore ? '+' : ''}</span> 个相关文档
           {tookMs > 0 ? <span> · {tookMs} ms</span> : null}
+          {coverage && coverage.readableProjects > 0 ? (
+            <span
+              className="ml-2 text-[11px]"
+              title={coverage.semanticProjects < coverage.readableProjects ? '未覆盖库以关键词参与检索；开启其向量检索可纳入语义召回' : undefined}
+            >
+              · 语义召回覆盖{' '}
+              <span className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                {coverage.semanticProjects}/{coverage.readableProjects}
+              </span>{' '}
+              库
+            </span>
+          ) : null}
         </p>
-        {/* 检索模式切换（SEARCH-VECTOR-DESIGN §8） */}
-        <div className="flex items-center gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-subtle)' }}>
+        {/* 范围选择器（SEARCH-REACH-MULTIKB §5.1）+ 检索模式切换（§8） */}
+        <div className="flex items-center gap-2">
+          <div ref={scopeRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setScopeOpen((v) => !v)}
+              className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg border transition"
+              style={{
+                borderColor: selectedProjectIds.length ? 'var(--color-primary-500)' : 'var(--border-soft)',
+                color: selectedProjectIds.length ? 'var(--color-primary-700)' : 'var(--text-muted)',
+              }}
+            >
+              {selectedProjectIds.length
+                ? `范围 · ${selectedProjectIds.length} 库`
+                : '全部知识库'}
+            </button>
+            {scopeOpen ? (
+              <div
+                className="absolute right-0 top-8 z-40 w-64 max-h-72 overflow-y-auto rounded-lg border bg-white shadow-lg dark:bg-neutral-900 p-1"
+                style={{ borderColor: 'var(--border-soft)' }}
+              >
+                {(scopeProjects.length ? scopeProjects : []).map((p) => {
+                  const checked = selectedProjectIds.includes(p.id);
+                  return (
+                    <label
+                      key={p.id}
+                      className="flex items-center gap-2 px-2.5 py-1.5 text-xs rounded-md hover:bg-neutral-100 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-primary-500"
+                        checked={checked}
+                        onChange={() => onToggleProjectScope(p.id)}
+                      />
+                      <span className="truncate flex-1" title={p.name}>{p.name}</span>
+                      {p.vectorEnabled ? <span title="已开启语义检索" className="text-primary-600">✦</span> : null}
+                      {p.building ? <span className="text-[10px] text-amber-600">构建中</span> : null}
+                    </label>
+                  );
+                })}
+                {scopeProjects.length === 0 ? <div className="px-2.5 py-2 text-neutral-400">暂无可读知识库</div> : null}
+              </div>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-subtle)' }}>
           {MODE_TABS.map(({ key, label, hint }) => (
             <button
               key={key}
@@ -498,6 +604,7 @@ function DocResults({ loading, items, hasMore, tookMs, degraded, mode, onModeCha
               {label}
             </button>
           ))}
+          </div>
         </div>
       </div>
 

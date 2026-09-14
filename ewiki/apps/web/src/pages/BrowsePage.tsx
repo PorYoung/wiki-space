@@ -425,7 +425,7 @@ function TreeSidebar({
   activeDocId: string | null;
   onSelect: (d: DocumentListItem) => void;
   onBack: () => void;
-  project: { backendKind?: 'git' | 'local' | null } | null;
+  project: { id: string; backendKind?: 'git' | 'local' | null } | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
   /** 「+」下拉：新建 Markdown / 文本代码文件 / 文件夹（目标固定为根目录；文件夹内新建走右键菜单） */
@@ -453,7 +453,19 @@ function TreeSidebar({
   const [expanded, setExpanded] = useState<Set<string>>(new Set(['']));
   const [keyword, setKeyword] = useState('');
   const [searchActive, setSearchActive] = useState(false);
+  const [deepSearchQ, setDeepSearchQ] = useState<string | null>(null); // 非 null = 深度搜索面板（全文/语义）
   const searchRef = useRef<HTMLInputElement | null>(null);
+
+  // 深度搜索（SEARCH-REACH-MULTIKB R1）：Enter 触发，库内全文/语义（mode=auto，服务端自动降级）
+  const deepQuery = useQuery({
+    queryKey: ['browse-deep-search', project?.id, deepSearchQ],
+    queryFn: () =>
+      apiFetch<{ items: Array<{ documentId: string; path: string; title: string; snippet: string; reason: string; heading?: string | null }>; hasMore: boolean; degraded?: string }>(
+        `/api/v1/search?q=${encodeURIComponent(deepSearchQ ?? '')}&projectId=${project?.id}&mode=auto&limit=20`
+      ),
+    enabled: !!deepSearchQ && !!project?.id,
+    staleTime: 30_000,
+  });
   const [createMenu, setCreateMenu] = useState<{ x: number; y: number } | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
 
@@ -657,9 +669,15 @@ function TreeSidebar({
               ref={searchRef}
               type="text"
               className="w-full h-8 pl-7 pr-8 rounded-md text-xs bg-neutral-100 border border-primary-200 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition placeholder:text-neutral-400"
-              placeholder="搜索文档 / 文件夹…"
+              placeholder="搜索文档 / 文件夹…（Enter 全文/语义搜索）"
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && keyword.trim().length >= 2) {
+                  setDeepSearchQ(keyword.trim());
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
               onBlur={(e) => { if (!e.target.value) setSearchActive(false); }}
             />
             {keyword ? (
@@ -677,7 +695,65 @@ function TreeSidebar({
         )}
       </div>
 
-      {/* Tree（空白处右键 = 根目录菜单：在根新建文档/文件夹） */}
+      {/* 深度搜索结果（R1）：Enter 后替换树视图；返回即恢复 */}
+      {deepSearchQ !== null ? (
+        <div className="flex-1 overflow-y-auto py-2 min-h-0">
+          <div className="flex items-center justify-between px-3 pb-2">
+            <span className="text-[11px] text-neutral-500 truncate">
+              全文/语义搜索「{deepSearchQ}」· {deepQuery.data?.items.length ?? 0} 条{deepQuery.data?.hasMore ? '+' : ''}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 text-[11px] text-primary-600 hover:underline"
+              onClick={() => { setDeepSearchQ(null); }}
+            >
+              返回目录树
+            </button>
+          </div>
+          {deepQuery.data?.degraded ? (
+            <div className="mx-3 mb-2 rounded-md bg-neutral-100 px-2 py-1 text-[10px] text-neutral-500">
+              本库未开启向量检索，已按关键词匹配
+            </div>
+          ) : null}
+          {deepQuery.isLoading ? (
+            <div className="px-3 py-4 text-xs text-neutral-400">搜索中…</div>
+          ) : (deepQuery.data?.items.length ?? 0) === 0 ? (
+            <div className="px-3 py-4 text-xs text-neutral-400">没有匹配的文档</div>
+          ) : (
+            <div className="space-y-1 px-2">
+              {deepQuery.data!.items.map((hit) => {
+                const doc = docs.find((d) => d.id === hit.documentId);
+                return (
+                  <button
+                    key={hit.documentId}
+                    type="button"
+                    onClick={() => { if (doc) { onSelect(doc); setDeepSearchQ(null); setKeyword(''); } }}
+                    className={`w-full text-left rounded-md px-2 py-1.5 transition ${doc && doc.id === activeDocId ? 'bg-primary-50' : 'hover:bg-neutral-100'}`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <FileText size={12} className="shrink-0 text-neutral-400" />
+                      <span className="truncate text-xs font-medium text-neutral-800">{hit.title || hit.path}</span>
+                      {hit.reason === 'semantic' || hit.reason === 'hybrid' ? (
+                        <span className="shrink-0 rounded-full bg-primary-100 px-1.5 text-[10px] text-primary-700">
+                          {hit.reason === 'hybrid' ? '混合' : '语义'}
+                        </span>
+                      ) : null}
+                    </div>
+                    {hit.snippet ? (
+                      <p
+                        className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-neutral-500"
+                        dangerouslySetInnerHTML={{ __html: hit.snippet }}
+                      />
+                    ) : null}
+                    {hit.heading ? <div className="mt-0.5 truncate text-[10px] text-neutral-400">{hit.heading}</div> : null}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+      // Tree（空白处右键 = 根目录菜单：在根新建文档/文件夹）
       <div
         className="flex-1 overflow-y-auto py-2 min-h-0"
         onContextMenu={canWrite ? (e) => onMenu(e, { kind: 'root' }) : undefined}
@@ -734,6 +810,8 @@ function TreeSidebar({
           </>
         )}
       </div>
+      )}
+      {/* Tree / 深度搜索 条件渲染结束 */}
 
       {/* Footer */}
       <div className="shrink-0 border-t px-3 py-2" style={{ borderColor: 'var(--border-soft)' }}>

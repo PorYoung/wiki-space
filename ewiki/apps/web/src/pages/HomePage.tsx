@@ -317,6 +317,7 @@ export function HomePage(): React.ReactElement {
           </h1>
           <p className="text-base" style={{ color: 'var(--text-muted)' }}>
             搜索你的知识，发现每一个答案
+            <span className="block mt-2 text-[13px] font-normal opacity-70">全文匹配 · 语义召回 — 已开启向量检索的知识库可按含义命中</span>
           </p>
         </div>
 

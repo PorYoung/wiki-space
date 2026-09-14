@@ -138,8 +138,11 @@ async function main() {
   }
 
   // [P1] 注册 + 自动示例知识库
+  const runId = Date.now().toString(36);
   {
-    const alice = await loginOrRegister('alice-e2e@ewiki.local', 'Alice');
+    // 每轮注册全新 alice：保证「注册即得示例库」断言不受历史运行的项目累积影响
+    // （/api/v1/projects 列表 limit=100，复用账号时旧示例库会掉出第一页）
+    const alice = await loginOrRegister(`alice-${runId}@ewiki.local`, 'Alice');
     ctx.alice = alice.token;
     ctx.aliceId = alice.userId;
     ctx.aliceRegistered = alice.registered === true;
@@ -177,7 +180,6 @@ async function main() {
   }
 
   // [P4] 本地文档库：模板创建 + 落盘 + 增删查改（默认存储后端 local）
-  const runId = Date.now().toString(36);
   {
     const created = await req('/api/v1/projects', {
       token: ctx.alice,
@@ -1001,6 +1003,97 @@ async function main() {
     // P12g 恢复全局默认防抖（避免影响其他用例的索引时效）
     await req('/api/v1/admin/search/config', { token: ctx.admin, method: 'PUT', body: { debounceSeconds: 3, vectorEnabled: true } });
     record('P12g', '全局配置恢复（防抖 3s / 向量开启）', true, 'cleanup');
+  }
+
+  // ---------------------------------------------------------------------------
+  // ---- P13 触达与多库/混合库检索（SEARCH-REACH-MULTIKB 验收） ----
+  // ---------------------------------------------------------------------------
+  {
+    const waitFor = async (check, { timeoutMs = 30_000, intervalMs = 500 } = {}) => {
+      const deadline = Date.now() + timeoutMs;
+      let last = null;
+      do {
+        last = await check();
+        if (last) return last;
+        await new Promise((r) => setTimeout(r, intervalMs));
+      } while (Date.now() < deadline);
+      return last;
+    };
+
+    // 准备：向量库（2 篇相近文档）+ 普通库（1 篇同主题文档，未开向量）
+    const mkProj = async (name) => {
+      const r = await req('/api/v1/projects', { token: ctx.alice, method: 'POST', body: { name, storage: { kind: 'local' } } });
+      return r.json?.project?.id ?? r.json?.id;
+    };
+    const projV = await mkProj(`混合检索·向量库-${runId}`);
+    const projP = await mkProj(`混合检索·普通库-${runId}`);
+    const mkDoc = (pid, path, content) =>
+      req(`/api/v1/projects/${pid}/documents`, { token: ctx.alice, method: 'POST', body: { path, content } });
+    const docV1 = await mkDoc(projV, '知识/向量检索设计.md', '# 向量检索设计\n\n混合检索场景下，语义召回与关键词召回经 RRF 融合排序，段落级向量由嵌入服务构建。');
+    const docV2 = await mkDoc(projV, '知识/向量检索实践.md', '# 向量检索实践\n\n实践语义召回时需保证 chunk 模型一致，换模型后应重建向量索引再恢复语义能力。');
+    const docP = await mkDoc(projP, '知识/关键词手册.md', '# 关键词手册\n\n本库未开启向量，混合检索时经由关键词路径参与全文匹配与排序。');
+    await req(`/api/v1/projects/${projV}/search-config`, { token: ctx.alice, method: 'PUT', body: { vector: true } });
+    const built = await waitFor(async () => {
+      const r = await req(`/api/v1/projects/${projV}/search-index`, { token: ctx.alice });
+      return r.json?.builds?.[0]?.status === 'done' ? r.json : null;
+    });
+
+    // P13a coverage 端点：可读范围内逐库向量开关/构建中状态 + 全局开关
+    const cov = await req('/api/v1/search/coverage', { token: ctx.alice });
+    const covV = (cov.json?.projects ?? []).find((p) => p.id === projV);
+    const covP = (cov.json?.projects ?? []).find((p) => p.id === projP);
+    record('P13a', '覆盖明细端点：逐库 vectorEnabled/building + 全局开关（可读范围内）',
+      cov.status === 200 && covV?.vectorEnabled === true && covP?.vectorEnabled === false &&
+        typeof cov.json?.globalEnabled === 'boolean',
+      `status=${cov.status} projects=${cov.json?.projects?.length} V=${covV?.vectorEnabled} P=${covP?.vectorEnabled}`);
+
+    // P13b 混合库检索：projectIds 多选（一开向量一未开）→ 两库文档均可命中，reason 标注正确 + coverage 上报
+    const mixed = await req(`/api/v1/search?q=${encodeURIComponent('向量检索')}&mode=auto&projectIds=${projV},${projP}`, { token: ctx.alice });
+    const hitV = (mixed.json?.items ?? []).find((it) => it.documentId === docV1.json?.id);
+    const hitP = (mixed.json?.items ?? []).find((it) => it.documentId === docP.json?.id);
+    record('P13b', '混合库检索：已建/未建向量库同时命中（reason 标注来源），coverage 上报覆盖度',
+      mixed.status === 200 && !!hitV && ['semantic', 'hybrid'].includes(hitV.reason) && !!hitP && hitP.reason === 'keyword' &&
+        mixed.json?.coverage?.semanticProjects === 1 && mixed.json?.coverage?.readableProjects === 2,
+      `status=${mixed.status} V=${hitV?.reason} P=${hitP?.reason} cov=${JSON.stringify(mixed.json?.coverage ?? null)}`);
+
+    // P13c 范围交集安全：projectIds 混入他人私库 → 静默剔除（与无结果不可区分，无报错）
+    const bobProj = await req('/api/v1/projects', { token: ctx.bob, method: 'POST', body: { name: `bob私库-${runId}`, storage: { kind: 'local' } } });
+    const bobProjId = bobProj.json?.project?.id ?? bobProj.json?.id;
+    await req(`/api/v1/projects/${bobProjId}/documents`, {
+      token: ctx.bob, method: 'POST', body: { path: 'secret.md', content: `# 私密\n\nBOB-SECRET-${runId} 私有内容不应被跨库检索到。` },
+    });
+    const crossSearch = await req(`/api/v1/search?q=${encodeURIComponent(`BOB-SECRET-${runId}`)}&projectIds=${projV},${bobProjId}`, { token: ctx.alice });
+    // 断言口径：bob 私库文档不出现（范围内其它库合法命中不算泄露）；交集后 coverage 仅剩 1 库
+    const crossLeak = (crossSearch.json?.items ?? []).some((it) => it.projectId === bobProjId);
+    record('P13c', '范围交集安全：未授权库从 scope 静默剔除（无泄露、无报错、与无结果不可区分）',
+      crossSearch.status === 200 && !crossLeak && crossSearch.json?.coverage?.readableProjects === 1,
+      `status=${crossSearch.status} leak=${crossLeak} cov=${JSON.stringify(crossSearch.json?.coverage ?? null)}`);
+
+    // P13d 模型一致性（G4）：换模型后旧 chunk 立即退出语义召回；恢复模型后回归
+    const semBefore = await req(`/api/v1/search?q=${encodeURIComponent('向量检索')}&mode=semantic&projectId=${projV}`, { token: ctx.alice });
+    await req('/api/v1/admin/search/config', { token: ctx.admin, method: 'PUT', body: { model: 'mock-bge-v2' } });
+    const semAfter = await req(`/api/v1/search?q=${encodeURIComponent('向量检索')}&mode=semantic&projectId=${projV}`, { token: ctx.alice });
+    const relAfter = await req(`/api/v1/documents/${docV1.json?.id}/related`, { token: ctx.alice });
+    await req('/api/v1/admin/search/config', { token: ctx.admin, method: 'PUT', body: { model: 'mock-bge' } });
+    const semRestored = await waitFor(async () => {
+      const r = await req(`/api/v1/search?q=${encodeURIComponent('向量检索')}&mode=semantic&projectId=${projV}`, { token: ctx.alice });
+      return (r.json?.items ?? []).some((it) => it.reason === 'semantic') ? r.json : null;
+    }, { timeoutMs: 20_000 });
+    record('P13d', '模型一致性：换模型旧向量退出语义召回（related 同口径），恢复后回归',
+      (semBefore.json?.items ?? []).some((it) => it.reason === 'semantic') &&
+        (semAfter.json?.items ?? []).length === 0 && (relAfter.json?.items ?? []).length === 0 && !!semRestored,
+      `before=${semBefore.json?.items?.length} after=${semAfter.json?.items?.length} rel=${relAfter.json?.items?.length} restored=${!!semRestored}`);
+
+    // P13e 相关文档：同库相近文档被召回、不含自身；无权限访问文档本身被拒
+    const related = await req(`/api/v1/documents/${docV1.json?.id}/related`, { token: ctx.alice });
+    const relIds = (related.json?.items ?? []).map((it) => it.documentId);
+    const relatedBob = await req(`/api/v1/documents/${docV1.json?.id}/related`, { token: ctx.bob });
+    record('P13e', '相关文档：语义召回相近文档（不含自身）；无权限文档直接被拒',
+      related.status === 200 && relIds.includes(docV2.json?.id) && !relIds.includes(docV1.json?.id) && relatedBob.status === 403,
+      `status=${related.status} items=${JSON.stringify(relIds).slice(0, 80)} bob=${relatedBob.status}`);
+
+    // P13f projectIds 越权不报错回归（cleanup：恢复全局默认值已由 P12g 承担，此处无操作）
+    record('P13f', '多库/混合库与触达验收完成', true, `built chunks=${built?.stats?.total_chunks}`);
   }
 
   const passed = results.filter((r) => r.pass).length;

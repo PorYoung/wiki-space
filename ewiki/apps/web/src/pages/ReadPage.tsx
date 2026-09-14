@@ -132,6 +132,17 @@ export function ReadPage(): React.ReactElement {
     staleTime: 120_000,
   });
 
+  // 相关文档（SEARCH-REACH-MULTIKB R2）：语义触点 —— 文档向量召回，无需输入查询词
+  const { data: related } = useQuery({
+    queryKey: ['related-docs', id],
+    queryFn: () =>
+      apiFetch<{ items: Array<{ documentId: string; projectId: string; projectName?: string | null; path: string; title: string; score: number; heading?: string | null }> }>(
+        `/api/v1/documents/${doc!.id}/related?limit=5`
+      ),
+    enabled: !!doc?.id,
+    staleTime: 120_000,
+  });
+
   const { data: searchResults } = useQuery({
     queryKey: ['search-docs-nav', searchQuery],
     queryFn: () => apiFetch<{ items: SearchDocument[]; total: number; page: number; pageSize: number }>(
@@ -636,6 +647,35 @@ export function ReadPage(): React.ReactElement {
                 <span>感谢阅读</span>
                 <span>最后更新：{new Date(doc.updatedAt).toLocaleString('zh-CN')}</span>
               </div>
+
+              {/* 相关文档（语义召回；空结果整模块隐藏） */}
+              {(related?.items?.length ?? 0) > 0 ? (
+                <div className="mt-8">
+                  <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-muted)' }}>
+                    相关文档 · 语义推荐
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {related!.items.map((r) => (
+                      <a
+                        key={r.documentId}
+                        href={`/read/${r.documentId}`}
+                        className="block rounded-lg border p-3 transition hover:shadow-md hover:-translate-y-px"
+                        style={{ borderColor: 'var(--border-soft)' }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+                            {r.title || r.path.split('/').pop()}
+                          </span>
+                          {r.heading ? <span className="shrink-0 text-[10px] text-neutral-400 truncate">{r.heading}</span> : null}
+                        </div>
+                        <div className="mt-1 text-[11px] text-neutral-400 truncate">
+                          {r.projectName ?? ''}{r.projectName ? ' · ' : ''}{r.path}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </footer>
           </article>
 
