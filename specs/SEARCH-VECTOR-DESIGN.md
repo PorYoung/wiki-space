@@ -479,10 +479,40 @@ SEARCH_INDEX_DEBOUNCE_SECONDS=30
 
 ### 14.4 验收记录（2026-09-14）
 
-- **单测**：`pnpm test` 全绿（shared 70、server 28，含 chunker/RRF/highlight 15 个新用例）。
+- **单测**：`pnpm test` 全绿（shared 70、server 32，含 chunker/RRF/highlight 15 用例 + 运行时配置合并 4 用例）。
 - **typecheck**：`pnpm typecheck` 全部 10 包通过；`pnpm --filter @ewiki/web build` 通过。
 - **迁移实跑**：开发库（`ewiki-pg` 容器已替换为扩展镜像，数据卷保留）`db:migrate` 成功；`chinese_zh` 分词验证（"向量检索与全文索引的自动构建" → 向量/检索/全文/索引/构建）；存量行 search_vector 回填；6 个检索索引就绪；`document_chunks.embedding` typmod=1024。
-- **端到端**：`node scripts/e2e-platform.mjs` **89/89 全部通过**（既有 P0–P10 回归 + 新增 P11 段 10 项：中文分词高亮 / 权限隔离不泄露 / 增量更新自动入队 / 降级链 / 自动全量构建 / 语义召回 heading / 重命名零重嵌 / 删除索引清除 / 管理端统计 / Provider 安全缺省），报告 `scripts/e2e-report.json`。
+- **端到端**：`node scripts/e2e-platform.mjs` **96/96 全部通过**（既有 P0–P10 回归 + P11 检索验收 10 项 + P12 管理与运营验收 7 项），报告 `scripts/e2e-report.json`。
 - **对账自愈实测**：人为删除 chunk 后手动投递 `search-reconcile` → worker 日志 `queuedDocs=1` → 缺失 chunk 自动重建并重嵌（`embedding_model` 回到当前模型、`has_vec=t`）。
 - **mock 嵌入服务**：`scripts/mock-embedding-server.mjs`（确定性 2-gram 哈希向量 + 嵌入计数端点，供零重嵌断言；验证辅助设施，非生产依赖）。
-- **实现期修复记录**（评审留痕）：构建游标死循环（闭包读旧 `build.cursorDoc` → 本地变量推进）；pg 驱动 vector 列返回字符串（`parseVector` 归一后再搬运）；drizzle sql 模板数组展开为多参数（权限白名单改 IN 列表）；`pg_parser` → `pg_ts_parser` 目录表名。
+- **实现期修复记录**（评审留痕）：构建游标死循环（闭包读旧 `build.cursorDoc` → 本地变量推进）；pg 驱动 vector 列返回字符串（`parseVector` 归一后再搬运）；drizzle sql 模板数组展开为多参数（权限白名单改 IN 列表）；`pg_parser` → `pg_ts_parser` 目录表名；**防抖丢更新**（singletonSeconds 窗口含已完成任务，会吞掉窗口内的后续变更 → 改为 `startAfter` 延迟 + 仅 pending 去重，latest-wins 语义零丢失，e2e P11h 回归覆盖）。
+
+---
+
+## 15. 管理与运营能力（2026-09-15 增补实施）
+
+> 需求：设置配置与状态管理友好；便捷设置构建配置；便捷管理构建任务；管理员便捷全局配置与把控、资源调配、任务视图。全部落地，验收见 P12 段（96/96）。
+
+### 15.1 知识库级（项目设置 → AI 整理页签「向量检索」卡片）
+
+| 能力 | 形态 |
+|---|---|
+| 便捷开关与构建配置 | 向量开关、chunk 切分参数（目标 token 128–2048 / 重叠 0–256）合并式保存（`PUT search-config`）；开启向量自动投递构建，无需手工触发 |
+| 配置漂移提示 | `index_builds.params` 留痕构建时参数（chunk/overlap/model），与当前配置不一致时提示「保存后请重新构建以生效」 |
+| 构建任务管理 | 构建历史列表（状态/进度/失败数/时间/错误）+ 进行中可取消 + 失败可重试（`search-index/rebuild`）+ 「修复缺口」一键即时对账（`search-index/repair`，仅补缺失/待嵌/模型不符文档） |
+
+### 15.2 平台级（管理端 → 「检索与任务」页签）
+
+| 能力 | 形态 |
+|---|---|
+| 全局配置运行时化 | 嵌入 Provider/BaseUrl/apiKey（secretbox 加密落库、仅回显尾 4 位）/模型/批量/超时、防抖窗口、语义阈值、**全局向量开关** —— `platform_settings` 覆盖 env 默认，保存后 ≤10s 全站生效，无需重启；apiKey 不回显明文 |
+| 全局把控 | kill switch 关闭即全局暂停语义检索与索引更新（已有向量保留，恢复后由对账/修复补齐）；开启向量前置校验（Provider 未配置 422 / 全局暂停 422） |
+| 资源调配视图 | chunk 总量/待嵌入/向量库数/进行中构建/失败文档 五项指标 + 三队列（search-index/build/reconcile）实时积压表（pgboss.job 只读查询）+ 「立即对账」手动触发 |
+| 任务视图 | 全平台构建任务表（最近 50 条：知识库/类型/状态/进度/失败/参数/错误）+ 失败、取消任务行内重试（vector 从断点续跑，vector-rebuild 重头） |
+
+### 15.3 实现要点
+
+- 运行时配置层 `apps/server/src/lib/search-settings.ts`：env 默认 ⊕ platform_settings 覆盖，读侧 10s TTL 缓存（WeakMap 按 db 实例），保存即失效；server 查询侧与 worker 索引侧共用同一解析入口（worker 复用 server lib，同 blob-gc 模式），`PgSearchService` 构造改为注入 `getRuntime()` 旗标解析器。
+- 防抖语义修正（安全修复）：`singletonKey + startAfter` 取代 `singletonSeconds`（后者窗口含已完成任务会吞变更）——延迟期内 pending 去重合并，任务完成后新变更必产生新任务。
+- 迁移 0009（index_builds.params）/ 0010（projects.search_config 默认值含 chunk 参数）。
+- e2e P12：总览一体下发与非管理员 403、全局配置保存即时生效、kill switch 关闭/恢复、chunk 参数保存 + 构建留痕比对、修复缺口、done 构建重试 409、立即对账权限。

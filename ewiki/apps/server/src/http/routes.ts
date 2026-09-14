@@ -17,8 +17,8 @@ import {
   UpdateTeamSchema,
 } from '@ewiki/shared';
 import { renderDocPage } from '@ewiki/render';
-import { createEmbeddingProvider } from '@ewiki/shared';
 import { PgSearchService } from '../adapters/pg/search.js';
+import { getSearchSettings, resolveEmbeddings, saveSearchSettings } from '../lib/search-settings.js';
 import type { AppDeps } from './app.js';
 import {
   generateRefreshToken,
@@ -228,18 +228,20 @@ function byteLength(s: string): number {
 export function registerRoutes(app: Hono, deps: AppDeps): void {
   const { config, db, boss } = deps;
 
-  // ---- 检索（SEARCH-VECTOR-DESIGN §5.2/§7.1）：EmbeddingProvider 按 env 选择，
-  //      'none' = 向量能力整体下线（语义分支自动降级关键词）；查询侧嵌入走同 Provider ----
-  const embeddings = createEmbeddingProvider({
-    provider: config.EMBEDDING_PROVIDER,
-    baseUrl: config.EMBEDDING_BASE_URL,
-    apiKey: config.EMBEDDING_API_KEY,
-    model: config.EMBEDDING_MODEL,
-    dim: config.EMBEDDING_DIM,
-    batchSize: config.EMBEDDING_BATCH_SIZE,
-    timeoutMs: config.EMBEDDING_TIMEOUT_MS,
-  });
-  const searchService = new PgSearchService(db, embeddings, config.SEARCH_FTS_CONFIG);
+  // ---- 检索（SEARCH-VECTOR-DESIGN §5.2/§7.1/§15）：运行时配置 = env 默认 ⊕ 管理端覆盖
+  //      （platform_settings，10s TTL）；查询侧每次 search 取一次旗标，改配置无需重启 ----
+  const searchService = new PgSearchService(
+    db,
+    async () => {
+      const settings = await getSearchSettings(db, process.env);
+      return {
+        embeddings: resolveEmbeddings(settings),
+        vectorEnabled: settings.vectorEnabled,
+        semanticMinScore: settings.semanticMinScore,
+      };
+    },
+    config.SEARCH_FTS_CONFIG,
+  );
 
   // ---- 健康（SYS） ----
   app.get('/healthz', (c) => c.json({ ok: true }));
@@ -2483,13 +2485,6 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
     denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改检索配置');
 
-    if (parsed.data.vector && config.EMBEDDING_PROVIDER === 'none') {
-      return c.json(
-        { code: 'EMBEDDING_NOT_CONFIGURED', message: '未配置嵌入服务（EMBEDDING_PROVIDER），无法开启向量检索' },
-        422,
-      );
-    }
-
     const [project] = await db
       .select({ searchConfig: projects.searchConfig })
       .from(projects)
@@ -2497,7 +2492,27 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .limit(1);
     if (!project) throw new HTTPException(404, { message: 'NOT_FOUND' });
 
-    const next = { fts: true, vector: parsed.data.vector };
+    // 合并式更新：开关 / chunk 参数可独立提交；开启向量需平台嵌入服务可用（env 或管理端运行时配置）
+    const runtime = await getSearchSettings(db, process.env);
+    const wantVector = parsed.data.vector ?? project.searchConfig.vector;
+    if (wantVector && (runtime.provider === 'none' || !runtime.vectorEnabled)) {
+      return c.json(
+        {
+          code: runtime.vectorEnabled ? 'EMBEDDING_NOT_CONFIGURED' : 'VECTOR_GLOBALLY_DISABLED',
+          message: runtime.vectorEnabled
+            ? '未配置嵌入服务（管理端「检索与任务」或 EMBEDDING_PROVIDER），无法开启向量检索'
+            : '平台已全局暂停向量检索（管理端可恢复）',
+        },
+        422,
+      );
+    }
+
+    const next = {
+      fts: true,
+      vector: wantVector,
+      chunkTokens: parsed.data.chunkTokens ?? project.searchConfig.chunkTokens ?? 512,
+      overlapTokens: parsed.data.overlapTokens ?? project.searchConfig.overlapTokens ?? 50,
+    };
     await db.update(projects).set({ searchConfig: next, updatedAt: new Date() }).where(eq(projects.id, projectId));
 
     let build: typeof indexBuilds.$inferSelect | null = null;
@@ -2600,6 +2615,195 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .where(and(eq(indexBuilds.projectId, projectId), inArray(indexBuilds.status, ['pending', 'running'])))
       .returning({ id: indexBuilds.id });
     return c.json({ ok: true, canceled: updated.length });
+  });
+
+  // ---- 修复缺口（构建任务便捷管理）：单项目即时对账 —— 缺失/待嵌/模型不符的文档自动补齐入队 ----
+  app.post('/api/v1/projects/:id/search-index/repair', async (c) => {
+    const projectId = c.req.param('id')!;
+    const userId = c.get('userId') as string;
+    const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+    denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修复索引');
+    const runtime = await getSearchSettings(db, process.env);
+    if (!runtime.vectorEnabled) {
+      return c.json({ code: 'VECTOR_GLOBALLY_DISABLED', message: '平台已全局暂停向量检索' }, 422);
+    }
+    const stale = (await db.execute(
+      sql`SELECT d.id FROM documents d
+          WHERE d.project_id = ${projectId} AND d.deleted_at IS NULL AND d.kind = 'text' AND coalesce(d.content, '') <> ''
+          AND (
+            NOT EXISTS (
+              SELECT 1 FROM document_chunks c WHERE c.document_id = d.id AND c.embedding_model = ${runtime.model}
+            )
+            OR EXISTS (
+              SELECT 1 FROM document_chunks c
+              WHERE c.document_id = d.id AND (c.embedding IS NULL OR c.embedding_model <> ${runtime.model})
+            )
+          )
+          LIMIT 1000`,
+    )) as unknown as Array<{ id: string }>;
+    if (stale.length > 0) await enqueueSearchIndex(boss, stale.map((r) => r.id));
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.search_index_repair',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { queuedDocs: stale.length },
+    });
+    return c.json({ ok: true, queuedDocs: stale.length });
+  });
+
+  // ---- 管理端「检索与任务」（SEARCH-VECTOR-DESIGN §15）：全局配置 · 队列视图 · 任务视图 ----
+  app.get('/api/v1/admin/search/overview', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const runtime = await getSearchSettings(db, process.env);
+    // apiKey 不回显明文：masked 提示是否已配置 + 尾 4 位
+    const masked = {
+      ...runtime,
+      apiKey: runtime.apiKey ? `***${runtime.apiKey.slice(-4)}` : '',
+      apiKeySet: !!runtime.apiKey,
+    };
+
+    const [stats] = (
+      (await db.execute(sql`
+        SELECT
+          (SELECT count(*)::int FROM document_chunks) AS total_chunks,
+          (SELECT count(*)::int FROM document_chunks WHERE embedding IS NULL) AS pending_chunks,
+          (SELECT count(*)::int FROM projects WHERE deleted_at IS NULL AND search_config->>'vector' = 'true') AS vector_projects,
+          (SELECT count(*)::int FROM index_builds WHERE status IN ('pending','running')) AS active_builds,
+          (SELECT coalesce(sum(failed_docs), 0)::int FROM index_builds WHERE status IN ('done','failed')) AS build_failed_docs,
+          EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'chinese_zh'
+                  AND cfgparser = (SELECT oid FROM pg_ts_parser WHERE prsname = 'zhparser')) AS zhparser
+      `)) as unknown as Array<{ total_chunks: number; pending_chunks: number; vector_projects: number; active_builds: number; build_failed_docs: number; zhparser: boolean }>
+    ) ?? { total_chunks: 0, pending_chunks: 0, vector_projects: 0, active_builds: 0, build_failed_docs: 0, zhparser: false };
+
+    // 队列积压（pg-boss v10：pgboss.job.name/state；结构变差不致 500）
+    let queues: Array<{ name: string; state: string; count: number }> = [];
+    try {
+      queues = (await db.execute(
+        sql`SELECT name, state::text AS state, count(*)::int AS count FROM pgboss.job
+            WHERE name IN ('search-index','search-build','search-reconcile') AND state NOT IN ('completed')
+            GROUP BY name, state ORDER BY name, state`,
+      )) as unknown as Array<{ name: string; state: string; count: number }>;
+    } catch {
+      queues = [];
+    }
+
+    const builds = (await db.execute(sql`
+      SELECT b.id, b.project_id, p.name AS project_name, b.kind, b.status, b.total_docs, b.done_docs,
+             b.failed_docs, b.error, b.params, b.created_at, b.started_at, b.finished_at
+      FROM index_builds b
+      JOIN projects p ON p.id = b.project_id
+      ORDER BY b.created_at DESC
+      LIMIT 50
+    `)) as unknown as Array<{
+      id: string; project_id: string; project_name: string; kind: string; status: string;
+      total_docs: number; done_docs: number; failed_docs: number; error: string | null;
+      params: Record<string, unknown>; created_at: string; started_at: string | null; finished_at: string | null;
+    }>;
+
+    return c.json({
+      config: masked,
+      columnDim: config.EMBEDDING_DIM,
+      stats: {
+        totalChunks: Number(stats?.total_chunks ?? 0),
+        pendingChunks: Number(stats?.pending_chunks ?? 0),
+        vectorProjects: Number(stats?.vector_projects ?? 0),
+        activeBuilds: Number(stats?.active_builds ?? 0),
+        buildFailedDocs: Number(stats?.build_failed_docs ?? 0),
+        zhparser: stats?.zhparser ?? false,
+      },
+      queues,
+      builds,
+    });
+  });
+
+  // 全局配置更新（合并写；apiKey 缺省 = 保留现值；模型/批量/超时即时生效无需重启）
+  app.put('/api/v1/admin/search/config', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const userId = c.get('userId') as string;
+    const body = (await c.req.json().catch(() => null)) as {
+      provider?: string; baseUrl?: string; apiKey?: string; model?: string;
+      batchSize?: number; timeoutMs?: number; vectorEnabled?: boolean;
+      debounceSeconds?: number; semanticMinScore?: number;
+    } | null;
+    if (!body) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 请求体需为 JSON' });
+    if (body.provider !== undefined && !['none', 'openai-compatible'].includes(body.provider)) {
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: provider 需为 none | openai-compatible' });
+    }
+    if (body.semanticMinScore !== undefined && (!Number.isFinite(body.semanticMinScore) || body.semanticMinScore < 0 || body.semanticMinScore > 0.95)) {
+      throw new HTTPException(400, { message: 'VALIDATION_FAILED: semanticMinScore 需在 [0, 0.95]' });
+    }
+    const runtime = await saveSearchSettings(db, process.env, {
+      embedding: {
+        provider: body.provider,
+        baseUrl: body.baseUrl,
+        apiKey: body.apiKey,
+        model: body.model,
+        batchSize: body.batchSize !== undefined ? Math.max(1, Math.floor(body.batchSize)) : undefined,
+        timeoutMs: body.timeoutMs !== undefined ? Math.max(1000, Math.floor(body.timeoutMs)) : undefined,
+      },
+      vectorEnabled: body.vectorEnabled,
+      debounceSeconds: body.debounceSeconds !== undefined ? Math.max(0, Math.floor(body.debounceSeconds)) : undefined,
+      semanticMinScore: body.semanticMinScore,
+    });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'admin.search_config_change',
+      resourceType: 'platform_setting',
+      resourceId: null,
+      meta: {
+        provider: runtime.provider, model: runtime.model, vectorEnabled: runtime.vectorEnabled,
+        debounceSeconds: runtime.debounceSeconds, semanticMinScore: runtime.semanticMinScore,
+        baseUrl: runtime.baseUrl || null,
+      },
+    });
+    return c.json({
+      config: { ...runtime, apiKey: runtime.apiKey ? `***${runtime.apiKey.slice(-4)}` : '', apiKeySet: !!runtime.apiKey },
+    });
+  });
+
+  // 立即对账（全局）：夜间 cron 的手动触发入口
+  app.post('/api/v1/admin/search/reconcile', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    await boss.send('search-reconcile', { trigger: 'admin-manual' });
+    await db.insert(auditLogs).values({
+      actorId: c.get('userId') as string,
+      action: 'admin.search_reconcile_trigger',
+      resourceType: 'platform_setting',
+      resourceId: null,
+    });
+    return c.json({ ok: true });
+  });
+
+  // 失败/取消的构建任务重试：vector 从断点续跑；vector-rebuild 从头再来
+  app.post('/api/v1/admin/search/builds/:buildId/retry', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const userId = c.get('userId') as string;
+    const buildId = c.req.param('buildId')!;
+    const [build] = await db.select().from(indexBuilds).where(eq(indexBuilds.id, buildId)).limit(1);
+    if (!build) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    if (!['failed', 'canceled'].includes(build.status)) {
+      return c.json({ code: 'NOT_RETRYABLE', message: '仅失败或已取消的构建可重试' }, 409);
+    }
+    const [retry] = await db
+      .insert(indexBuilds)
+      .values({
+        projectId: build.projectId,
+        kind: build.kind,
+        status: 'pending',
+        cursorDoc: build.kind === 'vector' ? build.cursorDoc : null, // vector 断点续跑
+        params: build.params,
+      })
+      .returning();
+    await boss.send('search-build', { buildId: retry!.id }, { singletonKey: retry!.id });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'admin.search_build_retry',
+      resourceType: 'project',
+      resourceId: build.projectId,
+      meta: { fromBuildId: build.id, toBuildId: retry!.id },
+    });
+    return c.json({ build: retry }, 201);
   });
 
   // ---- DELETE projects/:id（PLAN 5.2.1：ProjectLayout 更多菜单 / 设置危险区删除项目） ----

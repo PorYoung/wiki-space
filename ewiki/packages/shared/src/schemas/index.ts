@@ -152,15 +152,34 @@ export const UpdateProjectSchema = z
   .strict();
 export type UpdateProjectBody = z.infer<typeof UpdateProjectSchema>;
 
-/** 检索配置（SEARCH-VECTOR-DESIGN §5.1）：knowledge-base 粒度开关；
- *   fts 默认开（生成列零管道）；vector 默认关（embedding 按需外呼）。 */
+/** 检索配置（SEARCH-VECTOR-DESIGN §5.1 / §15）：knowledge-base 粒度开关 + 构建参数；
+ *   fts 默认开（生成列零管道）；vector 默认关（embedding 按需外呼）；
+ *   chunkTokens/overlapTokens 为向量构建参数，变更后需重建方生效（index_builds.params 比对提示）。 */
 export const SearchConfigSchema = z.object({
   fts: z.boolean().default(true),
   vector: z.boolean().default(false),
+  chunkTokens: z.number().int().min(128).max(2048).default(512),
+  overlapTokens: z.number().int().min(0).max(256).default(50),
 });
 export type SearchConfig = z.infer<typeof SearchConfigSchema>;
 
-export const UpdateSearchConfigSchema = z.object({ vector: z.boolean() }).strict();
+export const UpdateSearchConfigSchema = z
+  .object({
+    vector: z.boolean().optional(),
+    chunkTokens: z.number().int().min(128).max(2048).optional(),
+    overlapTokens: z.number().int().min(0).max(256).optional(),
+  })
+  .strict()
+  .refine((v) => v.vector !== undefined || v.chunkTokens !== undefined || v.overlapTokens !== undefined, {
+    message: '至少提供一个字段',
+  })
+  .refine(
+    (v) =>
+      v.overlapTokens === undefined ||
+      v.chunkTokens === undefined ||
+      v.overlapTokens < (v.chunkTokens ?? Infinity),
+    { message: 'overlapTokens 需小于 chunkTokens' },
+  );
 export type UpdateSearchConfigBody = z.infer<typeof UpdateSearchConfigSchema>;
 
 /** 归属转移（TEAM-PERMISSIONS-DESIGN §5.2 P3'）：个人 → 团队 / 团队 → 个人（本人） */

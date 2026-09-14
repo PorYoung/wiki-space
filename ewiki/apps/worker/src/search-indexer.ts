@@ -64,7 +64,11 @@ export async function reindexDocument(deps: ReindexDeps, documentId: string): Pr
     return { action: 'clear', chunks: deleted.length, embedded: 0 };
   }
 
-  const chunks = chunkMarkdown(doc.content ?? '');
+  // chunk 参数按项目配置（§15 构建配置）；缺省 512/50（与迁移默认一致）
+  const chunks = chunkMarkdown(doc.content ?? '', {
+    targetTokens: doc.searchConfig?.chunkTokens ?? 512,
+    overlapTokens: doc.searchConfig?.overlapTokens ?? 50,
+  });
   const existingRows = await db
     .select({
       chunkNo: documentChunks.chunkNo,

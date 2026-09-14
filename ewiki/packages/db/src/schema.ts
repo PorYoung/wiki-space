@@ -28,10 +28,13 @@ const vectorCol = customType<{ data: number[]; driverData: string }>({
   toDriver: (v) => `[${v.join(',')}]`,
 });
 
-/** 知识库检索开关（ADR-S4/需求 1.2-6）：fts 随写自动增量（生成列）；vector 按库显式开启 */
+/** 知识库检索开关 + 向量构建参数（§5.1/§15）：fts 随写自动增量（生成列）；
+ *  vector 按库显式开启；chunk 参数变更后需重建方生效（与 index_builds.params 比对提示） */
 export interface ProjectSearchConfig {
   fts: boolean;
   vector: boolean;
+  chunkTokens: number;
+  overlapTokens: number;
 }
 
 export const users = pgTable('users', {
@@ -141,7 +144,7 @@ export const projects = pgTable(
     searchConfig: jsonb('search_config')
       .$type<ProjectSearchConfig>()
       .notNull()
-      .default({ fts: true, vector: false }),
+      .default({ fts: true, vector: false, chunkTokens: 512, overlapTokens: 50 }),
     deletedAt: ts('deleted_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
@@ -507,6 +510,8 @@ export const indexBuilds = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     kind: text('kind').notNull().default('vector'), // vector | vector-rebuild
     status: text('status').notNull().default('pending'), // pending | running | done | failed | canceled
+    // 构建时参数快照（{chunkTokens,overlapTokens,model}）：与当前项目配置比对 → "配置已变更需重建"提示
+    params: jsonb('params').notNull().default({}),
     totalDocs: integer('total_docs').notNull().default(0),
     doneDocs: integer('done_docs').notNull().default(0),
     failedDocs: integer('failed_docs').notNull().default(0),

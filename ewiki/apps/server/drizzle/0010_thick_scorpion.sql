@@ -1,0 +1,1 @@
+ALTER TABLE "projects" ALTER COLUMN "search_config" SET DEFAULT '{"fts":true,"vector":false,"chunkTokens":512,"overlapTokens":50}'::jsonb;

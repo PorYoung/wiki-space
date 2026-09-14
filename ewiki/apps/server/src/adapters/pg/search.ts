@@ -54,10 +54,18 @@ function decodeHeadline(headline: string | null): string {
 
 type EffectiveMode = 'keyword' | 'hybrid' | 'semantic';
 
+/** 运行时检索旗标（§15 管理端全局配置，10s TTL 生效）：语义分支总开关 + 嵌入器 + 阈值 */
+export interface SearchRuntimeFlags {
+  embeddings: EmbeddingProvider | null;
+  vectorEnabled: boolean;
+  semanticMinScore: number;
+}
+
 export class PgSearchService implements SearchService {
   constructor(
     private readonly db: PostgresJsDatabase<typeof schema>,
-    private readonly embeddings: EmbeddingProvider | null = null,
+    /** 运行时配置解析器（每次 search 调用取一次；实现侧自带短 TTL 缓存） */
+    private readonly getRuntime: () => Promise<SearchRuntimeFlags>,
     /** 与迁移 0008 生成列的分词配置保持一致；chinese_zh 由迁移保证存在（zhparser 缺席时为 simple 拷贝） */
     private readonly ftsConfig: string = 'chinese_zh',
   ) {}
@@ -70,19 +78,17 @@ export class PgSearchService implements SearchService {
     if (!q) return { items: [], hasMore: false, tookMs: Date.now() - started };
 
     const mode = req.mode ?? 'auto';
-    const minScore = Math.max(
-      0,
-      Math.min(0.95, Number(process.env.SEARCH_SEMANTIC_MIN_SCORE ?? '0.3') || 0.3),
-    );
+    const runtime = await this.getRuntime();
+    const minScore = runtime.semanticMinScore;
 
-    // ---- 向量分支可用性：Provider 已配置 且 目标范围内至少一个库开启 vector ----
-    let semanticAvailable = this.embeddings !== null;
+    // ---- 向量分支可用性：全局开关开启 且 Provider 已配置 且 目标范围内至少一个库开启 vector ----
+    let semanticAvailable = runtime.vectorEnabled && runtime.embeddings !== null;
     let degraded: SearchResponse['degraded'];
+    if (runtime.embeddings === null) degraded = 'provider-not-configured';
+    else if (!runtime.vectorEnabled) degraded = 'vector-disabled';
     if (semanticAvailable) {
       semanticAvailable = await this.anyProjectVectorEnabled(req);
-      if (!semanticAvailable) degraded = 'vector-disabled';
-    } else {
-      degraded = 'provider-not-configured';
+      if (!semanticAvailable && !degraded) degraded = 'vector-disabled';
     }
 
     let effectiveMode: EffectiveMode =
@@ -95,7 +101,7 @@ export class PgSearchService implements SearchService {
     const semByDoc = new Map<string, SemRow>();
     if (effectiveMode !== 'keyword') {
       try {
-        const rows = (await this.semanticSearch(q, req, minScore)).filter((r) => r.score >= minScore);
+        const rows = (await this.semanticSearch(q, req, minScore, runtime.embeddings)).filter((r) => r.score >= minScore);
         for (const r of rows) {
           const best = semByDoc.get(r.document_id);
           if (!best || r.score > best.score) semByDoc.set(r.document_id, r);
@@ -220,9 +226,14 @@ export class PgSearchService implements SearchService {
     return [...rows, ...fallback];
   }
 
-  private async semanticSearch(q: string, req: SearchRequest, minScore: number): Promise<SemRow[]> {
-    if (!this.embeddings) return [];
-    const [vec] = await this.embeddings.embed([q]);
+  private async semanticSearch(
+    q: string,
+    req: SearchRequest,
+    minScore: number,
+    embeddings: EmbeddingProvider | null,
+  ): Promise<SemRow[]> {
+    if (!embeddings) return [];
+    const [vec] = await embeddings.embed([q]);
     if (!vec) return [];
     const vecText = `[${vec.join(',')}]`;
     const fetchN = 96; // chunk 级候选池，文档聚合后约 30~60 个文档

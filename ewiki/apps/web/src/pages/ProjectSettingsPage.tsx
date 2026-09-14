@@ -705,13 +705,14 @@ interface IndexBuild {
   doneDocs: number;
   failedDocs: number;
   error: string | null;
+  params: Record<string, unknown> | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
 }
 
 interface SearchIndexInfo {
-  searchConfig: { fts: boolean; vector: boolean };
+  searchConfig: { fts: boolean; vector: boolean; chunkTokens: number; overlapTokens: number };
   stats: { total_docs: number; total_chunks: number; pending_chunks: number };
   builds: IndexBuild[];
 }
@@ -739,21 +740,50 @@ function VectorSearchSection({ projectId, canManage }: { projectId: string; canM
     },
   });
 
+  // 构建配置（可独立于开关保存）：chunk 参数 + 开关，合并式 PUT
+  const [chunkTokens, setChunkTokens] = useState<number | null>(null);
+  const [overlapTokens, setOverlapTokens] = useState<number | null>(null);
+  const [configDirty, setConfigDirty] = useState(false);
+
   const configMutation = useMutation({
-    mutationFn: (vector: boolean) =>
-      apiFetch<{ searchConfig: { fts: boolean; vector: boolean } }>(`/api/v1/projects/${projectId}/search-config`, {
+    mutationFn: (body: { vector?: boolean; chunkTokens?: number; overlapTokens?: number }) =>
+      apiFetch<{ searchConfig: SearchIndexInfo['searchConfig'] }>(`/api/v1/projects/${projectId}/search-config`, {
         method: 'PUT',
-        body: JSON.stringify({ vector }),
+        body: JSON.stringify(body),
       }),
-    onSuccess: (data) => {
-      showToast(data.searchConfig.vector ? '向量检索已开启，构建任务已入队' : '向量检索已关闭');
+    onSuccess: (data, vars) => {
+      showToast(
+        vars.vector === true
+          ? '向量检索已开启，构建任务已入队'
+          : vars.vector === false
+            ? '向量检索已关闭'
+            : '构建配置已保存',
+      );
+      setChunkTokens(null);
+      setOverlapTokens(null);
+      setConfigDirty(false);
       void queryClient.invalidateQueries({ queryKey: ['search-index', projectId] });
     },
     onError: async (err) => {
-      // EMBEDDING_NOT_CONFIGURED（422）：提示管理员配置嵌入服务
       const msg = err instanceof Error ? err.message : '';
-      showToast(/EMBEDDING/.test(msg) ? '平台未配置嵌入服务（EMBEDDING_PROVIDER），无法开启' : '配置更新失败，请重试');
+      showToast(
+        /VECTOR_GLOBALLY_DISABLED/.test(msg)
+          ? '平台已全局暂停向量检索（联系管理员）'
+          : /EMBEDDING/.test(msg)
+            ? '平台未配置嵌入服务，无法开启'
+            : '配置更新失败，请重试',
+      );
     },
+  });
+
+  const repairMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ queuedDocs: number }>(`/api/v1/projects/${projectId}/search-index/repair`, { method: 'POST' }),
+    onSuccess: (r) => {
+      showToast(r.queuedDocs > 0 ? `已入队修复 ${r.queuedDocs} 篇文档` : '索引无缺口，无需修复');
+      void queryClient.invalidateQueries({ queryKey: ['search-index', projectId] });
+    },
+    onError: () => showToast('修复触发失败'),
   });
 
   const rebuildMutation = useMutation({
@@ -809,7 +839,7 @@ function VectorSearchSection({ projectId, canManage }: { projectId: string; canM
             className="h-4 w-4 accent-primary-500 shrink-0"
             checked={vectorEnabled}
             disabled={configMutation.isPending || infoQuery.isLoading}
-            onChange={(e) => configMutation.mutate(e.target.checked)}
+            onChange={(e) => configMutation.mutate({ vector: e.target.checked })}
           />
         ) : (
           <span className="text-[11px] text-neutral-400 shrink-0">仅维护者可配置</span>
@@ -822,6 +852,109 @@ function VectorSearchSection({ projectId, canManage }: { projectId: string; canM
           开启后，本库文档内容将分批发送至平台配置的嵌入服务用于生成向量（内网部署时数据不出集群）。
         </div>
       )}
+
+      {/* 构建配置（§15 便捷设置）：chunk 切分参数；变更后需重新构建生效 */}
+      <div className="mt-4 rounded-lg border p-4" style={{ borderColor: 'var(--border-soft)' }}>
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-xs font-medium text-neutral-700">构建配置（chunk 切分）</span>
+          {canManage ? (
+            <button
+              type="button"
+              className="text-[11px] text-primary-600 hover:underline disabled:opacity-40"
+              disabled={!configDirty || configMutation.isPending}
+              onClick={() =>
+                configMutation.mutate({
+                  chunkTokens: chunkTokens ?? info?.searchConfig.chunkTokens ?? 512,
+                  overlapTokens: overlapTokens ?? info?.searchConfig.overlapTokens ?? 50,
+                })
+              }
+            >
+              保存配置
+            </button>
+          ) : null}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="text-[11px]">
+            <span className="mb-1 block text-neutral-500">目标 token 数（128–2048）</span>
+            <input
+              type="number"
+              className="input !h-8 !text-xs"
+              min={128}
+              max={2048}
+              disabled={!canManage || infoQuery.isLoading}
+              value={chunkTokens ?? info?.searchConfig.chunkTokens ?? 512}
+              onChange={(e) => { setConfigDirty(true); setChunkTokens(Number(e.target.value)); }}
+            />
+          </label>
+          <label className="text-[11px]">
+            <span className="mb-1 block text-neutral-500">重叠 token 数（&lt; 目标值）</span>
+            <input
+              type="number"
+              className="input !h-8 !text-xs"
+              min={0}
+              max={256}
+              disabled={!canManage || infoQuery.isLoading}
+              value={overlapTokens ?? info?.searchConfig.overlapTokens ?? 50}
+              onChange={(e) => { setConfigDirty(true); setOverlapTokens(Number(e.target.value)); }}
+            />
+          </label>
+        </div>
+        {(() => {
+          const last = info?.builds.find((b) => b.status === 'done');
+          if (!last?.params) return null;
+          const drift =
+            (Number(last.params.chunkTokens ?? 512)) !== (chunkTokens ?? info?.searchConfig.chunkTokens ?? 512) ||
+            (Number(last.params.overlapTokens ?? 50)) !== (overlapTokens ?? info?.searchConfig.overlapTokens ?? 50);
+          return drift ? (
+            <div className="mt-2 text-[11px] text-amber-600">
+              配置与上次构建（chunk {String(last.params.chunkTokens ?? 512)}/overlap {String(last.params.overlapTokens ?? 50)}）不一致 —— 保存后请执行「重新构建」以生效。
+            </div>
+          ) : null;
+        })()}
+      </div>
+
+      {/* 修复缺口 + 构建历史（§15 任务便捷管理） */}
+      <div className="mt-4">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">构建历史</span>
+          {vectorEnabled && canManage ? (
+            <button
+              type="button"
+              className="text-[11px] text-primary-600 hover:underline disabled:opacity-40"
+              disabled={repairMutation.isPending}
+              onClick={() => repairMutation.mutate()}
+              title="即时对账：补齐缺失/待嵌入/模型不符的段落向量"
+            >
+              修复缺口
+            </button>
+          ) : null}
+        </div>
+        {(info?.builds ?? []).length === 0 ? (
+          <div className="text-[11px] text-neutral-400">暂无构建记录</div>
+        ) : (
+          <div className="space-y-1">
+            {info?.builds.map((b) => {
+              const pct = b.totalDocs > 0 ? Math.round((b.doneDocs / b.totalDocs) * 100) : 0;
+              return (
+                <div
+                  key={b.id}
+                  className="flex items-center gap-2 rounded-md border px-3 py-1.5 text-[11px]"
+                  style={{ borderColor: 'var(--border-soft)' }}
+                >
+                  <span className={`rounded-full px-1.5 py-0.5 font-medium ${BUILD_STATUS_META[b.status].cls}`}>
+                    {BUILD_STATUS_META[b.status].label}
+                  </span>
+                  <span className="text-neutral-500">{b.kind === 'vector-rebuild' ? '重建' : '构建'}</span>
+                  <span className="tabular-nums text-neutral-500">{b.doneDocs}/{b.totalDocs || '?'}（{pct}%）</span>
+                  {b.failedDocs ? <span className="text-rose-600">失败 {b.failedDocs}</span> : null}
+                  <span className="ml-auto text-neutral-400">{relativeTime(b.finishedAt ?? b.createdAt)}</span>
+                  {b.error ? <span className="max-w-[180px] truncate text-rose-500" title={b.error}>{b.error}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {/* 构建进度卡 */}
       {activeBuild ? (

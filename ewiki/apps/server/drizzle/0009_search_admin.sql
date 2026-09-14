@@ -1,0 +1,1 @@
+ALTER TABLE "index_builds" ADD COLUMN "params" jsonb DEFAULT '{}'::jsonb NOT NULL;

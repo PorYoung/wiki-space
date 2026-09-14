@@ -138,8 +138,10 @@ export function fuseRRF<K>(lists: K[][], k = 60, limit = 20): Array<FusedItem<K>
 }
 
 // ---------------------------------------------------------------------------
-// 防抖入队（§6.1/§6.2）：写路径唯一挂钩形态。singletonKey=文档Id + singletonSeconds 窗口，
-//   窗口内同文档重复变更合并为一次索引任务；执行侧读 DB 最新态（latest-wins 幂等）。
+// 防抖入队（§6.1/§6.2）：写路径唯一挂钩形态。
+//   singletonKey=文档Id + startAfter=防抖秒数：延迟执行期间同文档重复变更被去重合并，
+//   job 执行时读 DB 最新态（latest-wins）；任务一旦完成，其后的新变更必然产生新任务
+//   —— 不用 singletonSeconds（其窗口含已完成任务，会吞掉窗口内的后续变更，造成丢更新）。
 //   入队失败不抛出：索引是旁路能力，由夜间对账兜底（§6.4）。
 // ---------------------------------------------------------------------------
 
@@ -163,7 +165,7 @@ export function enqueueSearchIndex(
           'search-index',
           { documentId },
           debounceSeconds > 0
-            ? { singletonKey: documentId, singletonSeconds: debounceSeconds }
+            ? { singletonKey: documentId, startAfter: debounceSeconds }
             : { singletonKey: documentId },
         );
       } catch (err) {

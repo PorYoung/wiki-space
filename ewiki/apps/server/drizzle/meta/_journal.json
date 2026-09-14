@@ -64,6 +64,20 @@
       "when": 1789400206246,
       "tag": "0008_search_and_vector",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789413417930,
+      "tag": "0009_search_admin",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789413709274,
+      "tag": "0010_thick_scorpion",
+      "breakpoints": true
     }
   ]
 }

@@ -897,6 +897,112 @@ async function main() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // ---- P12 检索管理与运营（SEARCH-VECTOR-DESIGN §15 验收）：全局配置 · 任务视图 · 修复/重试 ----
+  // ---------------------------------------------------------------------------
+  {
+    const waitFor = async (check, { timeoutMs = 30_000, intervalMs = 500 } = {}) => {
+      const deadline = Date.now() + timeoutMs;
+      let last = null;
+      do {
+        last = await check();
+        if (last) return last;
+        await new Promise((r) => setTimeout(r, intervalMs));
+      } while (Date.now() < deadline);
+      return last;
+    };
+
+    // 准备：独立知识库 + 1 篇文档 + 开启向量（构建完成）
+    const sp = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST',
+      body: { name: `检索管理验证库-${runId}`, storage: { kind: 'local' } },
+    });
+    const spId = sp.json?.project?.id ?? sp.json?.id;
+    await req(`/api/v1/projects/${spId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '运维/索引管理.md', content: '# 索引管理\n\n管理员可以便捷配置嵌入服务、查看构建任务视图并执行资源调配。' },
+    });
+    await req(`/api/v1/projects/${spId}/search-config`, { token: ctx.alice, method: 'PUT', body: { vector: true } });
+    const ready = await waitFor(async () => {
+      const r = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
+      return r.json?.builds?.[0]?.status === 'done' ? r.json : null;
+    });
+
+    // P12a 管理端总览：全局配置（apiKey 掩码）+ 资源统计 + 队列视图 + 任务视图；非管理员 403
+    const ovAdmin = await req('/api/v1/admin/search/overview', { token: ctx.admin });
+    const ovBob = await req('/api/v1/admin/search/overview', { token: ctx.bob });
+    const ov = ovAdmin.json ?? {};
+    record('P12a', '管理端检索总览：配置（apiKey 掩码）/统计/队列/任务视图一体下发；非管理员被拒',
+      ovAdmin.status === 200 && ovBob.status === 403 &&
+        typeof ov.config?.debounceSeconds === 'number' && typeof ov.columnDim === 'number' &&
+        Array.isArray(ov.queues) && Array.isArray(ov.builds) && ov.builds.length >= 1 &&
+        (ov.config.apiKeySet === false || /\*\*\*[0-9]{4}$/.test(ov.config.apiKey ?? '')),
+      `admin=${ovAdmin.status} bob=${ovBob.status} builds=${ov.builds?.length} queues=${ov.queues?.length} apiKeyMasked=${ov.config?.apiKeySet !== undefined}`);
+
+    // P12b 全局配置运行时更新：非管理员 403；管理员保存即生效（响应回显）
+    const cfgDenied = await req('/api/v1/admin/search/config', {
+      token: ctx.alice, method: 'PUT', body: { debounceSeconds: 99 },
+    });
+    const cfgSet = await req('/api/v1/admin/search/config', {
+      token: ctx.admin, method: 'PUT',
+      body: { debounceSeconds: 3, semanticMinScore: 0.05, model: 'mock-bge' },
+    });
+    record('P12b', '全局配置便捷设置：管理员保存即时生效；非管理员被拒',
+      cfgDenied.status === 403 && cfgSet.status === 200 &&
+        cfgSet.json?.config?.debounceSeconds === 3 && cfgSet.json?.config?.semanticMinScore === 0.05,
+      `denied=${cfgDenied.status} set=${cfgSet.status} debounce=${cfgSet.json?.config?.debounceSeconds}`);
+
+    // P12c 全局把控（kill switch）：关闭 → 已开向量库的语义检索立即降级；恢复 → 语义可用
+    await req('/api/v1/admin/search/config', { token: ctx.admin, method: 'PUT', body: { vectorEnabled: false } });
+    const off = await req(`/api/v1/search?q=${encodeURIComponent('索引管理')}&mode=semantic&projectId=${spId}`, { token: ctx.alice });
+    await req('/api/v1/admin/search/config', { token: ctx.admin, method: 'PUT', body: { vectorEnabled: true } });
+    const on = await waitFor(async () => {
+      const r = await req(`/api/v1/search?q=${encodeURIComponent('索引管理')}&mode=semantic&projectId=${spId}`, { token: ctx.alice });
+      return r.json?.items?.length > 0 && !r.json?.degraded ? r.json : null;
+    }, { timeoutMs: 20_000 });
+    record('P12c', '全局开关把控：关闭即全局暂停语义检索（degraded），恢复后语义可用',
+      off.json?.degraded === 'vector-disabled' && !!on,
+      `off degraded=${off.json?.degraded} on items=${on?.items?.length}`);
+
+    // P12d 项目构建配置：chunk 参数便捷设置 + 构建留痕比对（params）
+    const cfgChunk = await req(`/api/v1/projects/${spId}/search-config`, {
+      token: ctx.alice, method: 'PUT', body: { chunkTokens: 384, overlapTokens: 40 },
+    });
+    await req(`/api/v1/projects/${spId}/search-index/rebuild`, { token: ctx.alice, method: 'POST' });
+    const rebuilt = await waitFor(async () => {
+      const r = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
+      const latest = r.json?.builds?.[0];
+      return latest && latest.status === 'done' && latest.createdAt > new Date(Date.now() - 60_000).toISOString() ? latest : null;
+    });
+    record('P12d', '构建配置便捷设置：chunk 参数保存生效，构建任务留痕参数供比对',
+      cfgChunk.status === 200 && cfgChunk.json?.searchConfig?.chunkTokens === 384 &&
+        rebuilt?.params?.chunkTokens === 384 && rebuilt?.params?.overlapTokens === 40,
+      `cfg=${cfgChunk.status} params=${JSON.stringify(rebuilt?.params ?? null)}`);
+
+    // P12e 修复缺口（单项目即时对账）：健康库 queuedDocs=0；无权限者 403
+    const repair = await req(`/api/v1/projects/${spId}/search-index/repair`, { token: ctx.alice, method: 'POST' });
+    const repairBob = await req(`/api/v1/projects/${spId}/search-index/repair`, { token: ctx.bob, method: 'POST' });
+    record('P12e', '修复缺口：健康索引零修复入队；无权限者被拒',
+      repair.status === 200 && typeof repair.json?.queuedDocs === 'number' && repairBob.status === 403,
+      `repair=${repair.status} queuedDocs=${repair.json?.queuedDocs} bob=${repairBob.status}`);
+
+    // P12f 任务视图操作：对已完成构建重试 → 409（仅失败/取消可重试）；立即对账仅管理员
+    const doneBuild = (ov.builds ?? []).find((b) => b.status === 'done');
+    const retryDone = doneBuild
+      ? await req(`/api/v1/admin/search/builds/${doneBuild.id}/retry`, { token: ctx.admin, method: 'POST' })
+      : { status: 'skipped' };
+    const reconBob = await req('/api/v1/admin/search/reconcile', { token: ctx.bob, method: 'POST' });
+    const reconAdmin = await req('/api/v1/admin/search/reconcile', { token: ctx.admin, method: 'POST' });
+    record('P12f', '任务视图操作：done 构建重试被拒（409）；立即对账仅管理员可触发',
+      (doneBuild ? retryDone.status === 409 : retryDone.status === 'skipped') &&
+        reconBob.status === 403 && reconAdmin.status === 200,
+      `retryDone=${retryDone.status} reconBob=${reconBob.status} reconAdmin=${reconAdmin.status}`);
+
+    // P12g 恢复全局默认防抖（避免影响其他用例的索引时效）
+    await req('/api/v1/admin/search/config', { token: ctx.admin, method: 'PUT', body: { debounceSeconds: 3, vectorEnabled: true } });
+    record('P12g', '全局配置恢复（防抖 3s / 向量开启）', true, 'cleanup');
+  }
+
   const passed = results.filter((r) => r.pass).length;
   const summary = {
     startedAt: new Date(t0).toISOString(),

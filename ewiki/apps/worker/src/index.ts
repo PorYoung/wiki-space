@@ -30,10 +30,11 @@ import type { BlobStore } from '@ewiki/storage';
 import { runBlobGC } from '@ewiki/server/src/lib/blob-gc.js';
 import { extractDocLinks, resolveFileType, type ImportDocPayload, type Job } from '@ewiki/shared';
 import type { ClassifyProvider, ImportProvider, Notifier, NotificationType } from '@ewiki/shared';
-import { createEmbeddingProvider, enqueueSearchIndex, loadEmbeddingSettings } from '@ewiki/shared';
+import { enqueueSearchIndex } from '@ewiki/shared';
 import { documentChunks, indexBuilds } from '@ewiki/db';
 import { gt, ne } from 'drizzle-orm';
 import { reindexDocument, type ReindexDeps } from './search-indexer.js';
+import { getSearchSettings, resolveEmbeddings, type EffectiveSearchSettings } from '@ewiki/server/src/lib/search-settings.js';
 import { renderSite, type SiteAsset } from '@ewiki/render';
 import { pipeline } from 'node:stream/promises';
 
@@ -76,22 +77,23 @@ function getBlobStore(): BlobStore {
 }
 
 // ---------------------------------------------------------------------------
-// 向量索引（SEARCH-VECTOR-DESIGN §6）：EmbeddingProvider 注册表（ADR-S5，仿 ClassifyProvider）。
-//   EMBEDDING_PROVIDER=none（默认）→ embeddings=null：search-index 仅做 chunk 清理/结构对齐，
-//   search-build/reconcile 直接短路 —— 向量能力整体下线，零外呼。
+// 向量索引（SEARCH-VECTOR-DESIGN §6/§15）：嵌入配置运行时解析（env 默认 ⊕ 管理端覆盖，
+// platform_settings 10s TTL）—— 管理端改 Provider/模型/批量即时生效，无需重启。
+//   vectorEnabled=false（全局暂停）→ 索引任务跳过（不清 chunk，重开后由对账补齐）。
 // ---------------------------------------------------------------------------
 
-const embeddingSettings = loadEmbeddingSettings(process.env);
-const embeddings: Awaited<ReturnType<typeof createEmbeddingProvider>> = createEmbeddingProvider(embeddingSettings);
-if (embeddingSettings.provider !== 'none' && !embeddings) {
-  log('unknown embedding provider, vector search disabled', { provider: embeddingSettings.provider });
+async function currentSearchRuntime(): Promise<{ settings: EffectiveSearchSettings; deps: ReindexDeps }> {
+  const settings = await getSearchSettings(db, process.env);
+  return {
+    settings,
+    deps: {
+      db,
+      embeddings: resolveEmbeddings(settings),
+      embeddingModel: settings.model,
+      batchSize: settings.batchSize,
+    },
+  };
 }
-const reindexDeps: ReindexDeps = {
-  db,
-  embeddings,
-  embeddingModel: embeddingSettings.model,
-  batchSize: embeddingSettings.batchSize,
-};
 
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
 
@@ -1234,7 +1236,12 @@ async function handleGcBlob(job: Job): Promise<void> {
 async function handleSearchIndex(job: Job): Promise<void> {
   const data = job.data as { documentId?: string };
   if (!data.documentId) throw new Error('VALIDATION_FAILED: documentId required');
-  const out = await reindexDocument(reindexDeps, data.documentId);
+  const { settings, deps } = await currentSearchRuntime();
+  if (!settings.vectorEnabled) {
+    log('search-index skipped: vector globally paused', { jobId: job.id, documentId: data.documentId });
+    return;
+  }
+  const out = await reindexDocument(deps, data.documentId);
   log('search-index done', { jobId: job.id, documentId: data.documentId, ...out });
 }
 
@@ -1260,6 +1267,13 @@ async function handleSearchBuild(job: Job): Promise<void> {
       ),
     );
 
+  // 全局暂停：任务保持原状（pending），恢复后经重试/对账继续
+  const runtime0 = await currentSearchRuntime();
+  if (!runtime0.settings.vectorEnabled) {
+    log('search-build paused: vector globally paused', { buildId: build.id });
+    return;
+  }
+
   // vector-rebuild：换模型/修复 → 清空现有 chunk 全量重跑（ADR-S2 维度/模型一致性）
   if (build.kind === 'vector-rebuild') {
     await db.delete(documentChunks).where(eq(documentChunks.projectId, build.projectId));
@@ -1271,9 +1285,24 @@ async function handleSearchBuild(job: Job): Promise<void> {
          WHERE project_id = ${build.projectId} AND deleted_at IS NULL AND kind = 'text' AND coalesce(content, '') <> ''`,
   )) as unknown as Array<{ total: number }>;
   const total = totalRows[0]?.total ?? 0;
+  // 构建参数留痕（§15）：与项目当前配置比对 → 「配置已变更需重建」提示
+  const [projCfgRow] = await db
+    .select({ cfg: projects.searchConfig })
+    .from(projects)
+    .where(eq(projects.id, build.projectId))
+    .limit(1);
   await db
     .update(indexBuilds)
-    .set({ status: 'running', startedAt: new Date(), totalDocs: total })
+    .set({
+      status: 'running',
+      startedAt: new Date(),
+      totalDocs: total,
+      params: {
+        chunkTokens: projCfgRow?.cfg?.chunkTokens ?? 512,
+        overlapTokens: projCfgRow?.cfg?.overlapTokens ?? 50,
+        model: runtime0.settings.model,
+      },
+    })
     .where(eq(indexBuilds.id, build.id));
 
   const BATCH = 50;
@@ -1307,9 +1336,10 @@ async function handleSearchBuild(job: Job): Promise<void> {
         .limit(BATCH);
       if (rows.length === 0) break;
 
+      const { deps } = await currentSearchRuntime();
       for (const r of rows) {
         try {
-          await reindexDocument(reindexDeps, r.id);
+          await reindexDocument(deps, r.id);
         } catch (err) {
           // 单文档失败不中断整体构建：计数 + 后续由 search-index 队列重试（哈希去重只补缺口）
           failed++;
@@ -1343,8 +1373,13 @@ async function handleSearchBuild(job: Job): Promise<void> {
 
 /** 夜间对账（§6.4）：缺失/待补/模型不符 → 入队修复；悬挂 chunk（软删/二进制）→ 删除。 */
 async function handleSearchReconcile(job: Job): Promise<void> {
-  if (!embeddings) {
-    log('search-reconcile skipped: embedding provider not configured');
+  const { settings, deps } = await currentSearchRuntime();
+  if (!deps.embeddings || !settings.vectorEnabled) {
+    log('search-reconcile skipped', {
+      jobId: job.id,
+      provider: settings.provider,
+      vectorEnabled: settings.vectorEnabled,
+    });
     return;
   }
   const vectorProjects = await db
@@ -1374,11 +1409,11 @@ async function handleSearchReconcile(job: Job): Promise<void> {
            WHERE d.project_id = ${p.id} AND d.deleted_at IS NULL AND d.kind = 'text' AND coalesce(d.content, '') <> ''
            AND (
              NOT EXISTS (
-               SELECT 1 FROM document_chunks c WHERE c.document_id = d.id AND c.embedding_model = ${embeddingSettings.model}
+               SELECT 1 FROM document_chunks c WHERE c.document_id = d.id AND c.embedding_model = ${settings.model}
              )
              OR EXISTS (
                SELECT 1 FROM document_chunks c
-               WHERE c.document_id = d.id AND (c.embedding IS NULL OR c.embedding_model <> ${embeddingSettings.model})
+               WHERE c.document_id = d.id AND (c.embedding IS NULL OR c.embedding_model <> ${settings.model})
              )
            )
            LIMIT 500`,
@@ -1393,6 +1428,7 @@ async function handleSearchReconcile(job: Job): Promise<void> {
     projects: vectorProjects.length,
     queuedDocs,
     removedChunks,
+    model: settings.model,
   });
 }
 
@@ -1440,9 +1476,12 @@ async function main(): Promise<void> {
   // 定时任务：每日 04:00 检索索引对账自愈（SEARCH-VECTOR-DESIGN §6.4）
   await boss.schedule('search-reconcile', '0 4 * * *', {});
 
+  const bootSettings = await getSearchSettings(db, process.env);
   log('worker started', {
     queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile'],
-    embedding: embeddings ? embeddingSettings.provider + ':' + embeddingSettings.model + '@' + embeddingSettings.dim : 'disabled',
+    embedding: bootSettings.provider === 'none' ? 'disabled' : bootSettings.provider + ':' + bootSettings.model + '@' + bootSettings.dim,
+    vectorEnabled: bootSettings.vectorEnabled,
+    searchConfig: 'runtime (platform_settings override, 10s ttl)',
   });
 }
 
