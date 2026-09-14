@@ -9,12 +9,12 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiFetch, fetchAllDocuments } from '../lib/api/client';
+import { VISIBILITY_ORDER, isPublicScope, visibilityMeta, type Visibility } from '../lib/visibility';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type Visibility = 'private' | 'team' | 'public';
 type DocStatus = 'untracked' | 'synced' | 'modified' | 'conflict';
 type ViewMode = 'grid' | 'list';
 type BrowseMode = 'flat' | 'project';
@@ -27,6 +27,8 @@ interface Project {
   description?: string | null;
   color?: string | null;
   visibility: Visibility;
+  ownerType?: 'user' | 'team';
+  ownerTeamId?: string | null;
   template?: string | null;
   ownerId?: string;
   storageKind?: BackendKind;
@@ -87,11 +89,17 @@ const TEMPLATE_LABEL: Record<string, string> = {
   custom: '自定义',
 };
 
-const VISIBILITY_META: Record<Visibility, { label: string; Icon: LucideIcon; cls: string }> = {
-  private: { label: '私有', Icon: Lock, cls: 'bg-neutral-100 text-neutral-600' },
-  team: { label: '团队', Icon: Users, cls: 'bg-primary-50 text-primary-600' },
-  public: { label: '公开', Icon: Globe, cls: 'bg-emerald-50 text-emerald-600' },
+// 五态徽章：文案从 lib/visibility 单一事实源派生（仅图标与配色在此声明）
+const VIS_ICON: Record<Visibility, { Icon: LucideIcon; cls: string }> = {
+  private: { Icon: Lock, cls: 'bg-neutral-100 text-neutral-600' },
+  'team-read': { Icon: Users, cls: 'bg-primary-50 text-primary-600' },
+  'team-write': { Icon: Users, cls: 'bg-primary-50 text-primary-600' },
+  'public-read': { Icon: Globe, cls: 'bg-emerald-50 text-emerald-600' },
+  'public-write': { Icon: Globe, cls: 'bg-emerald-50 text-emerald-600' },
 };
+const VISIBILITY_META = Object.fromEntries(
+  VISIBILITY_ORDER.map((k) => [k, { label: visibilityMeta(k).label, ...VIS_ICON[k] }]),
+) as Record<Visibility, { label: string; Icon: LucideIcon; cls: string }>;
 
 const BACKEND_ICON: Record<BackendKind, LucideIcon> = {
   git: GitBranch,
@@ -469,6 +477,11 @@ function ProjectCard({ project, docCount, backendKind, siteUrl, delayMs = 0, onO
             <span className="tag-neutral !px-1.5 !py-0 !text-[10px]">
               {BACKEND_LABEL[backendKind] ?? backendKind}
             </span>
+            {project.ownerType === 'team' && (
+              <span className="tag tag-primary !px-1.5 !py-0 !text-[10px]" title="该库归团队所有（团队库）">
+                <Users size={10} /> 团队库
+              </span>
+            )}
             {project.updatedAt && (
               <span className="flex items-center gap-0.5 text-[11px] text-neutral-400">
                 <Clock size={10} />
@@ -769,7 +782,8 @@ function FilterDrawer({ open, onClose, filters, setFilters, availableTags }: {
           <div>
             <div className="mb-2 text-xs font-semibold text-neutral-700">可见性</div>
             <div className="flex flex-wrap gap-2">
-              {(Object.entries(VISIBILITY_META) as Array<[Visibility, typeof VISIBILITY_META[Visibility]]>).map(([key, meta]) => {
+              {VISIBILITY_ORDER.map((key) => {
+                const meta = VISIBILITY_META[key];
                 const Icon = meta.Icon;
                 return (
                   <button key={key} type="button"
@@ -902,17 +916,18 @@ export function LibraryPage(): React.ReactElement {
     queryFn: () => fetchAllDocuments<LibraryDoc>(),
   });
   const { data: teamData } = useQuery<ItemsResp<TeamUser>>({
-    queryKey: ['team'],
-    queryFn: () => apiFetch<ItemsResp<TeamUser>>('/api/v1/team'),
+    // 用户目录（显示名解析）：/api/v1/users 仅下发 id/name/avatarUrl（旧 /api/v1/team 全量外泄已下线）
+    queryKey: ['users'],
+    queryFn: () => apiFetch<ItemsResp<TeamUser>>('/api/v1/users'),
   });
 
   const projects = projectsData?.items ?? [];
   const documents = docsData ?? [];
   const users = teamData?.items ?? [];
 
-  // 公开项目（explore 范围）
+  // 公开项目（explore 范围 = public-read / public-write 两档）
   const publicProjects = useMemo(
-    () => projects.filter((p) => p.visibility === 'public'),
+    () => projects.filter((p) => isPublicScope(p.visibility)),
     [projects],
   );
 
@@ -968,7 +983,7 @@ export function LibraryPage(): React.ReactElement {
     let list = documents.filter((d) => {
       if (scope === 'explore') {
         const proj = projects.find((p) => p.id === d.projectId);
-        if (!proj || proj.visibility !== 'public') return false;
+        if (!proj || !isPublicScope(proj.visibility)) return false;
       }
       if (selectedProject && d.projectId !== selectedProject) return false;
       if (filters.status.length > 0 && !filters.status.includes(d.status)) return false;
@@ -998,7 +1013,7 @@ export function LibraryPage(): React.ReactElement {
     for (const d of documents) {
       if (scope === 'explore') {
         const proj = projects.find((p) => p.id === d.projectId);
-        if (!proj || proj.visibility !== 'public') continue;
+        if (!proj || !isPublicScope(proj.visibility)) continue;
       }
       if (selectedProject && d.projectId !== selectedProject) continue;
       for (const t of d.tags ?? []) set.add(t);
@@ -1181,10 +1196,10 @@ export function LibraryPage(): React.ReactElement {
             {scope === 'explore' && (
               <FilterChip label="已发布网站"
                 count={publishedPublicProjects.length}
-                active={filters.visibility === 'public'}
+                active={filters.visibility === 'public-read' || filters.visibility === 'public-write'}
                 onClick={() => setFilters((f) => ({
                   ...f,
-                  visibility: f.visibility === 'public' ? null : 'public',
+                  visibility: isPublicScope(f.visibility) ? null : 'public-read',
                   template: null,
                 }))} />
             )}

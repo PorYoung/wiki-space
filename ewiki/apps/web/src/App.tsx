@@ -20,6 +20,7 @@ const ProjectSettingsPage = lazy(() => import('./pages/ProjectSettingsPage').the
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const ThemesPage = lazy(() => import('./pages/ThemesPage').then((m) => ({ default: m.ThemesPage })));
 const TeamPage = lazy(() => import('./pages/TeamPage').then((m) => ({ default: m.TeamPage })));
+const TeamDetailPage = lazy(() => import('./pages/TeamDetailPage').then((m) => ({ default: m.TeamDetailPage })));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage').then((m) => ({ default: m.NotificationsPage })));
 const StorageConnectionsPage = lazy(() => import('./pages/StorageConnectionsPage').then((m) => ({ default: m.StorageConnectionsPage })));
 const AdminPage = lazy(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })));
@@ -53,6 +54,7 @@ export default function App(): React.ReactElement {
           <Route path="/library" element={<LibraryPage />} />
           <Route path="/themes" element={<ThemesPage />} />
           <Route path="/team" element={<TeamPage />} />
+          <Route path="/teams/:id" element={<TeamDetailPage />} />
           <Route path="/notifications" element={<NotificationsPage />} />
           <Route path="/connections" element={<StorageConnectionsPage />} />
           <Route path="/admin" element={<AdminPage />} />

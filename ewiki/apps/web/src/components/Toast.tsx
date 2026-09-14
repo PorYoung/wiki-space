@@ -6,9 +6,11 @@ export interface ProjectOutletContext {
   showToast: (msg: string) => void;
 }
 
-/** 项目内子页面通过 useOutletContext 拿到的 toast 通道 */
+/** 项目内子页面通过 useOutletContext 拿到的 toast 通道（Layout 与 ProjectLayout 均已提供） */
 export function useShowToast(): (msg: string) => void {
-  return useOutletContext<ProjectOutletContext>().showToast;
+  const ctx = useOutletContext<ProjectOutletContext | undefined>();
+  // 上下文缺失（游离渲染场景）时降级为 no-op，避免整页崩溃
+  return ctx?.showToast ?? (() => undefined);
 }
 
 export function HeaderToast({ message }: { message: string }): React.ReactElement {

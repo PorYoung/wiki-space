@@ -12,7 +12,8 @@
     "db:generate": "tsx node_modules/drizzle-kit/bin.cjs generate",
     "db:migrate": "tsx node_modules/drizzle-kit/bin.cjs migrate",
     "db:seed": "tsx src/seed.ts",
-    "backfill:versions": "tsx src/backfill-versions.ts"
+    "backfill:versions": "tsx src/backfill-versions.ts",
+    "admin:team-reassign": "tsx src/admin-team-reassign.ts"
   },
   "dependencies": {
     "@ewiki/db": "workspace:*",

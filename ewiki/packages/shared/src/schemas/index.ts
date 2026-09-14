@@ -1,8 +1,27 @@
 import { z } from 'zod';
 
 // ---- 枚举（与 SDD 3.2 CHECK 约束一致） ----
-export const Visibility = z.enum(['private', 'team', 'public']);
+// 可见性五态（TEAM-PERMISSIONS-DESIGN §3.3 ADR-T1）：
+//   private      私有：仅库成员（团队治理者亦不穿透，严格隔离）
+//   team-read    团队·只读：团队成员可查看
+//   team-write   团队·可写：团队成员可查看并编辑
+//   public-read  公开·只读：所有登录用户可查看
+//   public-write 公开·可写：所有登录用户可查看并编辑
+//   team-* 档位要求库归属团队（owner_type='team'，DB CHECK 兜底）
+export const Visibility = z.enum(['private', 'team-read', 'team-write', 'public-read', 'public-write']);
 export type Visibility = z.infer<typeof Visibility>;
+
+/** 团队内角色（组织层治理，不放大为库内角色；TEAM-PERMISSIONS-DESIGN §3.6） */
+export const TeamRole = z.enum(['owner', 'maintainer', 'member']);
+export type TeamRole = z.infer<typeof TeamRole>;
+
+/** 库归属主体：user=个人库 / team=团队库 */
+export const ProjectOwnerType = z.enum(['user', 'team']);
+export type ProjectOwnerType = z.infer<typeof ProjectOwnerType>;
+
+/** 团队自身可见性（v1 仅设置页暴露；目录发现留后续） */
+export const TeamVisibility = z.enum(['private', 'internal']);
+export type TeamVisibility = z.infer<typeof TeamVisibility>;
 
 export const ProjectRole = z.enum(['owner', 'maintainer', 'editor', 'guest']);
 export type ProjectRole = z.infer<typeof ProjectRole>;
@@ -60,6 +79,8 @@ export const ProjectSchema = z.object({
   description: z.string().nullable(),
   color: z.string().nullable(),
   visibility: Visibility,
+  ownerType: ProjectOwnerType.default('user'),
+  ownerTeamId: z.string().uuid().nullable().default(null),
   template: z.string().nullable(),
   storageKind: StorageBackendKind,
   storageConnectionId: z.string().uuid().nullable(),
@@ -92,14 +113,30 @@ export const ProjectStorageInputSchema = z.discriminatedUnion('kind', [
 ]);
 export type ProjectStorageInput = z.infer<typeof ProjectStorageInputSchema>;
 
-export const CreateProjectSchema = z.object({
-  name: z.string().min(1),
-  description: z.string().nullable().optional(),
-  color: z.string().nullable().optional(),
-  visibility: Visibility.optional(),
-  template: z.string().nullable().optional(),
-  storage: ProjectStorageInputSchema.optional(),
-});
+export const CreateProjectSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().nullable().optional(),
+    color: z.string().nullable().optional(),
+    visibility: Visibility.optional(),
+    template: z.string().nullable().optional(),
+    storage: ProjectStorageInputSchema.optional(),
+    /** 归属：默认个人库；team 时 ownerTeamId 必填（TEAM-PERMISSIONS-DESIGN §5.2 P1'） */
+    ownerType: ProjectOwnerType.optional(),
+    ownerTeamId: z.string().uuid().optional(),
+  })
+  .superRefine((v, ctx) => {
+    const type = v.ownerType ?? 'user';
+    if (type === 'team' && !v.ownerTeamId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerTeamId'], message: '归属团队时必须提供 ownerTeamId' });
+    }
+    if (type === 'user' && v.ownerTeamId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerTeamId'], message: '个人库不可携带 ownerTeamId' });
+    }
+    if (type === 'user' && v.visibility && v.visibility.startsWith('team-')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['visibility'], message: '个人库不支持团队档位（需先归属团队）' });
+    }
+  });
 export type CreateProjectBody = z.infer<typeof CreateProjectSchema>;
 
 export const UpdateProjectSchema = z
@@ -114,6 +151,78 @@ export const UpdateProjectSchema = z
   })
   .strict();
 export type UpdateProjectBody = z.infer<typeof UpdateProjectSchema>;
+
+/** 归属转移（TEAM-PERMISSIONS-DESIGN §5.2 P3'）：个人 → 团队 / 团队 → 个人（本人） */
+export const TransferProjectSchema = z
+  .object({
+    targetType: ProjectOwnerType,
+    targetTeamId: z.string().uuid().optional(),
+    confirmed: z.literal(true), // 两步确认契约：前端必须显式确认
+  })
+  .superRefine((v, ctx) => {
+    if (v.targetType === 'team' && !v.targetTeamId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['targetTeamId'], message: '转移到团队时必须提供 targetTeamId' });
+    }
+  });
+export type TransferProjectBody = z.infer<typeof TransferProjectSchema>;
+
+// ---- 团队（TEAM-PERMISSIONS-DESIGN §3.1 / §5.1） ----
+export const CreateTeamSchema = z.object({
+  name: z.string().min(1).max(60),
+  slug: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{1,39}$/)
+    .optional(),
+  description: z.string().max(300).nullable().optional(),
+  visibility: TeamVisibility.optional(),
+});
+export type CreateTeamBody = z.infer<typeof CreateTeamSchema>;
+
+export const UpdateTeamSchema = z
+  .object({
+    name: z.string().min(1).max(60).optional(),
+    slug: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]{1,39}$/)
+      .optional(),
+    description: z.string().max(300).nullable().optional(),
+    visibility: TeamVisibility.optional(),
+  })
+  .strict();
+export type UpdateTeamBody = z.infer<typeof UpdateTeamSchema>;
+
+export const AddTeamMemberSchema = z.object({
+  email: z.string().email(),
+  role: TeamRole.optional(), // 默认 member；owner 授予仅 owner 可操作（路由层校验）
+});
+export type AddTeamMemberBody = z.infer<typeof AddTeamMemberSchema>;
+
+export const UpdateTeamMemberSchema = z
+  .object({
+    role: TeamRole.optional(),
+    remove: z.boolean().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (!v.role && !v.remove) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'role 或 remove 至少提供一个' });
+    }
+  });
+export type UpdateTeamMemberBody = z.infer<typeof UpdateTeamMemberSchema>;
+
+export const TeamSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  slug: z.string(),
+  description: z.string().nullable(),
+  visibility: TeamVisibility,
+  archived: z.boolean(),
+  ownerId: z.string().uuid(),
+  memberCount: z.number().int().nonnegative().optional(),
+  projectCount: z.number().int().nonnegative().optional(),
+  myRole: TeamRole.nullable().optional(),
+  createdAt: z.string().datetime(),
+});
+export type Team = z.infer<typeof TeamSchema>;
 
 // FileKind 类型权威定义在 filetypes.ts（同包桶导出），此处仅提供 zod 校验器。
 export const FileKindSchema = z.enum(['text', 'binary']);

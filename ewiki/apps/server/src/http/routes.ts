@@ -1,19 +1,23 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import {
+  AddTeamMemberSchema,
   basenameOf,
   CreateProjectSchema,
+  CreateTeamSchema,
   extOf,
   resolveFileType,
+  TransferProjectSchema,
   UpdateProjectSchema,
+  UpdateTeamMemberSchema,
+  UpdateTeamSchema,
 } from '@ewiki/shared';
 import { renderDocPage } from '@ewiki/render';
 import type { AppDeps } from './app.js';
 import {
   generateRefreshToken,
-  hashPassword,
   hashToken,
   signAccessToken,
   verifyAccessToken,
@@ -37,6 +41,8 @@ import {
   refreshTokens,
   storageConnections,
   syncJobs,
+  teamMembers,
+  teams,
   userPrefs,
   users,
 } from '../db/schema.js';
@@ -59,7 +65,7 @@ import { registerStarterRoutes } from './routes-starter.js';
 import { docStorageEffects, docStorageEffectsBatch, registerPlatformRoutes, type DocEffectResult } from './routes-platform.js';
 import { registerFileRoutes } from './routes-files.js';
 import { buildRawUrl } from '../lib/raw-sign.js';
-import { denyIfNot, projectAccess } from '../lib/permissions.js';
+import { checkProjectTransfer, denyIfNot, projectAccess, readableProjectIdsSql, teamAccess, type TeamRole } from '../lib/permissions.js';
 
 // ---- 发布模板元数据（PLAN 3.5 / 5.2.1：服务端权威源，ThemesPage / PublishPage 从此拉取） ----
 // 与原型 Themes.jsx TEMPLATE_META / mock data.js:853-897 对齐
@@ -338,8 +344,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   // ---- 项目（P1–P4） ----
   const projectsRoute = new Hono();
   projectsRoute.get('/', async (c) => {
-    // 可见性过滤：private 仅成员/管理员可见；team/public 任何已登录用户可见
-    // （与 GET /:id 的 projectAccess、文档列表的 scoped 过滤保持同一规则）
+    // 可见性过滤：统一走 readableProjectIdsSql（TEAM-PERMISSIONS §3.4 单一口径）
+    // 显式成员 ∪ public-* 档 ∪ (团队库 team-* 档 × 团队成员)；admin 全量
     const uid = c.get('userId') as string;
     const isAdmin = c.get('globalRole') === 'admin';
     const rows = await db
@@ -348,10 +354,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .where(
         isAdmin
           ? isNull(projects.deletedAt)
-          : and(
-              isNull(projects.deletedAt),
-              sql`${projects.visibility} <> 'private' or exists (select 1 from project_members pm where pm.project_id = ${projects.id} and pm.user_id = ${uid})`,
-            ),
+          : and(isNull(projects.deletedAt), sql`${projects.id} in ${readableProjectIdsSql(uid)}`),
       )
       .orderBy(desc(projects.updatedAt))
       .limit(100);
@@ -373,6 +376,26 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     const body = parsed.data;
+
+    // ---- 归属与可见性联动（TEAM-PERMISSIONS §5.2 P1'）----
+    // zod 已拦「个人库 + team-* 档」与「携带矛盾 ownerTeamId」；此处校验团队实体与成员身份
+    const ownerType = body.ownerType ?? 'user';
+    const ownerTeamId = ownerType === 'team' ? (body.ownerTeamId ?? null) : null;
+    if (ownerType === 'team' && ownerTeamId) {
+      const [team] = await db
+        .select({ id: teams.id, archived: teams.archived })
+        .from(teams)
+        .where(eq(teams.id, ownerTeamId))
+        .limit(1);
+      if (!team) throw new HTTPException(404, { message: 'TARGET_TEAM_NOT_FOUND' });
+      if (team.archived) throw new HTTPException(400, { message: 'TEAM_ARCHIVED: 已归档团队不可建库' });
+      const [tm] = await db
+        .select({ role: teamMembers.role })
+        .from(teamMembers)
+        .where(and(eq(teamMembers.teamId, ownerTeamId), eq(teamMembers.userId, userId), eq(teamMembers.status, 'active')))
+        .limit(1);
+      if (!tm) throw new HTTPException(403, { message: 'FORBIDDEN: 需先加入该团队' });
+    }
 
     // 模板解析：富模板（带正文）优先；starter-pack 骨架 id 回退为占位文档；空/未知不预置
     const tplId = body.template && body.template !== 'empty' ? body.template : null;
@@ -477,6 +500,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         description: body.description ?? tplDescription ?? null,
         color: body.color ?? null,
         visibility: body.visibility ?? 'private',
+        ownerType,
+        ownerTeamId,
         template: tplId,
         ownerId: userId,
         storageKind: gitProvision ? 'git' : 'local',
@@ -548,7 +573,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       action: 'project.create',
       resourceType: 'project',
       resourceId: project.id,
-      meta: { storageKind: project.storageKind, template: tplId },
+      meta: { storageKind: project.storageKind, template: tplId, ownerType: project.ownerType, ownerTeamId: project.ownerTeamId },
     });
 
     // ---- Git 后端：克隆工作副本；空库首次提交（模板或 README），已有内容库不覆盖远端 ----
@@ -779,7 +804,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       whereClause = eq(activities.projectId, projectId);
     } else if (c.get('globalRole') !== 'admin') {
       // 全局动态流仅展示当前用户可读项目（私有项目活动不泄露）
-      whereClause = sql`${activities.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${userId})))` as never;
+      whereClause = sql`${activities.projectId} in ${readableProjectIdsSql(userId)}` as never;
     }
     // select 显式列 + leftJoin users 补 actorName：Dashboard/ActivityPage 均按 actorName 渲染操作人
     const rows = await db
@@ -858,116 +883,386 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     return c.json(inserted, 201);
   });
 
-  // ---- 团队（M1：TeamPage 成员列表；PLAN 5.2.1 改造） ----
-  // 契约对齐前端 TeamResponse：{ members: [{ id, name, email, role, online, lastActive }] }。
-  // role 为展示层 TeamRole（admin→Owner，其余→Editor）；online/lastActive 由该用户最近
-  // activity 时间推导（真实行为数据，5 分钟内有活动视为在线），非 mock。
-  app.get('/api/v1/team', async (c) => {
+  // ---- 团队（TEAM-PERMISSIONS-DESIGN §5.1 T1-T9） ----
+  // 旧 /api/v1/team* 三端点（全平台用户列表 routes.ts 旧:865 / 代造账号 :900 / 改 globalRole :945）已删除：
+  //   前二者为 B0 越权止血对象（改 globalRole 可不经管理员自提 admin），随团队实体落地一并收敛；
+  //   用户管理能力保留在 /api/v1/admin/users*（requireAdmin，routes-platform.ts）。
+  const TEAM_ROLE_LABEL: Record<string, string> = { owner: '所有者', maintainer: '维护者', member: '成员' };
+
+  /** 团队摘要字段（含计数与当前用户角色）；列表/详情共用
+   *  注意：子查询内的外表引用必须写字面 `teams.id`，不能用 ${teams.id} 插值——
+   *  drizzle 在单表 FROM 上下文会把列渲染为裸 "id"，在子查询内会绑定到内层表的 id 列（静默错误）。 */
+  const teamSummarySelect = (uid: string) => ({
+    id: teams.id,
+    name: teams.name,
+    slug: teams.slug,
+    description: teams.description,
+    visibility: teams.visibility,
+    archived: teams.archived,
+    ownerId: teams.ownerId,
+    createdAt: teams.createdAt,
+    updatedAt: teams.updatedAt,
+    memberCount: sql<number>`(select count(*)::int from team_members tm where tm.team_id = teams.id and tm.status = 'active')`,
+    projectCount: sql<number>`(select count(*)::int from projects p where p.owner_team_id = teams.id and p.deleted_at is null)`,
+    myRole: sql<string | null>`(select tm.role from team_members tm where tm.team_id = teams.id and tm.user_id = ${uid} and tm.status = 'active' limit 1)`,
+  });
+
+  // T1 创建团队（任何登录用户；creator 自动成为 owner）
+  app.post('/api/v1/teams', async (c) => {
+    const userId = c.get('userId') as string;
+    const parsed = CreateTeamSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ code: 'VALIDATION_FAILED', message: 'VALIDATION_FAILED', fields: parsed.error.flatten().fieldErrors }, 400);
+    }
+    const data = parsed.data;
+    const name = data.name.trim();
+
+    // slug：显式指定需唯一；缺省自动生成 t-<6hex>（最多重试 3 次）
+    let slug = data.slug ?? null;
+    if (slug) {
+      const [dup] = await db.select({ id: teams.id }).from(teams).where(eq(teams.slug, slug)).limit(1);
+      if (dup) throw new HTTPException(409, { message: 'SLUG_TAKEN' });
+    } else {
+      for (let i = 0; i < 3 && !slug; i++) {
+        const candidate = `t-${randomBytes(3).toString('hex')}`;
+        const [dup] = await db.select({ id: teams.id }).from(teams).where(eq(teams.slug, candidate)).limit(1);
+        if (!dup) slug = candidate;
+      }
+      if (!slug) throw new HTTPException(500, { message: 'SLUG_GENERATION_FAILED' });
+    }
+
+    const team = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(teams)
+        .values({
+          name,
+          slug: slug!,
+          description: data.description ?? null,
+          visibility: data.visibility ?? 'private',
+          ownerId: userId,
+        })
+        .returning();
+      await tx.insert(teamMembers).values({ teamId: created!.id, userId, role: 'owner', invitedBy: userId });
+      return created!;
+    });
+
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'team.create',
+      resourceType: 'team',
+      resourceId: team.id,
+      meta: { name: team.name, slug: team.slug },
+    });
+    return c.json({ ...team, myRole: 'owner', memberCount: 1, projectCount: 0 }, 201);
+  });
+
+  // T2 我加入的团队列表
+  app.get('/api/v1/teams', async (c) => {
+    const uid = c.get('userId') as string;
+    const rows = await db
+      .select(teamSummarySelect(uid))
+      .from(teamMembers)
+      .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+      .where(and(eq(teamMembers.userId, uid), eq(teamMembers.status, 'active')))
+      .orderBy(desc(teams.updatedAt));
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // T2b 团队发现目录（TEAM-PERMISSIONS §12.3-3）：列出所有 visibility='internal' 且未归档的团队，
+  // 供平台内成员浏览并进入详情（成员加入仍走团队 owner 邀请，本目录只读展示）。
+  // 路由顺序：discover 为静态段，注册于 :id 之前，避免被当作团队 id。
+  app.get('/api/v1/teams/discover', async (c) => {
+    const uid = c.get('userId') as string;
+    const q = (c.req.query('q') ?? '').trim();
+    let cond = and(eq(teams.visibility, 'internal'), eq(teams.archived, false));
+    if (q) {
+      const like = `%${q}%`;
+      cond = and(cond, sql`(${teams.name} ilike ${like} or coalesce(${teams.description}, '') ilike ${like} or ${teams.slug} ilike ${like})`);
+    }
+    const rows = await db
+      .select(teamSummarySelect(uid))
+      .from(teams)
+      .where(cond)
+      .orderBy(desc(teams.updatedAt));
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // T3 团队详情（成员或 admin；internal 团队对任意登录用户开放只读详情 —— 团队发现目录的落点）
+  app.get('/api/v1/teams/:id', async (c) => {
+    const uid = c.get('userId') as string;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    const internalOpen = access.team.visibility === 'internal' && !access.team.archived;
+    denyIfNot(internalOpen || access.isMember || access.isAdmin, 'FORBIDDEN: 仅团队成员可见');
+    const [row] = await db.select(teamSummarySelect(uid)).from(teams).where(eq(teams.id, access.team.id)).limit(1);
+    // 非成员的 internal 浏览者：仍标注 myRole=null，前端据此隐藏管理入口
+    return c.json(row);
+  });
+
+  // T4 团队设置（owner）
+  app.patch('/api/v1/teams/:id', async (c) => {
+    const uid = c.get('userId') as string;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    denyIfNot(access.canManageTeam, 'FORBIDDEN: 仅团队 owner 可修改团队设置');
+    const parsed = UpdateTeamSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ code: 'VALIDATION_FAILED', message: 'VALIDATION_FAILED', fields: parsed.error.flatten().fieldErrors }, 400);
+    }
+    const data = parsed.data;
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+    if (data.name !== undefined) set.name = data.name.trim();
+    if (data.description !== undefined) set.description = data.description;
+    if (data.visibility !== undefined) set.visibility = data.visibility;
+    if (data.slug !== undefined && data.slug !== access.team.slug) {
+      const [dup] = await db
+        .select({ id: teams.id })
+        .from(teams)
+        .where(and(eq(teams.slug, data.slug), ne(teams.id, access.team.id)))
+        .limit(1);
+      if (dup) throw new HTTPException(409, { message: 'SLUG_TAKEN' });
+      set.slug = data.slug;
+    }
+    if (Object.keys(set).length === 1) return c.json(access.team);
+    const [updated] = await db.update(teams).set(set).where(eq(teams.id, access.team.id)).returning();
+    await db.insert(auditLogs).values({
+      actorId: uid,
+      action: 'team.update',
+      resourceType: 'team',
+      resourceId: access.team.id,
+      meta: { from: { name: access.team.name, slug: access.team.slug, visibility: access.team.visibility }, to: data },
+    });
+    return c.json(updated);
+  });
+
+  // T5 归档/取消归档（owner/maintainer；归档后团队只读）
+  app.post('/api/v1/teams/:id/archive', async (c) => {
+    const uid = c.get('userId') as string;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    denyIfNot(
+      access.isAdmin || access.role === 'owner' || access.role === 'maintainer',
+      'FORBIDDEN: 仅团队 owner/maintainer 可归档',
+    );
+    const raw = (await c.req.json().catch(() => ({}))) as { archived?: boolean };
+    const archived = typeof raw.archived === 'boolean' ? raw.archived : true;
+    const [updated] = await db
+      .update(teams)
+      .set({ archived, updatedAt: new Date() })
+      .where(eq(teams.id, access.team.id))
+      .returning();
+    await db.insert(auditLogs).values({
+      actorId: uid,
+      action: 'team.archive',
+      resourceType: 'team',
+      resourceId: access.team.id,
+      meta: { archived },
+    });
+    return c.json({ ok: true, archived: updated!.archived });
+  });
+
+  // T6 团队成员列表（成员或 admin；internal 团队对登录用户开放只读名单 —— 团队发现目录闭环）
+  app.get('/api/v1/teams/:id/members', async (c) => {
+    const uid = c.get('userId') as string;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    const internalOpen = access.team.visibility === 'internal' && !access.team.archived;
+    denyIfNot(internalOpen || access.isMember || access.isAdmin, 'FORBIDDEN: 仅团队成员可见');
     const rows = await db
       .select({
-        id: users.id,
+        id: teamMembers.id,
+        teamId: teamMembers.teamId,
+        role: teamMembers.role,
+        status: teamMembers.status,
+        joinedAt: teamMembers.createdAt,
+        userId: users.id,
         name: users.name,
         email: users.email,
-        globalRole: users.globalRole,
         avatarUrl: users.avatarUrl,
-        status: users.status,
         lastActiveAt: sql<string | null>`(
           select max(${activities.createdAt}) from ${activities} where ${activities.actorId} = ${users.id}
         )`,
       })
-      .from(users)
-      .limit(200);
-    const members = rows.map((u) => {
-      const lastActive = u.lastActiveAt ? new Date(u.lastActiveAt).toISOString() : null;
-      const online = !!lastActive && Date.now() - new Date(lastActive).getTime() < 5 * 60_000;
-      return {
-        id: u.id,
-        name: u.name,
-        email: u.email,
-        role: (u.globalRole === 'admin' ? 'Owner' : 'Editor') as 'Owner' | 'Maintainer' | 'Editor' | 'Guest',
-        online,
-        lastActive,
-        avatarUrl: u.avatarUrl,
-        status: u.status,
-      };
+      .from(teamMembers)
+      .leftJoin(users, eq(teamMembers.userId, users.id))
+      .where(eq(teamMembers.teamId, access.team.id))
+      .orderBy(desc(teamMembers.createdAt));
+    const items = rows.map((m) => {
+      // 仅团队成员/admin 可见 online/最近活跃等敏感字段；internal 游客只见基础名单
+      const isPrivileged = access.isMember || access.isAdmin;
+      const lastActive = !isPrivileged ? null : m.lastActiveAt ? new Date(m.lastActiveAt).toISOString() : null;
+      return { ...m, lastActive, online: !!lastActive && Date.now() - new Date(lastActive).getTime() < 5 * 60_000 };
     });
-    return c.json({ members });
+    return c.json({ items, total: items.length, myRole: access.role, archived: access.team.archived });
   });
 
-  // ---- 邀请全局团队成员（PLAN 5.2.1：TeamPage 邀请弹窗，原 404 降级转真实） ----
-  // 环境无邮件服务（SDD P18）：直接创建 invited 账号 + 随机临时密码（仅存哈希），
-  // 激活/改密流程待做；Owner 为全局管理员不可邀请，Maintainer 及以下为展示层角色（落库均为 user）。
-  app.post('/api/v1/team/invite', async (c) => {
-    const userId = c.get('userId') as string;
-    const body = (await c.req.json()) as { email?: string; role?: string; message?: string };
-    if (!body.email?.trim()) throw new HTTPException(400, { message: 'VALIDATION_FAILED: email required' });
-    const role = body.role ?? 'Editor';
-    if (!['Owner', 'Maintainer', 'Editor', 'Guest'].includes(role)) {
-      throw new HTTPException(400, { message: 'VALIDATION_FAILED: invalid role' });
+  // T7 添加成员（owner/maintainer；仅限已注册邮箱，不代造账号 —— ADR-T5）
+  app.post('/api/v1/teams/:id/members', async (c) => {
+    const uid = c.get('userId') as string;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    denyIfNot(access.canManageMembers, 'FORBIDDEN: 仅团队 owner/maintainer 可管理成员');
+    if (access.team.archived) throw new HTTPException(400, { message: 'TEAM_ARCHIVED: 已归档团队不可变更成员' });
+    const parsed = AddTeamMemberSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ code: 'VALIDATION_FAILED', message: 'VALIDATION_FAILED', fields: parsed.error.flatten().fieldErrors }, 400);
     }
-    if (role === 'Owner') throw new HTTPException(400, { message: 'CANNOT_INVITE_OWNER' });
-    const email = body.email.trim().toLowerCase();
-    const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+    const role = parsed.data.role ?? 'member';
+    if (role === 'owner' && !(access.isAdmin || access.role === 'owner')) {
+      throw new HTTPException(403, { message: 'FORBIDDEN: 仅团队 owner 可授予 owner' });
+    }
+    const email = parsed.data.email.trim().toLowerCase();
+    const [targetUser] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!targetUser) throw new HTTPException(404, { message: 'USER_NOT_FOUND: 该邮箱尚未注册' });
+    if (targetUser.id === uid) throw new HTTPException(400, { message: 'CANNOT_ADD_SELF' });
+    const [existing] = await db
+      .select({ id: teamMembers.id })
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, access.team.id), eq(teamMembers.userId, targetUser.id)))
+      .limit(1);
     if (existing) throw new HTTPException(409, { message: 'ALREADY_MEMBER' });
 
-    const crypto = await import('crypto');
-    const [created] = await db
-      .insert(users)
-      .values({
-        email,
-        name: email.split('@')[0]!,
-        passwordHash: hashPassword(crypto.randomBytes(16).toString('hex')),
-        globalRole: 'user',
-        status: 'invited',
-      })
+    const [member] = await db
+      .insert(teamMembers)
+      .values({ teamId: access.team.id, userId: targetUser.id, role, invitedBy: uid })
       .returning();
     await db.insert(auditLogs).values({
-      actorId: userId,
-      action: 'team.invite',
-      resourceType: 'user',
-      resourceId: created.id,
-      meta: { role, message: body.message ?? null },
+      actorId: uid,
+      action: 'team.member_add',
+      resourceType: 'team',
+      resourceId: access.team.id,
+      meta: { target: targetUser.email, role },
     });
-    // 通知被邀请人（EXT-PLATFORM ADR-P3：server 侧站内渠道；激活登录后收件箱可见）
+    const [inviter] = await db.select({ name: users.name }).from(users).where(eq(users.id, uid)).limit(1);
     await db.insert(notifications).values({
-      userId: created.id,
+      userId: targetUser.id,
       type: 'team.invite',
       payload: {
+        teamId: access.team.id,
         title: '团队邀请',
-        message: `你的账号已被加入团队（角色：${role}）。请使用邀请邮件中的临时密码登录。`,
+        message: `${inviter?.name ?? '有人'} 邀请你加入团队「${access.team.name}」（角色：${TEAM_ROLE_LABEL[role] ?? role}）`,
+        link: `/teams/${access.team.id}`,
       },
     });
-    return c.json({ id: created.id, email: created.email, role, status: created.status }, 201);
+    return c.json(member, 201);
   });
 
-  // ---- 修改全局成员角色（PLAN 5.2.1：TeamPage 角色菜单，原 404 降级转真实） ----
-  // TeamRole→globalRole 映射：仅 Owner=admin；移除某用户 Owner 时自动降为 user。
-  app.patch('/api/v1/team/:id/role', async (c) => {
-    const userId = c.get('userId') as string;
-    const targetId = c.req.param('id')!;
-    const body = (await c.req.json()) as { role?: string };
-    const role = body.role;
-    if (!role || !['Owner', 'Maintainer', 'Editor', 'Guest'].includes(role)) {
-      throw new HTTPException(400, { message: 'VALIDATION_FAILED: invalid role' });
+  // T8 角色变更 / 移除成员（owner/maintainer；自我移除=退出团队；最后一名 owner 保护）
+  app.put('/api/v1/teams/:id/members/:uid', async (c) => {
+    const uid = c.get('userId') as string;
+    const targetUid = c.req.param('uid')!;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    const parsed = UpdateTeamMemberSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ code: 'VALIDATION_FAILED', message: 'VALIDATION_FAILED', fields: parsed.error.flatten().fieldErrors }, 400);
     }
-    const [target] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
-    if (!target) throw new HTTPException(404, { message: 'NOT_FOUND' });
-    if (targetId === userId && role !== 'Owner') {
-      throw new HTTPException(400, { message: 'CANNOT_DEMOTE_SELF' });
+    const body = parsed.data;
+    const isSelf = targetUid === uid;
+    // 权限：管理他人需 owner/maintainer；自我移除（退出团队）允许
+    if (!(isSelf && body.remove)) {
+      denyIfNot(access.canManageMembers, 'FORBIDDEN: 仅团队 owner/maintainer 可管理成员');
     }
-    const [updated] = await db
-      .update(users)
-      .set({ globalRole: role === 'Owner' ? 'admin' : 'user', updatedAt: new Date() })
-      .where(eq(users.id, targetId))
-      .returning();
-    await db.insert(auditLogs).values({
-      actorId: userId,
-      action: 'team.role_change',
-      resourceType: 'user',
-      resourceId: targetId,
-      meta: { from: target.globalRole, to: updated.globalRole },
-    });
-    return c.json({ id: updated.id, role });
+    if (access.team.archived) throw new HTTPException(400, { message: 'TEAM_ARCHIVED: 已归档团队不可变更成员' });
+
+    const [member] = await db
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, access.team.id), eq(teamMembers.userId, targetUid)))
+      .limit(1);
+    if (!member) throw new HTTPException(404, { message: 'NOT_FOUND: 该用户不是团队成员' });
+
+    const isOwnerActor = access.isAdmin || access.role === 'owner';
+    // owner 行保护：变更/移除 owner 仅 owner 可操作，且不可清空最后一名 owner
+    if (member.role === 'owner' && (body.remove || body.role !== 'owner')) {
+      denyIfNot(isOwnerActor, 'FORBIDDEN: 仅团队 owner 可变更 owner');
+      const [cnt] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(teamMembers)
+        .where(and(eq(teamMembers.teamId, access.team.id), eq(teamMembers.role, 'owner')));
+      if ((cnt?.n ?? 0) <= 1) throw new HTTPException(400, { message: 'LAST_OWNER: 不可移除/降级最后一名 owner' });
+    }
+    if (body.role === 'owner') denyIfNot(isOwnerActor, 'FORBIDDEN: 仅团队 owner 可授予 owner');
+
+    if (body.remove) {
+      await db.delete(teamMembers).where(eq(teamMembers.id, member.id));
+      await db.insert(auditLogs).values({
+        actorId: uid,
+        action: 'team.member_remove',
+        resourceType: 'team',
+        resourceId: access.team.id,
+        meta: { target: targetUid, self: isSelf },
+      });
+    } else if (body.role && body.role !== member.role) {
+      await db.update(teamMembers).set({ role: body.role }).where(eq(teamMembers.id, member.id));
+      await db.insert(auditLogs).values({
+        actorId: uid,
+        action: 'team.member_role_change',
+        resourceType: 'team',
+        resourceId: access.team.id,
+        meta: { target: targetUid, from: member.role, to: body.role },
+      });
+    }
+
+    // teams.owner_id 兜底：主 owner 不再是 owner 行时，改指剩下的第一名 owner（LAST_OWNER 保证其存在）
+    const owners = await db
+      .select({ userId: teamMembers.userId })
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, access.team.id), eq(teamMembers.role, 'owner')));
+    if (owners.length > 0 && !owners.some((o) => o.userId === access.team.ownerId)) {
+      await db.update(teams).set({ ownerId: owners[0]!.userId, updatedAt: new Date() }).where(eq(teams.id, access.team.id));
+    }
+    return c.json({ ok: true, role: body.remove ? null : (body.role ?? member.role) });
+  });
+
+  // T9 团队文档库列表（成员或 admin）
+  app.get('/api/v1/teams/:id/projects', async (c) => {
+    const uid = c.get('userId') as string;
+    const access = await teamAccess(c.req.param('id')!, uid, c.get('globalRole') as string);
+    const internalOpen = access.team.visibility === 'internal' && !access.team.archived;
+    denyIfNot(internalOpen || access.isMember || access.isAdmin, 'FORBIDDEN: 仅团队成员可见');
+    // 团队库可见性仍由库自身档位决定：internal 游客只能看到该团队的公开库（public-*），
+    // 无法穿透 private / team-*（后者对非成员不可见，符合 §3.4 并集口径）
+    const rows = await db
+      .select({
+        id: projects.id,
+        name: projects.name,
+        description: projects.description,
+        color: projects.color,
+        visibility: projects.visibility,
+        ownerType: projects.ownerType,
+        ownerTeamId: projects.ownerTeamId,
+        archived: projects.archived,
+        updatedAt: projects.updatedAt,
+        createdAt: projects.createdAt,
+      })
+      .from(projects)
+      .where(
+        and(
+          eq(projects.ownerTeamId, access.team.id),
+          isNull(projects.deletedAt),
+          access.isMember || access.isAdmin
+            ? undefined
+            : inArray(projects.visibility, ['public-read', 'public-write']),
+        ),
+      )
+      .orderBy(desc(projects.updatedAt));
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  // ---- 用户目录（显示名解析；任何登录用户） ----
+  // 协作 UI（文档作者、成员头像）需要 id/name/avatarUrl；email/globalRole/status 属管理信息，
+  // 仅 /api/v1/admin/users 下发（旧 /api/v1/team 全量外泄 email/globalRole 的问题随之收敛，S3）。
+  app.get('/api/v1/users', async (c) => {
+    const idsParam = c.req.query('ids');
+    const ids = idsParam
+      ? idsParam
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 200)
+      : [];
+    const rows = await db
+      .select({ id: users.id, name: users.name, avatarUrl: users.avatarUrl })
+      .from(users)
+      .where(ids.length ? inArray(users.id, ids) : undefined)
+      .orderBy(users.name)
+      .limit(500);
+    return c.json({ items: rows, total: rows.length });
   });
 
   // ---- 文档全局列表（D1 + F04 预警数据源；真服务端分页：page/pageSize/total） ----
@@ -987,7 +1282,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       conditions.push(eq(documents.projectId, projectId));
     } else if (c.get('globalRole') !== 'admin') {
       // 全局文档列表仅返回当前用户可读项目的文档
-      conditions.push(sql`${documents.projectId} in (select p.id from projects p where p.deleted_at is null and (p.visibility <> 'private' or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${uid})))`);
+      conditions.push(sql`${documents.projectId} in ${readableProjectIdsSql(uid)}`);
     }
     if (status) conditions.push(eq(documents.status, status));
     // 文件管理重构 §4.1-F1：按 kind facet 过滤（缺省全部；非法值忽略）
@@ -2039,10 +2334,14 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     }
     const body = parsed.data;
 
-    // 越权修复：此前 PATCH 无任何校验，任何登录用户（含 team 可见性的隐式读者）可改任意项目
-    {
-      const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
-      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改项目');
+    // 越权修复：此前 PATCH 无任何校验；现按 canManage（显式 owner/maintainer ∪ 团队治理者）收口
+    const userId = c.get('userId') as string;
+    const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+    denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可修改项目');
+
+    // 五态校验（TEAM-PERMISSIONS §5.2 P2'）：team-* 档位要求归属团队（DB CHECK 兜底，此处给可读错误）
+    if (body.visibility !== undefined && body.visibility.startsWith('team-') && access.project.ownerType !== 'team') {
+      throw new HTTPException(400, { message: 'VISIBILITY_REQUIRES_TEAM: 团队档位需先归属团队' });
     }
 
     const set: Record<string, unknown> = { updatedAt: new Date() };
@@ -2071,13 +2370,21 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       .returning();
     if (!updated) throw new HTTPException(404, { message: 'NOT_FOUND' });
 
-    const userId = c.get('userId') as string;
     await db.insert(auditLogs).values({
       actorId: userId,
       action: 'project.update',
       resourceType: 'project',
       resourceId: projectId,
     });
+    if (body.visibility !== undefined && body.visibility !== access.project.visibility) {
+      await db.insert(auditLogs).values({
+        actorId: userId,
+        action: 'project.visibility_change',
+        resourceType: 'project',
+        resourceId: projectId,
+        meta: { from: access.project.visibility, to: body.visibility },
+      });
+    }
 
     return c.json(updated);
   });
@@ -2089,10 +2396,10 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   app.delete('/api/v1/projects/:id', async (c) => {
     const projectId = c.req.param('id')!;
 
-    // 越权修复：此前 DELETE 无任何校验，任何登录用户可软删任意项目（比 PATCH 更危险）
+    // 越权修复：此前 DELETE 无任何校验；现按 canDelete 收口（显式 owner ∪ 团队 owner，TEAM-PERMISSIONS §3.4）
     {
       const access = await projectAccess(projectId, c.get('userId') as string, c.get('globalRole') as string);
-      denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可删除项目');
+      denyIfNot(access.canDelete, 'FORBIDDEN: 仅项目所有者/团队所有者可删除项目');
     }
 
     const [project] = await db
@@ -2124,6 +2431,114 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     });
 
     return c.json({ ok: true });
+  });
+
+  // ---- POST /api/v1/projects/:id/transfer —— 归属转移（TEAM-PERMISSIONS §5.2 P3' 转移规则表） ----
+  // 个人 → 团队：库 canDelete（显式 owner ∪ 团队 owner）+ 操作者是目标团队 owner/maintainer；
+  // 团队 → 个人：仅团队 owner，转给操作者本人；team-* 档位与个人归属冲突 → 400 要求先调档。
+  app.post('/api/v1/projects/:id/transfer', async (c) => {
+    const projectId = c.req.param('id')!;
+    const userId = c.get('userId') as string;
+    const globalRole = c.get('globalRole') as string;
+    const parsed = TransferProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ code: 'VALIDATION_FAILED', message: 'VALIDATION_FAILED', fields: parsed.error.flatten().fieldErrors }, 400);
+    }
+    const body = parsed.data;
+
+    const access = await projectAccess(projectId, userId, globalRole);
+
+    // 目标团队上下文（存在性、归档态、操作者角色）
+    let targetTeam: { id: string; archived: boolean; myRole: 'owner' | 'maintainer' | 'member' | null } | null = null;
+    if (body.targetType === 'team' && body.targetTeamId) {
+      const [team] = await db
+        .select({ id: teams.id, archived: teams.archived })
+        .from(teams)
+        .where(eq(teams.id, body.targetTeamId))
+        .limit(1);
+      if (team) {
+        const [tm] = await db
+          .select({ role: teamMembers.role })
+          .from(teamMembers)
+          .where(and(eq(teamMembers.teamId, team.id), eq(teamMembers.userId, userId), eq(teamMembers.status, 'active')))
+          .limit(1);
+        targetTeam = { id: team.id, archived: team.archived, myRole: (tm?.role ?? null) as 'owner' | 'maintainer' | 'member' | null };
+      }
+    }
+
+    const check = checkProjectTransfer({ project: access.project, access, targetType: body.targetType, targetTeam });
+    if (!check.ok) {
+      const status = check.code?.startsWith('FORBIDDEN') ? 403 : check.code === 'TARGET_TEAM_NOT_FOUND' ? 404 : 400;
+      throw new HTTPException(status, { message: `${check.code}${check.message ? `: ${check.message}` : ''}` });
+    }
+
+    if (body.targetType === 'team') {
+      const target = targetTeam!;
+      const [updated] = await db
+        .update(projects)
+        .set({ ownerType: 'team', ownerTeamId: target.id, updatedAt: new Date() })
+        .where(eq(projects.id, projectId))
+        .returning();
+      await db.insert(auditLogs).values({
+        actorId: userId,
+        action: 'project.transfer',
+        resourceType: 'project',
+        resourceId: projectId,
+        meta: {
+          from: { ownerType: access.project.ownerType, ownerTeamId: access.project.ownerTeamId },
+          to: { ownerType: 'team', ownerTeamId: target.id },
+        },
+      });
+      // 通知目标团队治理者（除操作者本人）
+      const governors = await db
+        .select({ userId: teamMembers.userId })
+        .from(teamMembers)
+        .where(
+          and(eq(teamMembers.teamId, target.id), inArray(teamMembers.role, ['owner', 'maintainer']), eq(teamMembers.status, 'active')),
+        );
+      for (const g of governors) {
+        if (g.userId === userId) continue;
+        await db.insert(notifications).values({
+          userId: g.userId,
+          type: 'project.transfer',
+          payload: {
+            projectId,
+            title: '文档库已转入团队',
+            message: `「${updated!.name}」已转入你管理的团队`,
+            link: `/projects/${projectId}/browse`,
+          },
+        });
+      }
+      return c.json(updated);
+    }
+
+    // 团队 → 个人：转给操作者本人，并确保其持有显式 owner 席位
+    const [updated] = await db
+      .update(projects)
+      .set({ ownerType: 'user', ownerTeamId: null, updatedAt: new Date() })
+      .where(eq(projects.id, projectId))
+      .returning();
+    const [existingMember] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)))
+      .limit(1);
+    if (!existingMember) {
+      await db.insert(projectMembers).values({ projectId, userId, role: 'owner' });
+    } else if (existingMember.role !== 'owner') {
+      await db.update(projectMembers).set({ role: 'owner' }).where(eq(projectMembers.id, existingMember.id));
+    }
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'project.transfer',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: {
+        from: { ownerType: access.project.ownerType, ownerTeamId: access.project.ownerTeamId },
+        to: { ownerType: 'user', ownerId: userId },
+      },
+    });
+    return c.json(updated);
   });
 
   // ---- 项目成员（M2 BrowsePage 协作者展示 + MembersPage） ----
@@ -2161,7 +2576,61 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
         online: !!lastActive && Date.now() - new Date(lastActive).getTime() < 5 * 60_000,
       };
     });
-    return c.json({ items, total: items.length, myRole: access.role, visibility: access.project.visibility });
+
+    // F6（TEAM-PERMISSIONS §12.3-1）：团队归属库下发「团队继承成员」列表 —— 团队 ownerTeamId 的所有
+    // active 成员，通过 team-read/team-write 档位对库有隐式访问。前端据此渲染只读的「团队继承」分区
+    // （不可在此单独管理，成员管理收敛到团队页）。不必为此再校验访问权：调用方已过 canRead。
+    let teamMembersList: Array<{
+      id: string;
+      role: TeamRole;
+      joinedAt: string;
+      userId: string | null;
+      name: string | null;
+      email: string | null;
+      avatarUrl: string | null;
+    }> = [];
+    if (access.project.ownerType === 'team' && access.project.ownerTeamId) {
+      const tmRows = await db
+        .select({
+          id: teamMembers.id,
+          role: teamMembers.role,
+          joinedAt: teamMembers.createdAt,
+          userId: users.id,
+          name: users.name,
+          email: users.email,
+          avatarUrl: users.avatarUrl,
+        })
+        .from(teamMembers)
+        .leftJoin(users, eq(teamMembers.userId, users.id))
+        .where(and(eq(teamMembers.teamId, access.project.ownerTeamId), eq(teamMembers.status, 'active')))
+        .orderBy(desc(teamMembers.createdAt));
+      teamMembersList = tmRows.map((m) => ({
+        id: m.id,
+        role: m.role as TeamRole,
+        joinedAt: new Date(m.joinedAt).toISOString(),
+        userId: m.userId,
+        name: m.name,
+        email: m.email,
+        avatarUrl: m.avatarUrl,
+      }));
+    }
+
+    return c.json({
+      items,
+      total: items.length,
+      myRole: access.role,
+      // TEAM-PERMISSIONS §5.2 P4'：下发服务端权威能力位（前端据此收放控件，避免自行推导漂移）
+      explicitRole: access.explicitRole,
+      teamRole: access.teamRole,
+      canWrite: access.canWrite,
+      canManage: access.canManage,
+      canDelete: access.canDelete,
+      ownerType: access.project.ownerType,
+      ownerTeamId: access.project.ownerTeamId,
+      visibility: access.project.visibility,
+      // F6：团队继承成员（owner_type='team' 时非空；个人库为空数组）
+      teamMembers: teamMembersList,
+    });
   });
 
   // ---- 邀请成员（M3 MembersPage） ----

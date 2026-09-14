@@ -53,6 +53,46 @@ export const userPrefs = pgTable('user_prefs', {
   prefs: jsonb('prefs').notNull().default({}),
 });
 
+// ---- 团队（TEAM-PERMISSIONS-DESIGN §3.1，类 GitLab Group，不含嵌套子团队） ----
+export const teams = pgTable(
+  'teams',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    slug: text('slug').notNull().unique(), // 展示用短标识，缺省 t-<6hex>，可改
+    description: text('description'),
+    visibility: text('visibility').notNull().default('private'), // private | internal（v1 仅设置页暴露）
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id), // 团队主 owner（与 team_members.role='owner' 冗余，便于兜底查询）
+    archived: boolean('archived').notNull().default(false), // 归档：团队只读，不可再建库/加成员
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [check('teams_visibility_check', sql`${t.visibility} IN ('private','internal')`)],
+);
+
+export const teamMembers = pgTable(
+  'team_members',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    teamId: uuid('team_id')
+      .notNull()
+      .references(() => teams.id),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    role: text('role').notNull().default('member'), // owner | maintainer | member
+    invitedBy: uuid('invited_by').references(() => users.id),
+    status: text('status').notNull().default('active'), // active | pending（v1 只写 active，为邮件邀请留口）
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    unique('team_members_team_user_uq').on(t.teamId, t.userId),
+    check('team_members_role_check', sql`${t.role} IN ('owner','maintainer','member')`),
+  ],
+);
+
 export const projects = pgTable(
   'projects',
   {
@@ -60,7 +100,7 @@ export const projects = pgTable(
     name: text('name').notNull(),
     description: text('description'),
     color: text('color'),
-    visibility: text('visibility').notNull().default('private'), // private | team | public
+    visibility: text('visibility').notNull().default('private'), // private | team-read | team-write | public-read | public-write（TEAM-PERMISSIONS §3.2）
     template: text('template'),
     // ---- 内嵌存储后端（git | local），1:1 从属于文档库，无独立 CRUD ----
     storageKind: text('storage_kind').notNull().default('local'), // git | local
@@ -76,7 +116,9 @@ export const projects = pgTable(
     lastError: text('last_error'),
     ownerId: uuid('owner_id')
       .notNull()
-      .references(() => users.id),
+      .references(() => users.id), // 语义收敛为「创建人/责任人」：owner_type='team' 时权限主体走团队（owner_team_id）
+    ownerType: text('owner_type').notNull().default('user'), // user | team
+    ownerTeamId: uuid('owner_team_id').references(() => teams.id), // 仅 owner_type='team' 时非空
     archived: boolean('archived').notNull().default(false),
     deletedAt: ts('deleted_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
@@ -91,6 +133,12 @@ export const projects = pgTable(
     check(
       'projects_storage_connection_check',
       sql`(${t.storageKind} = 'local') = (${t.storageConnectionId} IS NULL)`,
+    ),
+    check('projects_visibility_check', sql`${t.visibility} IN ('private','team-read','team-write','public-read','public-write')`),
+    check('projects_owner_check', sql`(${t.ownerType} = 'user') = (${t.ownerTeamId} IS NULL)`),
+    check(
+      'projects_team_scope_check',
+      sql`${t.visibility} NOT IN ('team-read','team-write') OR ${t.ownerType} = 'team'`,
     ),
   ],
 );

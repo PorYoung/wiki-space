@@ -1,9 +1,9 @@
 {
-  "startedAt": "2026-09-13T01:34:05.124Z",
-  "durationMs": 7598,
-  "total": 62,
-  "passed": 61,
-  "failed": 1,
+  "startedAt": "2026-09-14T12:42:54.148Z",
+  "durationMs": 10711,
+  "total": 79,
+  "passed": 79,
+  "failed": 0,
   "results": [
     {
       "id": "P0",
@@ -45,13 +45,13 @@
       "id": "P1e",
       "name": "重复注册被拒（409）",
       "pass": true,
-      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"EMAIL_EXISTS: 该邮箱已注册\",\"requestId\":\"6151378b-5ad5-4128-a7c0-65d4576846b2\"}"
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"EMAIL_EXISTS: 该邮箱已注册\",\"requestId\":\"4be54eb4-35cd-438d-b80d-70911e2c1bb8\"}"
     },
     {
       "id": "P1f",
       "name": "弱密码注册被拒（400）",
       "pass": true,
-      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"VALIDATION_FAILED: 密码至少 8 位\",\"requestId\":\"a284f7a6-1b99-40d3-a043-3e9b528af46f\"}"
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"VALIDATION_FAILED: 密码至少 8 位\",\"requestId\":\"e18f7f90-5c44-4620-8fac-6e2234bc00fd\"}"
     },
     {
       "id": "P2",
@@ -63,37 +63,37 @@
       "id": "P3",
       "name": "越权读取被拦截（403 且不泄露数据）",
       "pass": true,
-      "detail": "status=403 body={\"code\":\"HTTP_ERROR\",\"message\":\"FORBIDDEN\",\"requestId\":\"09d3179e-33e2-451c-bc5b-76030fa70f5d\"}"
+      "detail": "status=403 body={\"code\":\"HTTP_ERROR\",\"message\":\"FORBIDDEN\",\"requestId\":\"55d36760-c4ca-4062-a76b-4b64e2d86ac9\"}"
     },
     {
       "id": "P4a",
       "name": "新建本地文档库（模板 project-space，后端 local）",
       "pass": true,
-      "detail": "{\"project\":{\"id\":\"51eb7837-8596-4d50-8723-55cb33461692\",\"name\":\"产品蓝图-mtz55000\",\"description\":\"e2e 本地文档库\",\"color\":null,\"visibility\":\"private\",\"template\":\"project"
+      "detail": "{\"project\":{\"id\":\"ed8596d2-6aae-4306-9ed4-b48424802de7\",\"name\":\"产品蓝图-mu18gyf0\",\"description\":\"e2e 本地文档库\",\"color\":null,\"visibility\":\"private\",\"template\":\"project"
     },
     {
       "id": "P4b",
       "name": "模板文档落盘 NAS 且目录结构一致",
       "pass": true,
-      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\产品蓝图-mtz55000-51eb7837"
+      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\产品蓝图-mu18gyf0-ed8596d2"
     },
     {
       "id": "P4c",
       "name": "新建文档（POST documents）",
       "pass": true,
-      "detail": "id=4d1120e1-3765-47d0-891b-c801a447593f"
+      "detail": "id=e463777c-69d9-4577-a1ff-7985458583c5"
     },
     {
       "id": "P4d",
       "name": "新建文档同步落盘 NAS",
       "pass": true,
-      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\产品蓝图-mtz55000-51eb7837"
+      "detail": "D:\\works\\wiki-space\\ewiki\\data-nas\\users\\Alice\\projects\\产品蓝图-mu18gyf0-ed8596d2"
     },
     {
       "id": "P4e",
       "name": "版本冲突保护（409）",
       "pass": true,
-      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"DOCUMENT_VERSION_CONFLICT\",\"requestId\":\"350d5b7d-c726-495b-88e0-40c7f70d429f\"}"
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"DOCUMENT_VERSION_CONFLICT\",\"requestId\":\"73236554-e52f-4cc8-8789-a5067c9a3b5b\"}"
     },
     {
       "id": "P4f",
@@ -115,15 +115,15 @@
     },
     {
       "id": "P5b",
-      "name": "错误令牌验证失败且给出明确原因",
-      "pass": false,
-      "detail": "连接验证失败，未保存：访问令牌无效或权限不足（401/403），请检查 Token"
+      "name": "错误令牌验证失败且给出明确原因（不落库，400）",
+      "pass": true,
+      "detail": "400 连接验证失败，未保存：访问令牌无效或权限不足（401/403），请检查 Token"
     },
     {
       "id": "P5c",
       "name": "非 Git 类型连接被拒（仅支持 GitLab/Gitea）",
       "pass": true,
-      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"VALIDATION_FAILED: 目前仅支持 GitLab（及兼容演示 Gitea）连接\",\"requestId\":\"6f495efa-c070-44b0-9a40-b4f"
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"VALIDATION_FAILED: 目前仅支持 GitLab（及兼容演示 Gitea）连接\",\"requestId\":\"3592c75d-c2c6-4769-b891-ef9"
     },
     {
       "id": "P5d",
@@ -135,31 +135,31 @@
       "id": "P5e",
       "name": "引用非本人存储源连接建库被拒（403）",
       "pass": true,
-      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"FORBIDDEN: 存储源不存在或不属于当前用户\",\"requestId\":\"ab561127-43b1-4f68-9499-abab06853655\"}"
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"FORBIDDEN: 存储源不存在或不属于当前用户\",\"requestId\":\"486cd12f-ec73-458b-94fe-adf8784e7252\"}"
     },
     {
       "id": "P6a",
       "name": "Git 文档库单次建库并自动初始化/关联",
       "pass": true,
-      "detail": "wikibot/ewiki-e2e-wiki-mtz55000 created=true "
+      "detail": "wikibot/ewiki-e2e-wiki-mu18gyf0 created=true "
     },
     {
       "id": "P6b",
       "name": "Git 服务端已存在该仓库",
       "pass": true,
-      "detail": "wikibot/ewiki-e2e-wiki-mtz55000"
+      "detail": "wikibot/ewiki-e2e-wiki-mu18gyf0"
     },
     {
       "id": "P6c",
       "name": "平台已按项目 id 克隆工作副本",
       "pass": true,
-      "detail": "repos/59010cea-7ee7-4619-8afc-8c770c32f9d3"
+      "detail": "repos/57d119e5-6bd6-4160-be8c-64aba1906775"
     },
     {
       "id": "P6d",
       "name": "平台内新建文档自动提交并推送",
       "pass": true,
-      "detail": "commit=53aaecfd7e err=-"
+      "detail": "commit=ed1a35a29a err=-"
     },
     {
       "id": "P6e",
@@ -171,7 +171,7 @@
       "id": "P6f",
       "name": "更新文档自动提交推送",
       "pass": true,
-      "detail": "commit=a8c52aeab6"
+      "detail": "commit=d475652911"
     },
     {
       "id": "P6g",
@@ -183,7 +183,7 @@
       "id": "P6h",
       "name": "关闭自动初始化且仓库不存在 → 明确 400 REPO_NOT_FOUND",
       "pass": true,
-      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"REPO_NOT_FOUND: 仓库不存在，且未启用自动初始化\",\"requestId\":\"0d91e72d-3fdb-4855-829a-87a199faf79a\"}"
+      "detail": "{\"code\":\"HTTP_ERROR\",\"message\":\"REPO_NOT_FOUND: 仓库不存在，且未启用自动初始化\",\"requestId\":\"8ef7b500-0fb7-4f18-a72f-baaf60287abf\"}"
     },
     {
       "id": "P6i",
@@ -195,7 +195,7 @@
       "id": "P6j",
       "name": "手动同步入队（202 syncing）",
       "pass": true,
-      "detail": "{\"ok\":true,\"projectId\":\"59010cea-7ee7-4619-8afc-8c770c32f9d3\",\"status\":\"syncing\",\"deduped\":false}"
+      "detail": "{\"ok\":true,\"projectId\":\"57d119e5-6bd6-4160-be8c-64aba1906775\",\"status\":\"syncing\",\"deduped\":false}"
     },
     {
       "id": "P6k",
@@ -219,31 +219,31 @@
       "id": "P6n",
       "name": "重复手动同步幂等（202；同分钟桶去重或新作业 noop，状态均不卡 syncing，同 commit 不报错）",
       "pass": true,
-      "detail": "http=202 resp={\"ok\":true,\"projectId\":\"59010cea-7ee7-4619-8afc-8c770c32f9d3\",\"status\":\"deduped\",\"deduped\":true} after=synced"
+      "detail": "http=202 resp={\"ok\":true,\"projectId\":\"57d119e5-6bd6-4160-be8c-64aba1906775\",\"status\":\"syncing\",\"deduped\":false} after=synced"
     },
     {
       "id": "P6o",
       "name": "初始化推送生成 v1 版本快照（commit hash 与建库响应一致）",
       "pass": true,
-      "detail": "hash=c467f70462 init=c467f70462"
+      "detail": "hash=4c737dc82e init=4c737dc82e"
     },
     {
       "id": "P6p",
       "name": "新建/保存文档的版本回填 commit hash（与自动提交一致）",
       "pass": true,
-      "detail": "v1=53aaecfd7e v2=a8c52aeab6"
+      "detail": "v1=ed1a35a29a v2=d475652911"
     },
     {
       "id": "P6q",
       "name": "初始化推送进入动态流（「同步」记录）",
       "pass": true,
-      "detail": "{\"id\":\"b684ee6f-88b8-4f00-aa92-4c5d67375ba3\",\"projectId\":\"59010cea-7ee7-4619-8afc-8c770c32f9d3\",\"actorId\":\"74819f40-07ad-461b-bcd6-9d4b0113858e\",\"actorName\":\"Alice\",\"verb\":\"sync\",\""
+      "detail": "{\"id\":\"817b801e-549d-4f35-adf5-7d8bd5860a3f\",\"projectId\":\"57d119e5-6bd6-4160-be8c-64aba1906775\",\"actorId\":\"74819f40-07ad-461b-bcd6-9d4b0113858e\",\"actorName\":\"Alice\",\"verb\":\"sync\",\""
     },
     {
       "id": "P7a",
       "name": "分享项目空间给 bob（可编辑）",
       "pass": true,
-      "detail": "{\"id\":\"a962ecc7-2729-4b2b-acb2-db54b0a5aee9\",\"projectId\":\"51eb7837-8596-4d50-8723-55cb33461692\",\"userId\":\"dcede4ac-d617-"
+      "detail": "{\"id\":\"27f049eb-e190-4b92-bdc8-08c7aa322ca1\",\"projectId\":\"ed8596d2-6aae-4306-9ed4-b48424802de7\",\"userId\":\"dcede4ac-d617-"
     },
     {
       "id": "P7b",
@@ -285,19 +285,19 @@
       "id": "P8a",
       "name": "创建发布站点（subpath + t-docs）",
       "pass": true,
-      "detail": "{\"id\":\"159ab6fa-8ca5-48e9-80ff-2398966d5058\",\"projectId\":\"51eb7837-8596-4d50-8723-55cb33461692\",\"mode\":\"hosted\",\"slug\":\"ewiki-e2e-site-54ke\""
+      "detail": "{\"id\":\"af54d525-ae8b-4212-8020-e9cd1c2e8dd9\",\"projectId\":\"ed8596d2-6aae-4306-9ed4-b48424802de7\",\"mode\":\"hosted\",\"slug\":\"ewiki-e2e-site-h4ct\""
     },
     {
       "id": "P8b",
       "name": "触发发布任务（入队）",
       "pass": true,
-      "detail": "{\"ok\":true,\"siteId\":\"159ab6fa-8ca5-48e9-80ff-2398966d5058\",\"queued\":true}"
+      "detail": "{\"ok\":true,\"siteId\":\"af54d525-ae8b-4212-8020-e9cd1c2e8dd9\",\"queued\":true}"
     },
     {
       "id": "P8c",
       "name": "worker 渲染并发布成功",
       "pass": true,
-      "detail": "{\"id\":\"ecb42424-b255-443a-b3e3-fdbf2816859b\",\"versionNo\":1,\"status\":\"published\",\"commitHash\":null,\"error\":null,\"createdAt\":\"2026-09-13T01:34:11.894Z\",\"finishedA"
+      "detail": "{\"id\":\"68db73e1-5c67-4118-a02a-4f9eb254d173\",\"versionNo\":1,\"status\":\"published\",\"commitHash\":null,\"error\":null,\"createdAt\":\"2026-09-14T12:43:03.222Z\",\"finishedA"
     },
     {
       "id": "P8d",
@@ -314,14 +314,14 @@
     {
       "id": "P9a",
       "name": "管理员登录",
-      "pass": "eyJhbGciOiJIUzI1NiJ9.eyJnbG9iYWxSb2xlIjoiYWRtaW4iLCJzdWIiOiI1ZDQ4ODQzNC0xZDk1LTQ1YjUtODhhMS1lNmZjYjZmNmZhMWIiLCJpYXQiOjE3ODkyNjMyNTIsImV4cCI6MTc4OTI2NDE1Mn0.3qrGsExmTHG36mmojddM3FTxmrdUBzUFMXbBf6O6Fw0",
+      "pass": "eyJhbGciOiJIUzI1NiJ9.eyJnbG9iYWxSb2xlIjoiYWRtaW4iLCJuYW1lIjoiZXdpa2kg566h55CG5ZGYIiwic3ViIjoiNWQ0ODg0MzQtMWQ5NS00NWI1LTg4YTEtZTZmY2I2ZjZmYTFiIiwiaWF0IjoxNzg5Mzg5Nzg0LCJleHAiOjE3ODkzOTA2ODR9.1uYy5h9IHd3EqDd-mQR4IU4mkRYO3vGwyo4bbDQdQ5c",
       "detail": "admin"
     },
     {
       "id": "P9b",
       "name": "用户管理列表",
       "pass": true,
-      "detail": "27 个用户"
+      "detail": "29 个用户"
     },
     {
       "id": "P9c",
@@ -357,7 +357,7 @@
       "id": "P9h",
       "name": "存储基础设施查看（NAS 根目录可写 + 用户占用）",
       "pass": true,
-      "detail": "{\"user\":\"Alice\",\"bytes\":468096,\"files\":560}"
+      "detail": "{\"user\":\"Alice\",\"bytes\":540932,\"files\":635}"
     },
     {
       "id": "P9i",
@@ -376,6 +376,108 @@
       "name": "关键操作审计台账（注册/建库/连接/自动提交/手动同步/分享/发布/禁用）（本轮为登录复跑，豁免 user.register）",
       "pass": true,
       "detail": "200 条台账齐全"
+    },
+    {
+      "id": "P10a",
+      "name": "创建团队（任何登录用户）",
+      "pass": true,
+      "detail": "{\"id\":\"1c84dea8-4986-47e9-888e-b17908d8b002\",\"name\":\"E2E团队-mu18gyf0\",\"slug\":\"t-e9c1e5\",\"description\":\"e2e 团队\",\"visibility\":\"private\",\"ownerI"
+    },
+    {
+      "id": "P10b",
+      "name": "非成员看不到团队（列表不含 + 详情 403）",
+      "pass": true,
+      "detail": "list=3 detail=403"
+    },
+    {
+      "id": "P10c",
+      "name": "添加成员：bob(member)/carol(maintainer) 成功；未注册邮箱 404",
+      "pass": true,
+      "detail": "bob=201 carol=201 ghost=404"
+    },
+    {
+      "id": "P10d",
+      "name": "member 改团队设置被拒（403）",
+      "pass": true,
+      "detail": "status=403"
+    },
+    {
+      "id": "P10e",
+      "name": "owner 保护：maintainer 不可移除 owner(403)；最后一名 owner 不可自移除(400)",
+      "pass": true,
+      "detail": "carol=403 self=400"
+    },
+    {
+      "id": "P10f",
+      "name": "团队库归属校验 + team-read：bob 可读 / dave(非成员)不可读不可见",
+      "pass": true,
+      "detail": "create=201 bob=200 dave=403"
+    },
+    {
+      "id": "P10g",
+      "name": "切 team-write：团队成员可写；局外人仍不可见",
+      "pass": true,
+      "detail": "patch=200 bobWrite=200 dave=403"
+    },
+    {
+      "id": "P10h",
+      "name": "切 public-read：登录用户可读、写被拒（403）",
+      "pass": true,
+      "detail": "patch=200 read=200 write=403"
+    },
+    {
+      "id": "P10i",
+      "name": "切 public-write：登录用户可写",
+      "pass": true,
+      "detail": "patch=200 write=200"
+    },
+    {
+      "id": "P10j",
+      "name": "个人库禁设团队档位（创建 400 + PATCH 400 VISIBILITY_REQUIRES_TEAM）",
+      "pass": true,
+      "detail": "create=400 patch=400"
+    },
+    {
+      "id": "P10k",
+      "name": "转移个人库 → 团队；团队库列表可见；bob 依档位获得读",
+      "pass": true,
+      "detail": "transfer=200 bobRead=200 teamProjects=2"
+    },
+    {
+      "id": "P10l",
+      "name": "团队 → 个人：team-* 冲突 400；调档后转回成功；非团队 owner 转走被拒",
+      "pass": true,
+      "detail": "conflict=400 back=200 memberDenied=403"
+    },
+    {
+      "id": "P10m",
+      "name": "越权回归：旧 /api/v1/team* 三端点全部下线（404）",
+      "pass": true,
+      "detail": "role=404 invite=404 list=404"
+    },
+    {
+      "id": "P10n",
+      "name": "团队/归属/可见性变更审计台账齐全",
+      "pass": true,
+      "detail": "team.create / team.member_add / project.transfer / project.visibility_change 齐全"
+    },
+    {
+      "id": "P10o",
+      "name": "团队成员接口下发继承成员列表（F6）",
+      "pass": true,
+      "detail": "status=200 inherited=3 含 bob"
+    },
+    {
+      "id": "P10p",
+      "name": "团队发现目录：internal 可见/可浏览；private 不出现",
+      "pass": true,
+      "detail": "discover=200 contains=true excludesPrivate=true detail=200 members=200"
+    },
+    {
+      "id": "P10q",
+      "name": "public-write 写路径有版本历史兜底（治理可观测）",
+      "pass": true,
+      "detail": "versions=3"
     }
   ]
 }

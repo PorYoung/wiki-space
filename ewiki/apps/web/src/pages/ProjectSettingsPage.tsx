@@ -15,12 +15,15 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Users,
   Wand2,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { apiFetch } from '../lib/api/client';
 import { useProjectRole } from '../lib/api/use-project-role';
 import { useShowToast } from '../components/Toast';
+import { VisibilityPicker } from '../components/VisibilityPicker';
+import { type Visibility } from '../lib/visibility';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +34,8 @@ interface ProjectOverview {
   name: string;
   description: string | null;
   visibility: string;
+  ownerType?: 'user' | 'team';
+  ownerTeamId?: string | null;
   template: string | null;
   ownerId: string;
   backendKind?: 'git' | 'local' | null;
@@ -46,6 +51,14 @@ interface ProjectOverview {
   memberCount: number;
   createdAt: string;
   updatedAt: string | null;
+}
+
+interface TeamItem {
+  id: string;
+  name: string;
+  myRole: string | null;
+  memberCount: number;
+  archived: boolean;
 }
 
 // storageConfig → 展示地址（git→url / local→path）
@@ -70,12 +83,6 @@ function relativeTime(iso: string | null | undefined): string {
   const diffDays = Math.floor(diffHrs / 24);
   return `${diffDays} 天前`;
 }
-
-const VISIBILITY_META: Record<string, { label: string; desc: string }> = {
-  private: { label: '私有', desc: '仅成员可见' },
-  team: { label: '团队', desc: '企业内可发现' },
-  public: { label: '公开', desc: '任何人可查看' },
-};
 
 const BACKEND_META: Record<string, { label: string; icon: typeof HardDrive }> = {
   local: { label: '服务器存储', icon: HardDrive },
@@ -116,7 +123,7 @@ function BasicInfoSection({ project, projectId, canManage }: { project: ProjectO
   const showToast = useShowToast();
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
-  const [visibility, setVisibility] = useState('team');
+  const [visibility, setVisibility] = useState<string>('private');
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
@@ -136,8 +143,7 @@ function BasicInfoSection({ project, projectId, canManage }: { project: ProjectO
     );
   }, [name, desc, visibility, project]);
 
-  // 保存接线（PLAN 5.1.1）：PATCH /api/v1/projects/:id 后端已实现（name/description/visibility/color），
-  // 替换旧的「无 PATCH」过时 TODO 注释
+  // 保存接线：PATCH /api/v1/projects/:id（name/description/visibility）；五态校验在后端（team-* 需归属团队）
   const saveMutation = useMutation({
     mutationFn: () =>
       apiFetch<unknown>(`/api/v1/projects/${projectId}`, {
@@ -149,7 +155,10 @@ function BasicInfoSection({ project, projectId, canManage }: { project: ProjectO
       void queryClient.invalidateQueries({ queryKey: ['projects'] });
       showToast('设置已保存');
     },
-    onError: () => showToast('保存失败，请重试'),
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : '';
+      showToast(msg.includes('VISIBILITY_REQUIRES_TEAM') ? '团队档位需先归属团队，请到「归属」页签调整' : '保存失败，请重试');
+    },
   });
 
   return (
@@ -195,30 +204,13 @@ function BasicInfoSection({ project, projectId, canManage }: { project: ProjectO
       </div>
 
       <div className="mt-5">
-        <label className="block text-xs font-medium text-neutral-700 mb-2">可见范围</label>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          {Object.entries(VISIBILITY_META).map(([key, meta]) => (
-            <button
-              key={key}
-              type="button"
-              disabled={!canManage}
-              onClick={() => setVisibility(key)}
-              className={`flex items-start gap-3 p-3 rounded-lg border text-left transition ${
-                visibility === key
-                  ? 'border-primary-300 bg-primary-50/60 ring-1 ring-primary-200'
-                  : 'border-neutral-200 hover:border-neutral-300 hover:bg-neutral-50'
-              }`}
-            >
-              <span className="w-6 h-6 rounded-md bg-white border border-neutral-200 flex items-center justify-center shrink-0">
-                <Globe size={11} className="text-neutral-500" />
-              </span>
-              <div>
-                <div className="text-xs font-medium text-neutral-800">{meta.label}</div>
-                <div className="text-[11px] text-neutral-500 mt-0.5">{meta.desc}</div>
-              </div>
-            </button>
-          ))}
-        </div>
+        <label className="block text-xs font-medium text-neutral-700 mb-2">可见范围（五档）</label>
+        <VisibilityPicker
+          value={visibility as Visibility}
+          onChange={(v) => canManage && setVisibility(v)}
+          disableTeamScopes={project?.ownerType !== 'team'}
+        />
+        {!canManage && <p className="mt-2 text-[11px] text-neutral-400">只读身份不可修改可见范围</p>}
       </div>
 
       <div className="mt-6 flex items-center justify-between border-t pt-4" style={{ borderColor: 'var(--border-soft)' }}>
@@ -240,6 +232,144 @@ function BasicInfoSection({ project, projectId, canManage }: { project: ProjectO
           <span className="text-[11px] text-neutral-400">仅项目所有者/维护者可修改基本信息</span>
         )}
       </div>
+    </section>
+  );
+}
+
+// ---- 归属（个人 / 团队 + 转移向导；TEAM-PERMISSIONS §6.1 F5） ----
+function OwnershipSection({ project, projectId, canDelete }: {
+  project: ProjectOverview | undefined;
+  projectId: string;
+  canDelete: boolean;
+}): React.ReactElement {
+  const queryClient = useQueryClient();
+  const showToast = useShowToast();
+  const [pending, setPending] = useState<'to-team' | 'to-user' | null>(null);
+  const [targetTeamId, setTargetTeamId] = useState('');
+
+  const teamsQuery = useQuery({
+    queryKey: ['teams'],
+    queryFn: () => apiFetch<{ items: TeamItem[] }>('/api/v1/teams'),
+  });
+  const allTeams = teamsQuery.data?.items ?? [];
+  // 接收方资格：目标团队 owner/maintainer（服务端同口径校验）
+  const eligibleTeams = allTeams.filter((t) => !t.archived && (t.myRole === 'owner' || t.myRole === 'maintainer'));
+  const ownedTeam = allTeams.find((t) => t.id === project?.ownerTeamId);
+  const effectiveTarget = targetTeamId || eligibleTeams[0]?.id || '';
+
+  const transferMutation = useMutation({
+    mutationFn: (body: { targetType: 'user' | 'team'; targetTeamId?: string }) =>
+      apiFetch<unknown>(`/api/v1/projects/${projectId}/transfer`, {
+        method: 'POST',
+        body: JSON.stringify({ ...body, confirmed: true }),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['project-overview', projectId] });
+      void queryClient.invalidateQueries({ queryKey: ['projects'] });
+      void queryClient.invalidateQueries({ queryKey: ['teams'] });
+      void queryClient.invalidateQueries({ queryKey: ['project-members', projectId] });
+      setPending(null);
+      showToast('归属已更新');
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : '';
+      showToast(
+        msg.includes('TRANSFER_VISIBILITY_CONFLICT')
+          ? '请先将可见性调整为「私有 / 公开」，再转移'
+          : msg.includes('FORBIDDEN')
+            ? '权限不足：团队库转回个人仅团队 owner 可操作'
+            : '转移失败，请重试',
+      );
+    },
+  });
+
+  const isTeamOwned = project?.ownerType === 'team';
+
+  return (
+    <section className="card p-6">
+      <SectionHeader
+        icon={<Users size={15} />}
+        title="归属"
+        desc="文档库归属于个人或团队；转移后权限按新归属的档位与成员角色生效"
+      />
+
+      <div className="flex items-center justify-between gap-3 rounded-lg border px-4 py-3" style={{ borderColor: 'var(--border-soft)' }}>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+            {isTeamOwned ? <Users size={14} /> : <Folder size={14} />}
+            {isTeamOwned ? `团队库 · ${ownedTeam?.name ?? '（团队）'}` : '个人库'}
+          </div>
+          <div className="mt-0.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            {isTeamOwned
+              ? '团队 owner 可删除/转移该库；团队成员按可见性档位访问'
+              : '库归你个人所有；可转移给一个你拥有 owner/maintainer 的团队'}
+          </div>
+        </div>
+        {canDelete ? (
+          <button
+            type="button"
+            className="btn-secondary !h-8 !text-xs shrink-0"
+            onClick={() => setPending(isTeamOwned ? 'to-user' : 'to-team')}
+          >
+            {isTeamOwned ? '转回个人…' : '转移到团队…'}
+          </button>
+        ) : (
+          <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>仅库 owner / 团队 owner 可转移</span>
+        )}
+      </div>
+
+      {pending === 'to-team' && (
+        <div className="mt-3 rounded-lg bg-primary-50/50 p-4 ring-1 ring-primary-200">
+          <div className="mb-2 text-xs font-medium" style={{ color: 'var(--text-primary)' }}>转移到团队（两步确认）</div>
+          {eligibleTeams.length === 0 ? (
+            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              你还没有可接收文档库的团队（需要目标团队的 owner/maintainer 身份）。
+            </div>
+          ) : (
+            <>
+              <select className="input !h-8 !text-xs" value={effectiveTarget} onChange={(e) => setTargetTeamId(e.target.value)}>
+                {eligibleTeams.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+              <div className="mt-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                转移后：库归团队所有，团队成员按可见性档位访问；你保留库内 owner 席位。
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  className="btn-primary !h-8 !text-xs"
+                  disabled={transferMutation.isPending || !effectiveTarget}
+                  onClick={() => transferMutation.mutate({ targetType: 'team', targetTeamId: effectiveTarget })}
+                >
+                  {transferMutation.isPending ? '转移中…' : '确认转移'}
+                </button>
+                <button type="button" className="btn-ghost !h-8 !text-xs" onClick={() => setPending(null)}>取消</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {pending === 'to-user' && (
+        <div className="mt-3 rounded-lg bg-rose-50/40 p-4 ring-1 ring-rose-200">
+          <div className="mb-2 text-xs font-medium" style={{ color: 'var(--text-primary)' }}>转回个人（仅团队 owner，目标 = 你本人）</div>
+          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            转移后团队将失去该库的访问（除非另行授予成员）；当前为「团队档位」时需先调档再转移。
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              className="btn-danger !h-8 !text-xs"
+              disabled={transferMutation.isPending}
+              onClick={() => transferMutation.mutate({ targetType: 'user' })}
+            >
+              {transferMutation.isPending ? '转移中…' : '确认转回个人'}
+            </button>
+            <button type="button" className="btn-ghost !h-8 !text-xs" onClick={() => setPending(null)}>取消</button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -704,7 +834,7 @@ function ExternalImportSection({ projectId, canWrite }: { projectId: string; can
 }
 
 // ---- 危险区 ----
-function DangerZoneSection({ projectId, projectName, canManage }: { projectId: string; projectName?: string; canManage: boolean }): React.ReactElement {
+function DangerZoneSection({ projectId, projectName, canDelete }: { projectId: string; projectName?: string; canDelete: boolean }): React.ReactElement {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const showToast = useShowToast();
@@ -742,7 +872,7 @@ function DangerZoneSection({ projectId, projectName, canManage }: { projectId: s
           <div className="text-sm font-medium text-neutral-900">删除项目</div>
           <div className="text-[11px] text-neutral-500 mt-0.5">删除后项目及其文档将从全站列表消失（软删除，后端暂不提供界面恢复入口）</div>
         </div>
-        {canManage ? (
+        {canDelete ? (
           <button
             type="button"
             onClick={handleDelete}
@@ -752,7 +882,7 @@ function DangerZoneSection({ projectId, projectName, canManage }: { projectId: s
             <Trash2 size={12} /> {deleteMutation.isPending ? '删除中…' : '删除项目'}
           </button>
         ) : (
-          <span className="text-[11px] text-rose-400 shrink-0">仅项目所有者/维护者可删除</span>
+          <span className="text-[11px] text-rose-400 shrink-0">仅库 owner / 团队 owner 可删除</span>
         )}
       </div>
     </section>
@@ -766,10 +896,10 @@ function DangerZoneSection({ projectId, projectName, canManage }: { projectId: s
 export function ProjectSettingsPage(): React.ReactElement {
   const { id: projectId } = useParams();
   const navigate = useNavigate();
-  // 项目内角色：设置页各区块按 canManage（改配置/删项目）/ canWrite（同步/AI/导入）收口
-  const { canWrite, canManage } = useProjectRole(projectId);
+  // 项目内角色（服务端权威能力位）：canWrite（同步/AI/导入）/ canManage（改配置）/ canDelete（删除/转移）
+  const { canWrite, canManage, canDelete } = useProjectRole(projectId);
   const [activeTab, setActiveTab] = useState<
-    'basic' | 'storage' | 'sync' | 'ai' | 'import' | 'danger'
+    'basic' | 'ownership' | 'storage' | 'sync' | 'ai' | 'import' | 'danger'
   >('basic');
 
   const { data: project, isLoading: projectLoading } = useQuery<ProjectOverview>({
@@ -780,6 +910,7 @@ export function ProjectSettingsPage(): React.ReactElement {
 
   const tabs: Array<{ key: typeof activeTab; label: string; icon: React.ReactElement }> = [
     { key: 'basic', label: '基本信息', icon: <Settings2 size={13} /> },
+    { key: 'ownership', label: '归属', icon: <Users size={13} /> },
     { key: 'storage', label: '存储源', icon: <HardDrive size={13} /> },
     { key: 'sync', label: '同步设置', icon: <RefreshCw size={13} /> },
     { key: 'ai', label: 'AI 整理', icon: <Sparkles size={13} /> },
@@ -868,6 +999,16 @@ export function ProjectSettingsPage(): React.ReactElement {
               )
             )}
 
+            {activeTab === 'ownership' && projectLoading && (
+              <div className="card p-6 space-y-3">
+                <div className="skeleton h-4 w-32" />
+                <div className="skeleton h-12 w-full" />
+              </div>
+            )}
+            {activeTab === 'ownership' && !projectLoading && (
+              <OwnershipSection project={project} projectId={projectId!} canDelete={canDelete} />
+            )}
+
             {activeTab === 'storage' && <StorageSection project={project} projectLoading={projectLoading} />}
             {activeTab === 'sync' && (
               <SyncSettingsSection
@@ -880,7 +1021,7 @@ export function ProjectSettingsPage(): React.ReactElement {
             )}
             {activeTab === 'ai' && <AiClassifySection projectId={projectId!} canWrite={canWrite} />}
             {activeTab === 'import' && <ExternalImportSection projectId={projectId!} canWrite={canWrite} />}
-            {activeTab === 'danger' && <DangerZoneSection projectId={projectId!} projectName={project?.name} canManage={canManage} />}
+            {activeTab === 'danger' && <DangerZoneSection projectId={projectId!} projectName={project?.name} canDelete={canDelete} />}
           </div>
         </div>
       </div>

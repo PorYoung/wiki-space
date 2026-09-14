@@ -6,7 +6,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "pnpm -r --parallel --filter \"./apps/*\" run dev",
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" run dev --port 6173",
     "build": "pnpm -r build",
     "lint": "eslint .",
     "typecheck": "pnpm -r typecheck",

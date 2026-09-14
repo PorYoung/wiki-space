@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { apiFetch } from '../lib/api/client';
+import { visibilityLabel } from '../lib/visibility';
 
 // ---------------------------------------------------------------------------
 // Types — 后端 GET /api/v1/projects/:id/members
@@ -32,6 +33,17 @@ interface ProjectMember {
   avatarUrl: string | null;
   lastActive: string | null;
   online: boolean;
+}
+
+// F6：团队继承成员（项目归属团队后，经 team-read/team-write 档位对库有隐式访问的成员）
+interface InheritedTeamMember {
+  id: string;
+  role: string;
+  joinedAt: string;
+  userId: string;
+  name: string | null;
+  email: string | null;
+  avatarUrl: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +70,13 @@ const ROLE_OPTIONS: Array<{ key: string; label: string }> = [
   { key: 'editor', label: '设为编辑者' },
   { key: 'guest', label: '设为访客' },
 ];
+
+// F6：团队角色文案（结构与后端 TEAM_ROLE_LABEL 对齐；管理动作收敛在团队页，本页仅只读展示）
+const TEAM_ROLE_META: Record<string, { label: string; tagCls: string }> = {
+  owner: { label: '团队所有者', tagCls: 'tag-primary' },
+  maintainer: { label: '团队维护者', tagCls: 'tag-success' },
+  member: { label: '团队成员', tagCls: 'tag-neutral' },
+};
 
 function relativeTime(iso: string | null | undefined): string {
   if (!iso) return '刚加入';
@@ -87,21 +106,36 @@ export function MembersPage(): React.ReactElement {
   // 默认角色：原型为 Editor（ProjectMembers.jsx:93），现行 guest —— 角色语义差异待产品确认后再对齐（PLAN 5.3.5）
   const [inviteRole, setInviteRole] = useState('guest');
 
-  const membersQuery = useQuery<{ items: ProjectMember[]; total: number; myRole?: string | null; visibility?: string }>({
+  interface MembersResp {
+    items: ProjectMember[];
+    total: number;
+    myRole?: string | null;
+    explicitRole?: string | null;
+    teamRole?: string | null;
+    canWrite?: boolean;
+    canManage?: boolean;
+    canDelete?: boolean;
+    ownerType?: string;
+    visibility?: string;
+    teamMembers?: InheritedTeamMember[];
+  }
+  const membersQuery = useQuery<MembersResp>({
     queryKey: ['project-members', projectId],
-    queryFn: () =>
-      apiFetch<{ items: ProjectMember[]; total: number; myRole?: string | null; visibility?: string }>(
-        `/api/v1/projects/${projectId}/members`,
-      ),
+    queryFn: () => apiFetch<MembersResp>(`/api/v1/projects/${projectId}/members`),
     enabled: !!projectId,
   });
 
-  // 当前用户在项目内的实际角色（后端 projectAccess 推导：null = 非成员的隐式只读读者，
-  // 经 team/public 可见性访问；全局 admin 兜底 maintainer）。未加载完成前按可管理处理避免闪烁。
-  const myRole = membersQuery.data ? (membersQuery.data.myRole ?? null) : 'owner';
-  const canManage = myRole === 'owner' || myRole === 'maintainer';
+  // 权限判定消费服务端权威能力位（TEAM-PERMISSIONS §5.2 P4'）：canManage 直接取自响应；
+  // 未加载完成前一律按只读处理（§11-7 收敛：宁可晚显示管理入口，也不给只读用户闪现）
+  const myRole = membersQuery.data ? (membersQuery.data.myRole ?? null) : null;
+  const teamRole = membersQuery.data?.teamRole ?? null;
+  const canWrite = membersQuery.data?.canWrite ?? false;
+  const canManage = membersQuery.data?.canManage ?? false;
 
   const allMembers = membersQuery.data?.items ?? [];
+  // F6：团队继承成员列表（owner_type='team' 时非空）。这些成员凭团队身份经 team-read/team-write 档位隐式访问库，
+  // 但不在「项目成员」显式列表内（那是另一张表）。本页以只读分区单独呈现，成员归属变更收敛到团队页。
+  const inheritedMembers = membersQuery.data?.teamMembers ?? [];
   // 角色筛选 + 姓名/邮箱搜索（对齐原型 :149-164 过滤逻辑）
   const members = allMembers.filter((m) => {
     if (roleFilter && m.role !== roleFilter) return false;
@@ -205,8 +239,8 @@ export function MembersPage(): React.ReactElement {
           )}
         </div>
 
-        {/* 只读身份提示：非成员（经可见性隐式只读访问）或访客成员 */}
-        {membersQuery.data && (myRole === null || myRole === 'guest') && (
+        {/* 只读身份提示：无写权限者（非成员隐式读者 / 团队成员只读档 / 访客成员） */}
+        {membersQuery.data && !canWrite && (
           <div
             className="flex items-start gap-2.5 rounded-lg border px-4 py-3 mb-4 text-xs"
             style={{ borderColor: 'var(--border-soft)', background: 'var(--bg-muted, rgba(0,0,0,0.02))' }}
@@ -214,9 +248,9 @@ export function MembersPage(): React.ReactElement {
             <Eye size={14} className="shrink-0 mt-0.5 text-neutral-400" />
             {myRole === null ? (
               <span className="text-neutral-600">
-                你正在以<b>只读身份</b>查看该知识库
-                {membersQuery.data.visibility === 'public' ? '（公开可见）' : '（团队可见）'}
-                ，因此不在下方成员列表中。如需协作，请联系管理员邀请你加入。
+                你正在以<b>只读身份</b>查看该知识库（当前可见性：
+                {visibilityLabel(membersQuery.data.visibility)}
+                {teamRole ? ` · 你的团队角色：${teamRole}` : ''}），因此不在下方成员列表中。如需协作，请联系管理员邀请你加入。
               </span>
             ) : (
               <span className="text-neutral-600">
@@ -479,6 +513,83 @@ export function MembersPage(): React.ReactElement {
             )}
           </div>
         </div>
+
+        {/* F6：团队继承只读分区（owner_type='team' 且团队有成员时展示）—— 成员凭团队身份隐式访问库，
+            不在此管理与邀请，收敛到团队详情页 */}
+        {inheritedMembers.length > 0 && (
+          <div className="card mt-6 overflow-hidden">
+            <div className="flex items-center justify-between gap-3 px-5 py-3 border-b" style={{ borderColor: 'var(--border-soft)' }}>
+              <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                <Users size={14} />
+                团队继承成员
+                <span className="font-mono text-[11px] font-normal text-neutral-400">{inheritedMembers.length}</span>
+              </div>
+              <span className="text-[11px] text-neutral-400">由团队身份自动获得访问权 · 成员管理请前往团队设置</span>
+            </div>
+            <div className="hidden md:block">
+              <div className="grid grid-cols-[1fr_140px_130px_160px] items-center gap-4 px-5 py-3 text-[11px] font-semibold uppercase tracking-wide text-neutral-400 border-b"
+                style={{ borderColor: 'var(--border-soft)' }}>
+                <span>成员</span>
+                <span>团队角色</span>
+                <span>来源</span>
+                <span>加入团队</span>
+              </div>
+              <div className="divide-y" style={{ borderColor: 'var(--border-soft)' }}>
+                {inheritedMembers.map((m) => {
+                  const meta = TEAM_ROLE_META[m.role] ?? TEAM_ROLE_META.member;
+                  return (
+                    <div key={m.id}
+                      className="grid grid-cols-[1fr_140px_130px_160px] items-center gap-4 px-5 py-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        {m.avatarUrl ? (
+                          <img src={m.avatarUrl} alt="" className="h-9 w-9 rounded-full object-cover" />
+                        ) : (
+                          <div className={`h-9 w-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 ${AVATAR_CLS}`}>
+                            {(m.name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-neutral-900 truncate">{m.name ?? m.email ?? '未命名成员'}</div>
+                          <div className="flex items-center gap-1 text-[11px] text-neutral-400 truncate">
+                            <Mail size={10} className="shrink-0" />
+                            <span>{m.email ?? '未绑定邮箱'}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className={`tag ${meta.tagCls} w-fit`}>{meta.label}</span>
+                      <span className="inline-flex items-center gap-1.5 text-xs text-neutral-500">
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary-400" />
+                        团队继承
+                      </span>
+                      <div className="text-xs text-neutral-500 tabular-nums">{relativeTime(m.joinedAt)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="md:hidden divide-y" style={{ borderColor: 'var(--border-soft)' }}>
+              {inheritedMembers.map((m) => {
+                const meta = TEAM_ROLE_META[m.role] ?? TEAM_ROLE_META.member;
+                return (
+                  <div key={m.id} className="flex items-center gap-3 px-4 py-3">
+                    {m.avatarUrl ? (
+                      <img src={m.avatarUrl} alt="" className="h-10 w-10 rounded-full object-cover" />
+                    ) : (
+                      <div className={`h-10 w-10 rounded-full flex items-center justify-center text-sm font-semibold shrink-0 ${AVATAR_CLS}`}>
+                        {(m.name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-neutral-900 truncate">{m.name ?? m.email ?? '未命名成员'}</div>
+                      <div className="text-[11px] text-neutral-400 truncate">{m.email ?? '未绑定邮箱'}</div>
+                    </div>
+                    <span className={`tag ${meta.tagCls} !text-[10px] !px-2`}>{meta.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Invite dialog（头部 Mail 图标块 + X 关闭，对齐原型 ProjectMembers.jsx:484-505） */}

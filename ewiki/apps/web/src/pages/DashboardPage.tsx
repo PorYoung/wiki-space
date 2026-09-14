@@ -5,6 +5,7 @@ import {
   Plus, BookOpen, RefreshCw, AlertCircle, GitBranch,
 } from 'lucide-react';
 import { apiFetch, fetchAllDocuments } from '../lib/api/client';
+import { isPublicScope, visibilityLabel } from '../lib/visibility';
 import type { Activity, Document, Project, User } from '@ewiki/shared';
 
 // 迁移自 prototype Dashboard.jsx（TS 化 + 真实 API：F01–F05）
@@ -122,9 +123,10 @@ export function DashboardPage(): React.ReactElement {
     queryKey: ['documents'],
     queryFn: () => fetchAllDocuments<Document>(),
   });
-  const { data: teamData, isLoading: teamLoading } = useQuery({
-    queryKey: ['team'],
-    queryFn: () => apiFetch<{ items: User[] }>('/api/v1/team'),
+  const { data: teamsData, isLoading: teamsLoading } = useQuery({
+    // 团队成员数 = 我加入的团队去重成员合计（真团队模型；旧 /api/v1/team 全平台用户表已下线）
+    queryKey: ['teams'],
+    queryFn: () => apiFetch<{ items: Array<{ id: string; memberCount: number }> }>('/api/v1/teams'),
   });
   const { data: actData, isLoading: activitiesLoading } = useQuery({
     queryKey: ['activities'],
@@ -135,7 +137,8 @@ export function DashboardPage(): React.ReactElement {
   const projects = projData?.items ?? [];
   const documents = docData ?? [];
   const activities = actData?.items ?? [];
-  const team = teamData?.items ?? [];
+  const teams = teamsData?.items ?? [];
+  const teamMemberTotal = teams.reduce((sum, t) => sum + (t.memberCount ?? 0), 0);
 
   const sortedProjects = [...projects].sort(
     (a, b) => new Date(b.updatedAt ?? Date.now()).getTime() - new Date(a.updatedAt ?? Date.now()).getTime(),
@@ -224,7 +227,7 @@ export function DashboardPage(): React.ReactElement {
       </section>
 
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 animate-fade-up">
-        {projectsLoading || docsLoading || teamLoading || activitiesLoading ? (
+        {projectsLoading || docsLoading || teamsLoading || activitiesLoading ? (
           <>
             <SkeletonStat />
             <SkeletonStat />
@@ -235,7 +238,7 @@ export function DashboardPage(): React.ReactElement {
           <>
             <StatCard label="文档库" value={projects.length} icon={<FolderOpen size={18} />} iconBg="bg-primary-50 text-primary-600" dot="bg-primary-500" pill="全部项目" />
             <StatCard label="文档总数" value={documents.length} icon={<FileText size={18} />} iconBg="bg-emerald-50 text-emerald-600" dot="bg-emerald-500" pill="已纳管" />
-            <StatCard label="成员数" value={team.length} icon={<Users size={18} />} iconBg="bg-neutral-100 text-neutral-600" dot="bg-neutral-400" pill="活跃协作" />
+            <StatCard label="团队成员" value={teamMemberTotal} icon={<Users size={18} />} iconBg="bg-neutral-100 text-neutral-600" dot="bg-neutral-400" pill={`${teams.length} 个团队`} />
             <StatCard label="今日动态" value={todayCount} icon={<TrendingUp size={18} />} iconBg="bg-amber-50 text-amber-600" dot="bg-amber-500" pill="24 小时内" />
           </>
         )}
@@ -261,7 +264,9 @@ export function DashboardPage(): React.ReactElement {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <h3 className="truncate font-medium">{p.name}</h3>
-                      <span className="tag tag-primary">{p.visibility === 'public' ? '公开' : p.visibility === 'team' ? '团队' : '私有'}</span>
+                      <span className={`tag ${p.visibility.startsWith('team-') ? 'tag-primary' : isPublicScope(p.visibility) ? 'tag-success' : 'tag-neutral'}`}>
+                        {visibilityLabel(p.visibility)}
+                      </span>
                     </div>
                     <p className="mt-0.5 truncate text-xs" style={{ color: 'var(--text-muted, #64748b)' }}>{p.description ?? ''}</p>
                   </div>

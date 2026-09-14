@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Cloud, GitBranch, FolderPlus, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Cloud, GitBranch, FolderPlus, CheckCircle2, AlertTriangle, User, Users } from 'lucide-react';
 import { apiFetch } from '../lib/api/client';
+import { VisibilityPicker } from '../components/VisibilityPicker';
+import { VISIBILITY_META, isTeamScope, type Visibility } from '../lib/visibility';
 
-/** 新建文档库向导（本期需求 5/7）：模板或空库 × 云文档或 Git 仓库（自动建仓/关联） */
+/** 新建文档库向导（需求 5/7 + TEAM-PERMISSIONS §6.1 F4）：归属（个人/团队）× 五档可见性 × 存储源 × 模板 */
 
 interface LibraryTemplate {
   id: string;
@@ -19,6 +21,13 @@ interface ConnectionItem {
   baseUrl: string;
   status: 'unverified' | 'ok' | 'error';
 }
+interface TeamItem {
+  id: string;
+  name: string;
+  myRole: string | null;
+  memberCount: number;
+  archived: boolean;
+}
 interface CreateResult {
   project: { id: string; name: string };
   docs: number;
@@ -27,10 +36,14 @@ interface CreateResult {
 
 export function NewProjectPage(): React.ReactElement {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const presetTeamId = searchParams.get('owner') ?? '';
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [visibility, setVisibility] = useState<'private' | 'team' | 'public'>('private');
+  const [ownerType, setOwnerType] = useState<'user' | 'team'>(presetTeamId ? 'team' : 'user');
+  const [ownerTeamId, setOwnerTeamId] = useState(presetTeamId);
+  const [visibility, setVisibility] = useState<Visibility>('private');
   const [storageType, setStorageType] = useState<'cloud' | 'git'>('cloud');
   const [template, setTemplate] = useState('empty');
   const [connectionId, setConnectionId] = useState('');
@@ -49,6 +62,15 @@ export function NewProjectPage(): React.ReactElement {
   });
   const connections = useMemo(() => connectionsQuery.data?.items ?? [], [connectionsQuery.data]);
 
+  const teamsQuery = useQuery({
+    queryKey: ['teams'],
+    queryFn: () => apiFetch<{ items: TeamItem[] }>('/api/v1/teams'),
+  });
+  const teams = useMemo(() => (teamsQuery.data?.items ?? []).filter((t) => !t.archived), [teamsQuery.data]);
+  // 预选/单选兜底：归属团队时的有效目标团队
+  const effectiveTeamId = ownerTeamId || teams[0]?.id || '';
+  const effectiveTeamName = teams.find((t) => t.id === effectiveTeamId)?.name ?? '';
+
   const createMutation = useMutation({
     mutationFn: () =>
       apiFetch<CreateResult>('/api/v1/projects', {
@@ -57,6 +79,8 @@ export function NewProjectPage(): React.ReactElement {
           name,
           description: description || undefined,
           visibility,
+          ownerType,
+          ownerTeamId: ownerType === 'team' ? effectiveTeamId : undefined,
           template,
           storage:
             storageType === 'git'
@@ -72,7 +96,7 @@ export function NewProjectPage(): React.ReactElement {
   });
 
   const canNext =
-    (step === 1 && name.trim().length > 0) ||
+    (step === 1 && name.trim().length > 0 && (ownerType === 'user' || !!effectiveTeamId)) ||
     (step === 2 && (storageType === 'cloud' || (!!connectionId && /^[A-Za-z0-9_.-]{1,100}$/.test(repoName)))) ||
     step === 3;
 
@@ -101,7 +125,7 @@ export function NewProjectPage(): React.ReactElement {
       </div>
 
       {step === 1 && (
-        <div className="card space-y-4 p-5">
+        <div className="card space-y-5 p-5">
           <div>
             <label className="mb-1.5 block text-sm font-medium">知识库名称 *</label>
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="如：2026 旗舰项目空间" />
@@ -111,12 +135,55 @@ export function NewProjectPage(): React.ReactElement {
             <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="一句话介绍（可选）" />
           </div>
           <div>
+            <label className="mb-1.5 block text-sm font-medium">归属</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setOwnerType('user');
+                  if (isTeamScope(visibility)) setVisibility('private');
+                }}
+                className={`rounded-lg px-3 py-2.5 text-left transition ${
+                  ownerType === 'user' ? 'bg-primary-50/70 ring-1 ring-primary-400' : 'hover:bg-neutral-50/70 ring-1 ring-transparent'
+                }`}
+              >
+                <span className="flex items-center gap-1.5 text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                  <User size={13} /> 个人
+                </span>
+                <span className="mt-0.5 block text-xs" style={{ color: 'var(--text-muted)' }}>库归你个人所有，可随时转移给团队</span>
+              </button>
+              <button
+                type="button"
+                disabled={teams.length === 0}
+                onClick={() => setOwnerType('team')}
+                className={`rounded-lg px-3 py-2.5 text-left transition ${
+                  ownerType === 'team' ? 'bg-primary-50/70 ring-1 ring-primary-400' : 'hover:bg-neutral-50/70 ring-1 ring-transparent'
+                } ${teams.length === 0 ? 'cursor-not-allowed opacity-45' : ''}`}
+              >
+                <span className="flex items-center gap-1.5 text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                  <Users size={13} /> 团队
+                </span>
+                <span className="mt-0.5 block text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {teams.length === 0 ? '你还没有加入任何团队（可先到「团队」页创建）' : '库归团队所有，团队成员按可见性访问'}
+                </span>
+              </button>
+            </div>
+            {ownerType === 'team' && teams.length > 1 && (
+              <select className="input mt-2" value={effectiveTeamId} onChange={(e) => setOwnerTeamId(e.target.value)}>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+          <div>
             <label className="mb-1.5 block text-sm font-medium">可见性</label>
-            <select className="input" value={visibility} onChange={(e) => setVisibility(e.target.value as 'private' | 'team' | 'public')}>
-              <option value="private">私有（仅成员可见）</option>
-              <option value="team">团队（登录用户可读）</option>
-              <option value="public">公开（登录用户可读写入口可见）</option>
-            </select>
+            <VisibilityPicker value={visibility} onChange={setVisibility} disableTeamScopes={ownerType !== 'team'} />
+            <p className="mt-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              {ownerType === 'team'
+                ? `团队库「${effectiveTeamName}」：团队成员按「${VISIBILITY_META[visibility].label}」档位访问；「公开」档位对所有登录用户生效。`
+                : '个人库：团队档位需先归属团队；「公开」档位对所有登录用户生效。'}
+            </p>
           </div>
         </div>
       )}

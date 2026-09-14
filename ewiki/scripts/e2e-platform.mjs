@@ -242,7 +242,7 @@ async function main() {
       method: 'POST',
       body: { name: '错误令牌', kind: 'gitea', baseUrl: GITEA, token: 'invalid-token-xxx' },
     });
-    record('P5b', '错误令牌验证失败且给出明确原因', bad.status === 201 && bad.json.status === 'error' && /令牌/.test(bad.json.message ?? ''), bad.json?.message);
+    record('P5b', '错误令牌验证失败且给出明确原因（不落库，400）', bad.status === 400 && bad.json.status === 'error' && /令牌/.test(bad.json.message ?? ''), `${bad.status} ${bad.json?.message}`);
 
     const invalid = await req('/api/v1/connections', { token: ctx.alice, method: 'POST', body: { name: 'x', kind: 'ftp', baseUrl: GITEA, token: 't' } });
     record('P5c', '非 Git 类型连接被拒（仅支持 GitLab/Gitea）', invalid.status === 400, JSON.stringify(invalid.json).slice(0, 120));
@@ -573,6 +573,195 @@ async function main() {
     const missing = expected.filter((a) => !actions.has(a));
     const suffix = ctx.aliceRegistered ? '' : '（本轮为登录复跑，豁免 user.register）';
     record('P9k', `关键操作审计台账（注册/建库/连接/自动提交/手动同步/分享/发布/禁用）${suffix}`, missing.length === 0, missing.length ? `缺少: ${missing.join(',')}` : `${audit.json.items?.length} 条台账齐全`);
+  }
+
+  // [P10] 团队 · 文档归属 · 五态权限（TEAM-PERMISSIONS-DESIGN §8.2）
+  {
+    const dave = await loginOrRegister('dave-e2e@ewiki.local', 'Dave');
+    ctx.dave = dave.token;
+
+    // P10a 创建团队（alice）→ owner 席位自动建立
+    const team = await req('/api/v1/teams', {
+      token: ctx.alice, method: 'POST', body: { name: `E2E团队-${runId}`, description: 'e2e 团队' },
+    });
+    const teamId = team.json?.id;
+    ctx.teamId = teamId;
+    record('P10a', '创建团队（任何登录用户）', team.status === 201 && team.json?.myRole === 'owner' && team.json?.memberCount === 1, JSON.stringify(team.json).slice(0, 140));
+
+    // P10b 非成员不可见团队（列表不含 + 详情 403）
+    const bobTeams = await req('/api/v1/teams', { token: ctx.bob });
+    const bobDetail = await req(`/api/v1/teams/${teamId}`, { token: ctx.bob });
+    record('P10b', '非成员看不到团队（列表不含 + 详情 403）',
+      !(bobTeams.json?.items ?? []).some((t) => t.id === teamId) && bobDetail.status === 403,
+      `list=${(bobTeams.json?.items ?? []).length} detail=${bobDetail.status}`);
+
+    // P10c 添加成员：bob(member) + carol(maintainer)；未注册邮箱 404（不代造账号）
+    const addBob = await req(`/api/v1/teams/${teamId}/members`, {
+      token: ctx.alice, method: 'POST', body: { email: 'bob-e2e@ewiki.local', role: 'member' },
+    });
+    const addCarol = await req(`/api/v1/teams/${teamId}/members`, {
+      token: ctx.alice, method: 'POST', body: { email: 'carol-e2e@ewiki.local', role: 'maintainer' },
+    });
+    const addGhost = await req(`/api/v1/teams/${teamId}/members`, {
+      token: ctx.alice, method: 'POST', body: { email: `nobody-${runId}@ewiki.local`, role: 'member' },
+    });
+    record('P10c', '添加成员：bob(member)/carol(maintainer) 成功；未注册邮箱 404',
+      addBob.status === 201 && addCarol.status === 201 && addGhost.status === 404,
+      `bob=${addBob.status} carol=${addCarol.status} ghost=${addGhost.status}`);
+
+    // P10d member 无权改团队设置
+    const bobPatchTeam = await req(`/api/v1/teams/${teamId}`, {
+      token: ctx.bob, method: 'PATCH', body: { name: '改了也不该生效' },
+    });
+    record('P10d', 'member 改团队设置被拒（403）', bobPatchTeam.status === 403, `status=${bobPatchTeam.status}`);
+
+    // P10e owner 保护：maintainer 不能移除 owner；owner 不能移除自己（最后一名 owner）
+    const carolRemoveOwner = await req(`/api/v1/teams/${teamId}/members/${ctx.aliceId}`, {
+      token: ctx.carol, method: 'PUT', body: { remove: true },
+    });
+    const selfRemove = await req(`/api/v1/teams/${teamId}/members/${ctx.aliceId}`, {
+      token: ctx.alice, method: 'PUT', body: { remove: true },
+    });
+    record('P10e', 'owner 保护：maintainer 不可移除 owner(403)；最后一名 owner 不可自移除(400)',
+      carolRemoveOwner.status === 403 && selfRemove.status === 400,
+      `carol=${carolRemoveOwner.status} self=${selfRemove.status}`);
+
+    // P10f 团队库（team-read）：团队成员可读，局外人不可读
+    const teamProj = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST',
+      body: { name: `团队库-${runId}`, visibility: 'team-read', ownerType: 'team', ownerTeamId: teamId, storage: { kind: 'local' } },
+    });
+    const teamProjId = teamProj.json?.project?.id;
+    ctx.teamProjId = teamProjId;
+    const bobRead = await req(`/api/v1/projects/${teamProjId}/overview`, { token: ctx.bob });
+    const daveRead = await req(`/api/v1/projects/${teamProjId}/overview`, { token: ctx.dave });
+    const daveList = await req('/api/v1/projects', { token: ctx.dave });
+    record('P10f', '团队库归属校验 + team-read：bob 可读 / dave(非成员)不可读不可见',
+      teamProj.status === 201 && teamProj.json?.project?.ownerType === 'team' && bobRead.status === 200 && daveRead.status === 403 && !(daveList.json?.items ?? []).some((p) => p.id === teamProjId),
+      `create=${teamProj.status} bob=${bobRead.status} dave=${daveRead.status}`);
+
+    // 建一篇文档用于写权限探针
+    const doc = await req(`/api/v1/projects/${teamProjId}/documents`, {
+      token: ctx.alice, method: 'POST', body: { path: 'README.md', content: '# 团队库\n初始内容' },
+    });
+    const docId = doc.json?.id ?? doc.json?.document?.id;
+    ctx.teamDocId = docId;
+
+    // P10g 切 team-write：bob 可写；dave 仍不可读
+    const toTeamWrite = await req(`/api/v1/projects/${teamProjId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'team-write' } });
+    const bobWrite = await req(`/api/v1/documents/${docId}`, { token: ctx.bob, method: 'PUT', body: { content: '# 团队库\nbob 在 team-write 档位写入' } });
+    const daveStillHidden = await req(`/api/v1/projects/${teamProjId}/overview`, { token: ctx.dave });
+    record('P10g', '切 team-write：团队成员可写；局外人仍不可见',
+      toTeamWrite.status === 200 && bobWrite.status === 200 && daveStillHidden.status === 403,
+      `patch=${toTeamWrite.status} bobWrite=${bobWrite.status} dave=${daveStillHidden.status}`);
+
+    // P10h 切 public-read：dave 可读不可写
+    const toPublicRead = await req(`/api/v1/projects/${teamProjId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'public-read' } });
+    const daveRead2 = await req(`/api/v1/projects/${teamProjId}/overview`, { token: ctx.dave });
+    const daveWriteDenied = await req(`/api/v1/documents/${docId}`, { token: ctx.dave, method: 'PUT', body: { content: 'dave 不该能写' } });
+    record('P10h', '切 public-read：登录用户可读、写被拒（403）',
+      toPublicRead.status === 200 && daveRead2.status === 200 && daveWriteDenied.status === 403,
+      `patch=${toPublicRead.status} read=${daveRead2.status} write=${daveWriteDenied.status}`);
+
+    // P10i 切 public-write：dave 可写
+    const toPublicWrite = await req(`/api/v1/projects/${teamProjId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'public-write' } });
+    const daveWriteOk = await req(`/api/v1/documents/${docId}`, { token: ctx.dave, method: 'PUT', body: { content: '# 公开可写档位\nDave 写入' } });
+    record('P10i', '切 public-write：登录用户可写', toPublicWrite.status === 200 && daveWriteOk.status === 200,
+      `patch=${toPublicWrite.status} write=${daveWriteOk.status}`);
+
+    // P10j 个人库禁设团队档位（zod 400）与后端兜底（PATCH 400）
+    const personalTeamVis = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST', body: { name: `个人库-${runId}`, visibility: 'team-read', storage: { kind: 'local' } },
+    });
+    const transferProj = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST', body: { name: `转移演练-${runId}`, visibility: 'private', storage: { kind: 'local' } },
+    });
+    const transferProjId = transferProj.json?.project?.id;
+    ctx.transferProjId = transferProjId;
+    const patchTeamVis = await req(`/api/v1/projects/${transferProjId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'team-read' } });
+    record('P10j', '个人库禁设团队档位（创建 400 + PATCH 400 VISIBILITY_REQUIRES_TEAM）',
+      personalTeamVis.status === 400 && patchTeamVis.status === 400 && String(patchTeamVis.json?.message ?? '').includes('VISIBILITY_REQUIRES_TEAM'),
+      `create=${personalTeamVis.status} patch=${patchTeamVis.status}`);
+
+    // P10k 转移个人库 → 团队（owner + 目标团队 owner）；转移后 bob 按档位获得读
+    const transferToTeam = await req(`/api/v1/projects/${transferProjId}/transfer`, {
+      token: ctx.alice, method: 'POST', body: { targetType: 'team', targetTeamId: teamId, confirmed: true },
+    });
+    await req(`/api/v1/projects/${transferProjId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'team-read' } });
+    const bobReadTransferred = await req(`/api/v1/projects/${transferProjId}/overview`, { token: ctx.bob });
+    const teamProjects = await req(`/api/v1/teams/${teamId}/projects`, { token: ctx.bob });
+    record('P10k', '转移个人库 → 团队；团队库列表可见；bob 依档位获得读',
+      transferToTeam.status === 200 && transferToTeam.json?.ownerType === 'team' && bobReadTransferred.status === 200 && (teamProjects.json?.items ?? []).some((p) => p.id === transferProjId),
+      `transfer=${transferToTeam.status} bobRead=${bobReadTransferred.status} teamProjects=${(teamProjects.json?.items ?? []).length}`);
+
+    // P10l 团队 → 个人：team-* 档位冲突 400；调档后团队 owner 转回成功
+    const transferBackConflict = await req(`/api/v1/projects/${transferProjId}/transfer`, {
+      token: ctx.alice, method: 'POST', body: { targetType: 'user', confirmed: true },
+    });
+    await req(`/api/v1/projects/${transferProjId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'private' } });
+    const transferBack = await req(`/api/v1/projects/${transferProjId}/transfer`, {
+      token: ctx.alice, method: 'POST', body: { targetType: 'user', confirmed: true },
+    });
+    const memberTransferDenied = await (async () => {
+      // bob（仅团队成员、非团队 owner）试图转走 —— 先让 alice 再转一次给团队以构造场景
+      await req(`/api/v1/projects/${transferProjId}/transfer`, { token: ctx.alice, method: 'POST', body: { targetType: 'team', targetTeamId: teamId, confirmed: true } });
+      const r = await req(`/api/v1/projects/${transferProjId}/transfer`, { token: ctx.bob, method: 'POST', body: { targetType: 'user', confirmed: true } });
+      await req(`/api/v1/projects/${transferProjId}/transfer`, { token: ctx.alice, method: 'POST', body: { targetType: 'user', confirmed: true } });
+      return r;
+    })();
+    record('P10l', '团队 → 个人：team-* 冲突 400；调档后转回成功；非团队 owner 转走被拒',
+      transferBackConflict.status === 400 && transferBack.status === 200 && transferBack.json?.ownerType === 'user' && memberTransferDenied.status === 403,
+      `conflict=${transferBackConflict.status} back=${transferBack.status} memberDenied=${memberTransferDenied.status}`);
+
+    // P10m 越权回归：旧三端点（改 globalRole / 代造账号 / 用户枚举）已下线
+    const legacyRole = await req(`/api/v1/team/${ctx.bobId ?? '00000000-0000-0000-0000-000000000000'}/role`, {
+      token: ctx.bob, method: 'PATCH', body: { role: 'Owner' },
+    });
+    const legacyInvite = await req('/api/v1/team/invite', {
+      token: ctx.bob, method: 'POST', body: { email: `pwn-${runId}@ewiki.local`, role: 'Editor' },
+    });
+    const legacyList = await req('/api/v1/team', { token: ctx.bob });
+    record('P10m', '越权回归：旧 /api/v1/team* 三端点全部下线（404）',
+      legacyRole.status === 404 && legacyInvite.status === 404 && legacyList.status === 404,
+      `role=${legacyRole.status} invite=${legacyInvite.status} list=${legacyList.status}`);
+
+    // P10n 审计台账：team.create / team.member_add / project.transfer / project.visibility_change
+    const audit2 = await req('/api/v1/admin/audit?limit=300', { token: ctx.admin });
+    const actions2 = new Set((audit2.json.items ?? []).map((a) => a.action));
+    const expected2 = ['team.create', 'team.member_add', 'project.transfer', 'project.visibility_change'];
+    const missing2 = expected2.filter((a) => !actions2.has(a));
+    record('P10n', '团队/归属/可见性变更审计台账齐全', missing2.length === 0,
+      missing2.length ? `缺少: ${missing2.join(',')}` : 'team.create / team.member_add / project.transfer / project.visibility_change 齐全');
+
+    // P10o 成员页接口下发团队继承成员（F6）：团队库的 /members 返回 teamMembers 含团队成员
+    const teamMem = await req(`/api/v1/projects/${teamProjId}/members`, { token: ctx.alice });
+    const inherited = teamMem.json?.teamMembers ?? [];
+    const hasTeamMemberNames = inherited.length >= 1 && inherited.some((m) => m.email === 'bob-e2e@ewiki.local');
+    record('P10o', '团队成员接口下发继承成员列表（F6）',
+      teamMem.status === 200 && inherited.length >= 1 && hasTeamMemberNames,
+      `status=${teamMem.status} inherited=${inherited.length} ${hasTeamMemberNames ? '含 bob' : '缺 bob'}`);
+
+    // P10p 团队发现目录：internal 团队对登录用户可见并可浏览详情/成员；private 团队不出现在 discover
+    const discoverable = await req('/api/v1/teams', {
+      token: ctx.alice, method: 'POST', body: { name: `可发现团队-${runId}`, description: 'internal 目录', visibility: 'internal' },
+    });
+    const discoverableId = discoverable.json?.id;
+    await req(`/api/v1/teams/${discoverableId}`, { token: ctx.alice, method: 'PATCH', body: { visibility: 'internal' } });
+    const discoverList = await req('/api/v1/teams/discover', { token: ctx.dave });
+    const discoverContains = (discoverList.json?.items ?? []).some((t) => t.id === discoverableId && t.visibility === 'internal');
+    const discoverExcludesPrivate = !(discoverList.json?.items ?? []).some((t) => t.id === teamId); // teamId 是 private
+    const daveSeeInternalDetail = await req(`/api/v1/teams/${discoverableId}`, { token: ctx.dave });
+    const daveSeeInternalMembers = await req(`/api/v1/teams/${discoverableId}/members`, { token: ctx.dave });
+    record('P10p', '团队发现目录：internal 可见/可浏览；private 不出现',
+      discoverable.status === 201 && discoverContains && discoverExcludesPrivate &&
+        daveSeeInternalDetail.status === 200 && daveSeeInternalMembers.status === 200,
+      `discover=${discoverList.status} contains=${discoverContains} excludesPrivate=${discoverExcludesPrivate} detail=${daveSeeInternalDetail.status} members=${daveSeeInternalMembers.status}`);
+
+    // P10q public-write 写路径带版本历史（§11-2「审计+版本历史兜底」可观测）：dave 写入后 versions ≥1
+    const verResp = await req(`/api/v1/documents/${docId}/versions`, { token: ctx.dave });
+    const versions = verResp.json?.items ?? [];
+    record('P10q', 'public-write 写路径有版本历史兜底（治理可观测）',
+      verResp.status === 200 && versions.length >= 1, `versions=${versions.length}`);
   }
 
   const passed = results.filter((r) => r.pass).length;

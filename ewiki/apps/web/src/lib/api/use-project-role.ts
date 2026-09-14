@@ -2,35 +2,45 @@ import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from './client';
 
 // ---------------------------------------------------------------------------
-// 项目内角色/权限共享 hook
+// 项目内角色/权限共享 hook（TEAM-PERMISSIONS §5.2 P4'）
 //
-// 数据来源：GET /api/v1/projects/:id/members 响应中的 myRole（后端 projectAccess 推导：
-//   - owner/maintainer/editor/guest = project_members 显式成员
-//   - null = 非成员的隐式只读读者（经 team/public 可见性访问）
-//   - 全局 admin 兜底 maintainer）
-// 与 ProjectLayout / MembersPage 共用 ['project-members', projectId] queryKey，
-// 命中同一份 React Query 缓存，不会产生额外请求。
+// 数据来源：GET /api/v1/projects/:id/members 响应中的服务端权威能力位：
+//   myRole      显式成员角色（null = 非成员；team/public 档位的隐式读者）
+//   explicitRole/teamRole  两层角色（显式成员 / 团队成员）
+//   canWrite / canManage / canDelete  服务端 projectAccess 计算结果（唯一事实源）
+// 与 ProjectLayout / MembersPage 共用 ['project-members', projectId] queryKey，命中同一份缓存。
 //
-// 角色未返回（加载中）时按可写/可管理处理，避免有权限用户看到按钮闪烁；
-// 与 MembersPage 的既有约定一致。后端对各写接口均有 403 兜底，此处只影响 UI 入口。
+// 加载中默认 false（§11-7 收敛）：宁可晚 100ms 显示按钮，也不给只读用户短暂闪现管理入口；
+// 后端对写接口均有 403 兜底，此处只影响 UI 入口。
 // ---------------------------------------------------------------------------
 
-const WRITE_ROLES = new Set(['owner', 'maintainer', 'editor']);
-const MANAGE_ROLES = new Set(['owner', 'maintainer']);
-
 export interface ProjectRoleInfo {
-  /** 当前用户在项目内的角色；null = 非成员（隐式只读读者） */
+  /** 当前用户在项目内的显式角色；null = 非成员（隐式读者） */
   myRole: string | null;
-  /** 可编辑文档/创建文档/触发同步（owner/maintainer/editor） */
+  /** 团队成员角色（仅团队库非空） */
+  teamRole: string | null;
+  /** 库归属：user=个人库 / team=团队库 */
+  ownerType: string;
+  ownerTeamId: string | null;
+  /** 可编辑文档/创建文档/触发同步 */
   canWrite: boolean;
-  /** 可管理：重命名/删除项目、同步偏好、成员管理、发布配置（owner/maintainer） */
+  /** 可管理：改库设置/成员/发布配置 */
   canManage: boolean;
+  /** 可删除/转移归属（库 owner ∪ 团队 owner） */
+  canDelete: boolean;
 }
 
 interface MembersResp {
   items: unknown[];
   total: number;
   myRole?: string | null;
+  explicitRole?: string | null;
+  teamRole?: string | null;
+  canWrite?: boolean;
+  canManage?: boolean;
+  canDelete?: boolean;
+  ownerType?: string;
+  ownerTeamId?: string | null;
   visibility?: string;
 }
 
@@ -43,11 +53,13 @@ export function useProjectRole(projectId: string | undefined): ProjectRoleInfo {
     retry: false,
   });
 
-  // 未加载完成时按可写/可管理处理（避免闪烁）；加载失败时同样放开 UI，由后端接口拦截
-  const resolved = data ? (data.myRole ?? null) : 'owner';
   return {
     myRole: data ? (data.myRole ?? null) : null,
-    canWrite: WRITE_ROLES.has(resolved ?? ''),
-    canManage: MANAGE_ROLES.has(resolved ?? ''),
+    teamRole: data ? (data.teamRole ?? null) : null,
+    ownerType: data?.ownerType ?? 'user',
+    ownerTeamId: data?.ownerTeamId ?? null,
+    canWrite: data?.canWrite ?? false,
+    canManage: data?.canManage ?? false,
+    canDelete: data?.canDelete ?? false,
   };
 }

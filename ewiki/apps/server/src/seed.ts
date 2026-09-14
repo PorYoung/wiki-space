@@ -329,7 +329,7 @@ async function ensureProject(ownerId: string): Promise<string> {
     .values({
       name: PROJECT_NAME,
       description: '平台自带示例项目（种子）',
-      visibility: 'team',
+      visibility: 'public-read', // 等价映射（TEAM-PERMISSIONS §4）：旧 team 的真实语义 = 全平台登录可读
       ownerId,
       storageKind: 'local',
       storageStatus: 'synced',

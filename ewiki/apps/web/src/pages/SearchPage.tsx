@@ -6,6 +6,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { apiFetch, decodeAccessToken } from '../lib/api/client';
+import { isPublicScope, visibilityLabel } from '../lib/visibility';
 import { useTheme } from '../theme/ThemeProvider';
 import type { Document, Project } from '@ewiki/shared';
 
@@ -554,11 +555,11 @@ function ProjectResults({ loading, items, query }: { loading: boolean; items: Pr
               <span
                 className="px-2 py-0.5 rounded-full text-[11px] transition-all duration-200"
                 style={{
-                  background: p.visibility === 'public' ? 'var(--color-success-50)' : 'var(--bg-subtle)',
-                  color: p.visibility === 'public' ? 'var(--color-success-600)' : 'var(--text-muted)',
+                  background: isPublicScope(p.visibility) ? 'var(--color-success-50)' : p.visibility.startsWith('team-') ? 'var(--color-primary-50)' : 'var(--bg-subtle)',
+                  color: isPublicScope(p.visibility) ? 'var(--color-success-600)' : p.visibility.startsWith('team-') ? 'var(--color-primary-600)' : 'var(--text-muted)',
                 }}
               >
-                {p.visibility === 'public' ? '公开' : p.visibility === 'team' ? '团队' : '私有'}
+                {visibilityLabel(p.visibility)}
               </span>
             </div>
           </Link>
