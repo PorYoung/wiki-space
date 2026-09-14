@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Search, FileText, FolderOpen, Globe, Clock, ChevronRight,
+  Search, FileText, FolderOpen, Globe, Clock, ChevronRight, BookOpen,
   Sparkles,
 } from 'lucide-react';
 import { apiFetch, decodeAccessToken } from '../lib/api/client';
@@ -21,7 +21,7 @@ function highlightText(text: string, keyword: string): React.ReactNode {
   return (
     <>
       {text.slice(0, idx)}
-      <mark className="px-0.5 rounded" style={{ background: 'var(--color-primary-100)', color: 'var(--color-primary-700)' }}>
+      <mark className="px-0.5 rounded search-mark" style={{ background: 'var(--color-primary-100)', color: 'var(--color-primary-700)' }}>
         {text.slice(idx, idx + keyword.length)}
       </mark>
       {text.slice(idx + keyword.length)}
@@ -43,6 +43,21 @@ function relativeTime(iso: string | null): string {
 
 type SearchTab = 'docs' | 'projects' | 'sites';
 
+/** 按路径扩展名区分结果图标底色与前景，提升可扫读性（对齐设计稿三色图标） */
+function typeIcon(path: string): { icon: React.ReactNode; bg: string; fg: string } {
+  const ext = (path.split('.').pop() ?? '').toLowerCase();
+  if (ext === 'md' || ext === 'mdx' || ext === 'markdown') {
+    return { icon: <FileText size={20} />, bg: 'var(--color-primary-50)', fg: 'var(--color-primary-500)' };
+  }
+  if (ext === 'ts' || ext === 'js' || ext === 'tsx' || ext === 'jsx') {
+    return { icon: <FileText size={20} />, bg: 'var(--bg-subtle)', fg: 'var(--text-secondary)' };
+  }
+  if (ext === 'ipynb') {
+    return { icon: <BookOpen size={20} />, bg: 'var(--color-primary-50)', fg: 'var(--color-primary-500)' };
+  }
+  return { icon: <FileText size={20} />, bg: 'var(--bg-subtle)', fg: 'var(--text-secondary)' };
+}
+
 export function SearchPage(): React.ReactElement {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -50,8 +65,14 @@ export function SearchPage(): React.ReactElement {
   const query = searchParams.get('q') ?? '';
   const [inputValue, setInputValue] = useState(query);
   const [activeTab, setActiveTab] = useState<SearchTab>('docs');
+  const [focused, setFocused] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const user = decodeAccessToken();
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     setInputValue(query);
@@ -93,10 +114,28 @@ export function SearchPage(): React.ReactElement {
   const docCount = docsData?.total ?? 0;
   const projectCount = filteredProjects.length;
 
+  const headerStyle: React.CSSProperties = {
+    opacity: mounted ? 1 : 0,
+    transform: mounted ? 'translateY(0)' : 'translateY(-6px)',
+    transition: 'opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1)',
+  };
+
+  const contentStyle: React.CSSProperties = {
+    opacity: mounted ? 1 : 0,
+    transform: mounted ? 'translateY(0)' : 'translateY(10px)',
+    transition: 'opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s, transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s',
+  };
+
   return (
     <div className="min-h-screen flex flex-col" style={{ background: 'var(--bg-page)' }}>
       {/* Search header */}
-      <header className="sticky top-0 z-30 backdrop-blur-md" style={{ background: 'color-mix(in srgb, var(--bg-page) 85%, transparent)' }}>
+      <header
+        className="sticky top-0 z-30 backdrop-blur-md"
+        style={{
+          background: 'color-mix(in srgb, var(--bg-page) 85%, transparent)',
+          ...headerStyle,
+        }}
+      >
         <div className="max-w-5xl mx-auto px-6 py-4">
           <div className="flex items-center gap-4">
             <button
@@ -104,27 +143,39 @@ export function SearchPage(): React.ReactElement {
               onClick={goHome}
               className="flex items-center gap-2 shrink-0 group"
             >
-              <div className="h-9 w-9 rounded-lg flex items-center justify-center transition group-hover:scale-105" style={{ background: 'var(--color-primary-500)' }}>
+              <div
+                className="h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-300 group-hover:scale-105 group-hover:shadow-md"
+                style={{ background: 'var(--color-primary-500)' }}
+              >
                 <Sparkles size={18} className="text-white" />
               </div>
-              <span className="font-semibold text-lg hidden sm:block" style={{ color: 'var(--text-primary)' }}>ewiki</span>
+              <span className="font-semibold text-lg hidden sm:block transition group-hover:text-primary-600" style={{ color: 'var(--text-primary)' }}>
+                ewiki
+              </span>
             </button>
 
             <form onSubmit={handleSearch} className="flex-1 relative">
               <div className="relative">
-                <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
+                <Search
+                  size={18}
+                  className="absolute left-4 top-1/2 -translate-y-1/2 transition-colors duration-300"
+                  style={{ color: focused ? 'var(--color-primary-500)' : 'var(--text-muted)' }}
+                />
                 <input
                   ref={inputRef}
                   type="text"
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
+                  onFocus={() => setFocused(true)}
+                  onBlur={() => setFocused(false)}
                   placeholder="搜索文档、项目..."
                   autoFocus
-                  className="w-full h-11 pl-11 pr-4 text-sm rounded-xl border focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                  className="w-full h-11 pl-11 pr-4 text-sm rounded-xl border focus:outline-none transition-all duration-300"
                   style={{
                     background: 'var(--bg-surface)',
-                    borderColor: 'var(--border-soft)',
+                    borderColor: focused ? 'var(--color-primary-500)' : 'var(--border-soft)',
                     color: 'var(--text-primary)',
+                    boxShadow: focused ? '0 0 0 4px var(--color-primary-100)' : 'none',
                   }}
                 />
               </div>
@@ -135,7 +186,7 @@ export function SearchPage(): React.ReactElement {
                 type="button"
                 onClick={toggleAppearance}
                 aria-label="切换主题"
-                className="rounded-md p-2 transition hover:bg-neutral-100"
+                className="rounded-md p-2 transition-all duration-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 active:scale-95"
                 style={{ color: 'var(--text-secondary)' }}
               >
                 {appearance === 'dark' ? (
@@ -146,12 +197,12 @@ export function SearchPage(): React.ReactElement {
               </button>
               <Link
                 to="/dashboard"
-                className="hidden sm:flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md transition hover:bg-neutral-100"
+                className="hidden sm:flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md transition-all duration-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 active:scale-95"
                 style={{ color: 'var(--text-secondary)' }}
               >
                 管理
               </Link>
-              <div className="h-7 w-7 rounded-full bg-primary-500 text-white flex items-center justify-center text-xs font-medium">
+              <div className="h-7 w-7 rounded-full bg-primary-500 text-white flex items-center justify-center text-xs font-medium transition-transform duration-300 hover:scale-105">
                 {user?.name?.charAt(0) ?? 'U'}
               </div>
             </div>
@@ -159,7 +210,14 @@ export function SearchPage(): React.ReactElement {
 
           {/* Tabs */}
           {query && (
-            <div className="flex items-center gap-1 mt-4 -mb-px">
+            <div
+              className="flex items-center gap-1 mt-4 -mb-px"
+              style={{
+                opacity: mounted ? 1 : 0,
+                transform: mounted ? 'translateY(0)' : 'translateY(-4px)',
+                transition: 'opacity 0.4s ease-out 0.15s, transform 0.4s ease-out 0.15s',
+              }}
+            >
               {([
                 { key: 'docs', label: '文档', icon: FileText, count: docCount },
                 { key: 'projects', label: '项目', icon: FolderOpen, count: projectCount },
@@ -169,20 +227,19 @@ export function SearchPage(): React.ReactElement {
                   key={key}
                   type="button"
                   onClick={() => setActiveTab(key)}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition ${
-                    activeTab === key
-                      ? 'border-primary-500'
-                      : 'border-transparent hover:bg-neutral-50'
-                  }`}
-                  style={{ color: activeTab === key ? 'var(--color-primary-600)' : 'var(--text-secondary)' }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg transition-all duration-200 active:scale-[0.97]"
+                  style={{
+                    background: activeTab === key ? 'var(--color-primary-100)' : 'transparent',
+                    color: activeTab === key ? 'var(--color-primary-700)' : 'var(--text-secondary)',
+                  }}
                 >
-                  <Icon size={15} />
+                  <Icon size={15} style={{ transition: 'transform 0.2s', transform: activeTab === key ? 'scale(1.1)' : 'scale(1)' }} />
                   {label}
                   <span
-                    className="text-xs px-1.5 py-0.5 rounded-full"
+                    className="text-xs px-1.5 py-0.5 rounded-full transition-all duration-200"
                     style={{
-                      background: activeTab === key ? 'var(--color-primary-100)' : 'var(--bg-subtle)',
-                      color: activeTab === key ? 'var(--color-primary-700)' : 'var(--text-muted)',
+                      background: activeTab === key ? 'var(--color-primary-500)' : 'var(--bg-subtle)',
+                      color: activeTab === key ? '#fff' : 'var(--text-muted)',
                     }}
                   >
                     {count}
@@ -196,7 +253,7 @@ export function SearchPage(): React.ReactElement {
       </header>
 
       {/* Results */}
-      <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-6">
+      <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-6" style={contentStyle}>
         {!query ? (
           <EmptySearchState />
         ) : activeTab === 'docs' ? (
@@ -205,6 +262,7 @@ export function SearchPage(): React.ReactElement {
             items={docsData?.items ?? []}
             total={docCount}
             query={query}
+            projectName={(pid: string) => projectsData?.items.find((p) => p.id === pid)?.name ?? pid.slice(0, 8)}
           />
         ) : activeTab === 'projects' ? (
           <ProjectResults
@@ -217,7 +275,14 @@ export function SearchPage(): React.ReactElement {
         )}
       </main>
 
-      <footer className="py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+      <footer
+        className="py-6 text-center text-xs"
+        style={{
+          color: 'var(--text-muted)',
+          opacity: mounted ? 1 : 0,
+          transition: 'opacity 0.5s ease-out 0.3s',
+        }}
+      >
         ewiki · 让知识流动起来
       </footer>
     </div>
@@ -225,29 +290,112 @@ export function SearchPage(): React.ReactElement {
 }
 
 function EmptySearchState() {
+  const navigate = useNavigate();
   return (
-    <div className="flex flex-col items-center justify-center py-24 text-center">
-      <div className="h-16 w-16 rounded-2xl flex items-center justify-center mb-6" style={{ background: 'var(--color-primary-50)' }}>
-        <Search size={28} style={{ color: 'var(--color-primary-500)' }} />
+    <div className="flex flex-col items-center text-center animate-fade-in">
+      {/* 品牌区 */}
+      <div
+        className="h-14 w-14 rounded-2xl flex items-center justify-center mb-5 transition-transform duration-500 hover:scale-110"
+        style={{ background: 'var(--color-primary-500)' }}
+      >
+        <Sparkles size={24} className="text-white" />
       </div>
-      <h3 className="text-lg font-medium mb-2" style={{ color: 'var(--text-primary)' }}>开始搜索</h3>
-      <p className="text-sm max-w-md" style={{ color: 'var(--text-muted)' }}>
-        在上方搜索框输入关键词，查找你有权限访问的所有文档、项目和已发布站点
+      <h2 className="text-2xl font-semibold mb-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
+        ewiki 知识检索
+      </h2>
+      <p className="text-sm mb-8 max-w-md" style={{ color: 'var(--text-muted)' }}>
+        跨项目检索文档、项目与已发布站点 · 支持全文与标签定位
       </p>
+
+      {/* 快捷检索入口 */}
+      <div className="w-full max-w-2xl grid grid-cols-1 sm:grid-cols-3 gap-3 mb-10">
+        <button
+          type="button"
+          onClick={() => navigate('/library')}
+          className="group text-left p-4 rounded-xl card-hover transition-all duration-200 active:scale-[0.98]"
+        >
+          <div
+            className="h-9 w-9 rounded-lg flex items-center justify-center mb-3 transition-transform duration-300 group-hover:scale-110"
+            style={{ background: 'var(--bg-subtle)', color: 'var(--text-secondary)' }}
+          >
+            <Clock size={18} />
+          </div>
+          <div className="text-sm font-medium mb-0.5" style={{ color: 'var(--text-primary)' }}>最近更新</div>
+          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>按时间浏览全部文档</div>
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate('/dashboard')}
+          className="group text-left p-4 rounded-xl card-hover transition-all duration-200 active:scale-[0.98]"
+        >
+          <div
+            className="h-9 w-9 rounded-lg flex items-center justify-center mb-3 transition-transform duration-300 group-hover:scale-110"
+            style={{ background: 'var(--bg-subtle)', color: 'var(--text-secondary)' }}
+          >
+            <FolderOpen size={18} />
+          </div>
+          <div className="text-sm font-medium mb-0.5" style={{ color: 'var(--text-primary)' }}>我的项目</div>
+          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>进入我的知识库</div>
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate('/library')}
+          className="group text-left p-4 rounded-xl card-hover transition-all duration-200 active:scale-[0.98]"
+        >
+          <div
+            className="h-9 w-9 rounded-lg flex items-center justify-center mb-3 transition-transform duration-300 group-hover:scale-110"
+            style={{ background: 'var(--bg-subtle)', color: 'var(--text-secondary)' }}
+          >
+            <Search size={18} />
+          </div>
+          <div className="text-sm font-medium mb-0.5" style={{ color: 'var(--text-primary)' }}>标签浏览</div>
+          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>按标签聚合文档</div>
+        </button>
+      </div>
+
+      {/* 近期搜索 */}
+      <div className="w-full max-w-2xl">
+        <div className="text-xs font-medium mb-3" style={{ color: 'var(--text-muted)' }}>近期搜索</div>
+        <div className="flex flex-wrap justify-center gap-2">
+          {['mermaid 流程图', '部署文档', 'MySQL 方言', '主题 token'].map((kw) => (
+            <button
+              key={kw}
+              type="button"
+              onClick={() => navigate(`/search?q=${encodeURIComponent(kw)}`)}
+              className="text-xs px-3 py-1.5 rounded-full transition-all duration-200 hover:scale-105 hover:shadow-sm"
+              style={{ background: 'var(--bg-subtle)', color: 'var(--text-secondary)' }}
+            >
+              {kw}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
-function DocResults({ loading, items, total, query }: { loading: boolean; items: SearchDocument[]; total: number; query: string }) {
+function DocResults({ loading, items, total, query, projectName }: {
+  loading: boolean;
+  items: SearchDocument[];
+  total: number;
+  query: string;
+  projectName: (pid: string) => string;
+}) {
   if (loading) {
     return (
       <div className="space-y-4">
         {Array.from({ length: 5 }).map((_, i) => (
-          <div key={i} className="card p-5 rounded-xl">
-            <div className="skeleton h-5 w-1/3 mb-3" />
-            <div className="skeleton h-4 w-full mb-2" />
-            <div className="skeleton h-4 w-4/5 mb-3" />
-            <div className="skeleton h-3 w-1/4" />
+          <div
+            key={i}
+            className="card p-5 rounded-xl"
+            style={{
+              animation: `fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) ${i * 0.06}s both`,
+            }}
+          >
+            <div className="skeleton-shimmer h-5 w-1/3 mb-3 rounded" />
+            <div className="skeleton-shimmer h-4 w-full mb-2 rounded" />
+            <div className="skeleton-shimmer h-4 w-4/5 mb-3 rounded" />
+            <div className="skeleton-shimmer h-3 w-1/4 rounded" />
           </div>
         ))}
       </div>
@@ -256,7 +404,7 @@ function DocResults({ loading, items, total, query }: { loading: boolean; items:
 
   if (items.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
+      <div className="flex flex-col items-center justify-center py-20 text-center animate-fade-in">
         <div className="h-14 w-14 rounded-2xl flex items-center justify-center mb-5" style={{ background: 'var(--bg-subtle)' }}>
           <FileText size={24} style={{ color: 'var(--text-muted)' }} />
         </div>
@@ -270,25 +418,31 @@ function DocResults({ loading, items, total, query }: { loading: boolean; items:
 
   return (
     <div>
-      <p className="text-sm mb-5" style={{ color: 'var(--text-muted)' }}>
+      <p
+        className="text-sm mb-5"
+        style={{
+          color: 'var(--text-muted)',
+          animation: 'fade-in 0.3s ease-out both',
+        }}
+      >
         找到 <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{total}</span> 个相关文档
       </p>
-      <div className="space-y-1">
-        {items.map((doc) => (
+      <div className="space-y-2 animate-stagger">
+        {items.map((doc, idx) => (
           <Link
             key={doc.id}
-            to={`/read/${doc.id}`}
-            className="block card-hover rounded-xl p-5 transition group"
+            to={`/read/${doc.id}?q=${encodeURIComponent(query)}&pos=${idx}`}
+            className="block card-hover rounded-xl p-4 transition-all duration-200 group hover:shadow-md hover:-translate-y-px"
           >
             <div className="flex items-start gap-4">
               <div
-                className="h-10 w-10 rounded-lg flex items-center justify-center shrink-0 transition group-hover:scale-105"
-                style={{ background: 'var(--color-primary-50)' }}
+                className="h-10 w-10 rounded-lg flex items-center justify-center shrink-0 transition-all duration-300 group-hover:scale-105 group-hover:shadow-sm"
+                style={(() => { const t = typeIcon(doc.path); return { background: t.bg, color: t.fg }; })()}
               >
-                <FileText size={20} style={{ color: 'var(--color-primary-500)' }} />
+                {(() => { const t = typeIcon(doc.path); return t.icon; })()}
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="text-base font-medium mb-1.5 truncate group-hover:text-primary-600 transition" style={{ color: 'var(--text-primary)' }}>
+                <h3 className="text-base font-medium mb-1.5 truncate transition-colors duration-200 group-hover:text-primary-600" style={{ color: 'var(--text-primary)' }}>
                   {highlightText(doc.title || doc.path.split('/').pop() || '未命名', query)}
                 </h3>
                 <p className="text-sm leading-relaxed line-clamp-2" style={{ color: 'var(--text-secondary)' }}>
@@ -299,7 +453,7 @@ function DocResults({ loading, items, total, query }: { loading: boolean; items:
                 <div className="flex items-center gap-3 mt-3 text-xs" style={{ color: 'var(--text-muted)' }}>
                   <span className="flex items-center gap-1">
                     <FolderOpen size={12} />
-                    {doc.projectId.slice(0, 8)}
+                    {projectName(doc.projectId)}
                   </span>
                   <span className="flex items-center gap-1">
                     <Clock size={12} />
@@ -308,7 +462,11 @@ function DocResults({ loading, items, total, query }: { loading: boolean; items:
                   {doc.wordCount ? (
                     <span>{doc.wordCount.toLocaleString()} 字</span>
                   ) : null}
-                  <ChevronRight size={14} className="ml-auto opacity-0 group-hover:opacity-100 transition" />
+                  <ChevronRight
+                    size={14}
+                    className="ml-auto opacity-0 group-hover:opacity-100 transition-all duration-200"
+                    style={{ transform: 'translateX(-4px)' }}
+                  />
                 </div>
               </div>
             </div>
@@ -324,10 +482,16 @@ function ProjectResults({ loading, items, query }: { loading: boolean; items: Pr
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="card p-5 rounded-xl">
-            <div className="skeleton h-5 w-1/2 mb-3" />
-            <div className="skeleton h-4 w-full mb-2" />
-            <div className="skeleton h-4 w-2/3" />
+          <div
+            key={i}
+            className="card p-5 rounded-xl"
+            style={{
+              animation: `fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) ${i * 0.08}s both`,
+            }}
+          >
+            <div className="skeleton-shimmer h-5 w-1/2 mb-3 rounded" />
+            <div className="skeleton-shimmer h-4 w-full mb-2 rounded" />
+            <div className="skeleton-shimmer h-4 w-2/3 rounded" />
           </div>
         ))}
       </div>
@@ -336,7 +500,7 @@ function ProjectResults({ loading, items, query }: { loading: boolean; items: Pr
 
   if (items.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
+      <div className="flex flex-col items-center justify-center py-20 text-center animate-fade-in">
         <div className="h-14 w-14 rounded-2xl flex items-center justify-center mb-5" style={{ background: 'var(--bg-subtle)' }}>
           <FolderOpen size={24} style={{ color: 'var(--text-muted)' }} />
         </div>
@@ -350,25 +514,31 @@ function ProjectResults({ loading, items, query }: { loading: boolean; items: Pr
 
   return (
     <div>
-      <p className="text-sm mb-5" style={{ color: 'var(--text-muted)' }}>
+      <p
+        className="text-sm mb-5"
+        style={{
+          color: 'var(--text-muted)',
+          animation: 'fade-in 0.3s ease-out both',
+        }}
+      >
         找到 <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{items.length}</span> 个相关项目
       </p>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-stagger">
         {items.map((p) => (
           <Link
             key={p.id}
             to={`/projects/${p.id}/browse`}
-            className="block card-hover rounded-xl p-5 transition group"
+            className="block card-hover rounded-xl p-5 transition-all duration-200 group hover:shadow-md hover:-translate-y-px"
           >
             <div className="flex items-start gap-3 mb-3">
               <div
-                className="h-10 w-10 rounded-lg flex items-center justify-center shrink-0 transition group-hover:scale-105"
+                className="h-10 w-10 rounded-lg flex items-center justify-center shrink-0 transition-all duration-300 group-hover:scale-105 group-hover:shadow-sm"
                 style={{ background: 'var(--color-primary-100)' }}
               >
                 <FolderOpen size={20} style={{ color: 'var(--color-primary-600)' }} />
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="text-base font-medium truncate group-hover:text-primary-600 transition" style={{ color: 'var(--text-primary)' }}>
+                <h3 className="text-base font-medium truncate transition-colors duration-200 group-hover:text-primary-600" style={{ color: 'var(--text-primary)' }}>
                   {highlightText(p.name, query)}
                 </h3>
               </div>
@@ -382,7 +552,7 @@ function ProjectResults({ loading, items, query }: { loading: boolean; items: Pr
                 {relativeTime(p.updatedAt ?? p.createdAt)}
               </span>
               <span
-                className="px-2 py-0.5 rounded-full text-[11px]"
+                className="px-2 py-0.5 rounded-full text-[11px] transition-all duration-200"
                 style={{
                   background: p.visibility === 'public' ? 'var(--color-success-50)' : 'var(--bg-subtle)',
                   color: p.visibility === 'public' ? 'var(--color-success-600)' : 'var(--text-muted)',
@@ -400,7 +570,7 @@ function ProjectResults({ loading, items, query }: { loading: boolean; items: Pr
 
 function SitesTabEmpty() {
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-center">
+    <div className="flex flex-col items-center justify-center py-20 text-center animate-fade-in">
       <div className="h-14 w-14 rounded-2xl flex items-center justify-center mb-5" style={{ background: 'var(--bg-subtle)' }}>
         <Globe size={24} style={{ color: 'var(--text-muted)' }} />
       </div>

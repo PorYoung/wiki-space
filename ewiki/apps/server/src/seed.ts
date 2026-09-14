@@ -16,11 +16,11 @@ import {
   users,
 } from './db/schema.js';
 
-/** 幂等种子：管理员账号 + 示例项目（本地存储后端）+ 内嵌 Markdown 示例文档
+/** 幂等种子：管理员账号 + 示例项目（服务器存储后端）+ 内嵌 Markdown 示例文档
  *
  * 幂等策略：
  *   - admin@ewiki.local 存在 → 跳过创建
- *   - 同名项目存在 → 复用并检查本地存储配置 / documents 完整性
+ *   - 同名项目存在 → 复用并检查服务器存储配置 / documents 完整性
  *   - 文档 upsert 走 select-then-update/insert（跨 PostgreSQL 兼容的幂等模式）
  *
  * 执行: pnpm --filter @ewiki/server run seed
@@ -41,7 +41,7 @@ const SAMPLE_DOCS: Array<{ relPath: string; title: string; md: string }> = [
 
 ## 核心能力
 
-- 📥 **存储后端** — Git 远端仓库 / 本地文件夹，文档库开箱即用
+- 📥 **存储后端** — Git 远端仓库 / 服务器存储，文档库开箱即用
 - ✍️ **实时协同编辑** — Yjs CRDT + TipTap 富文本
 - 🕸️ **知识图谱** — 自动识别文档链接关系，发现断链与孤立节点
 - 🚀 **一键发布** — 子域名 / 子路径双形态，Caddy on-demand TLS
@@ -353,7 +353,7 @@ async function ensureLocalStorage(projectId: string, fsRoot: string): Promise<st
     .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
     .limit(1);
   if (project?.storageKind === 'git') {
-    throw new Error(`[seed] 种子项目 ${projectId} 已绑定 Git 后端，拒绝覆盖为本地存储`);
+    throw new Error(`[seed] 种子项目 ${projectId} 已绑定 Git 后端，拒绝覆盖为服务器存储`);
   }
   const config = (project?.storageConfig ?? null) as { path?: string } | null;
   if (project?.storageKind === 'local' && typeof config?.path === 'string') {

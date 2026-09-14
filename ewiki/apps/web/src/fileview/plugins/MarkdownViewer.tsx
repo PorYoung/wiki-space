@@ -180,7 +180,13 @@ export function MarkdownViewer({ file, canWrite, isDark, onSave, projectId }: Fi
       setActiveHeadingId(null);
     } else if (!collabEnabled && next !== savedRef.current) {
       if (bufferRef.current === savedRef.current) {
+        // 本地无未保存修改（含预览态）：buffer 与 saved 同步换新——
+        // 预览渲染以 saved 为准，只更新 buffer 会让预览停留在旧内容却误报 dirty
         setBuffer(next);
+        setSaved(next);
+      } else {
+        // 本地有未保存修改：仅把远端基线推进到最新，保留 buffer 待用户保存（保存时 409）
+        setSaved(next);
       }
       setSaveError(null);
     }

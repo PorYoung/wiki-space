@@ -201,6 +201,13 @@ html[data-appearance='dark'] .bg-gradient-to-br.from-violet-100 { background-ima
 /* 搜索结果高亮 mark（BrowsePage bg-amber-200/70 text-amber-900）暗色下换深色底亮字 */
 html[data-appearance='dark'] mark.bg-amber-200\/70 { background-color: rgba(245,158,11,0.35); color: #fde68a; }
 
+/* 搜索结果高亮 mark（SearchPage/ReadPage 列表用 search-mark）：亮色 primary-100/700，
+   暗色降饱和为 primary 半透明底 + 300 级亮字（WCAG AA），对齐原型暗色 tag-primary 规则 */
+html[data-appearance='dark'] mark.search-mark {
+  background-color: color-mix(in srgb, var(--color-primary-600) 28%, transparent);
+  color: var(--color-primary-300);
+}
+
 /* ring-offset-2 默认白色偏移环（ThemesPage 选中卡片）暗色下跟随 surface */
 html[data-appearance='dark'] .ring-offset-2 { --tw-ring-offset-color: var(--bg-surface); }
 
@@ -280,6 +287,39 @@ html[data-appearance='dark'] textarea:not(.w-md-editor-text-input) {
 html[data-appearance='dark'] textarea:not(.w-md-editor-text-input)::placeholder { color: #475569; }
 /* md-editor 输入层：明暗均保持透明，占位符跟随编辑器内置配色变量 */
 .w-md-editor-text-input::placeholder { color: var(--color-fg-muted); opacity: 0.6; }
+
+/* live-markdown WYSIWYG 编辑器暗色适配：
+   CodeMirrorMarkdownEditor（MarkdownViewer 默认编辑模式）的主题走 Carbon 设计
+   令牌 var(--cds-*)，应用未定义这些变量时全部回退浅色系（文字 #161616 等），
+   暗色下文字/选区/边框会浮在深底上看不清。此块在暗色下覆写为应用语义令牌：
+   作用域限定 .cm-editor-host（WYSIWYG 编辑器根容器），不影响 source/CodeViewer
+   （它们各自挂 githubDark/githubLight 主题，不读 --cds-*）。 */
+html[data-appearance='dark'] .cm-editor-host {
+  --cds-text-primary:        var(--text-primary);
+  --cds-text-secondary:      var(--text-secondary);
+  --cds-icon-primary:        var(--text-primary);
+  --cds-icon-secondary:      var(--text-secondary);
+  --cds-layer-01:            var(--bg-surface);
+  --cds-layer-accent-01:     var(--bg-subtle);
+  --cds-layer-accent-hover-01: var(--bg-hover);
+  --cds-layer-hover-01:      var(--bg-hover);
+  --cds-background:          var(--bg-surface);
+  --cds-border-subtle-01:    var(--border-soft);
+  --cds-border-subtle-02:    var(--border-strong);
+  --cds-border-interactive:  var(--color-primary-500);
+  --cds-focus:               var(--color-primary-400);
+  --cds-highlight:           color-mix(in srgb, var(--color-primary-500) 35%, transparent);
+  --cds-link-primary:        var(--color-primary-400);
+  --cds-support-success:     #34d399;
+  --cds-support-error:       #f87171;
+  --cds-text-error:          #f87171;
+}
+
+/* 内容光标：live-markdown 通过 --cds-text-primary 控制 caret，但为防 CM6 基础主题
+   读到浏览器默认黑色 caret 在深底不可见，这里用应用一级文字色显式对齐 */
+html[data-appearance='dark'] .cm-editor-host .cm-content {
+  caret-color: var(--text-primary);
+}
 /* @uiw/react-md-editor 主题对齐：内置 GitHub light/dark 底色与应用主题有色差，
    用应用令牌覆写容器/工具条/输入区背景与边框，文字/语法高亮仍由 data-color-mode 内置变量负责 */
 .w-md-editor {
@@ -453,23 +493,99 @@ html.theme-transitioning *::after {
 }
 .animate-slide-in { animation: slide-in-right 0.25s ease-out both; }
 
+/* === Reader view motion utilities === */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-fade-in { animation: fade-in 0.3s ease-out both; }
+
+@keyframes fade-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-down { animation: fade-down 0.4s ease-out both; }
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.animate-scale-in { animation: scale-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--bg-subtle) 0%,
+    var(--bg-surface) 50%,
+    var(--bg-subtle) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.animate-float { animation: float 4s ease-in-out infinite; }
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--color-primary-200); }
+  50% { box-shadow: 0 0 20px 4px var(--color-primary-200); }
+}
+
+@keyframes progress-fill {
+  from { width: 0; }
+}
+
+.animate-stagger > * {
+  opacity: 0;
+  animation: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.animate-stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.animate-stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.animate-stagger > *:nth-child(3) { animation-delay: 0.1s; }
+.animate-stagger > *:nth-child(4) { animation-delay: 0.14s; }
+.animate-stagger > *:nth-child(5) { animation-delay: 0.18s; }
+.animate-stagger > *:nth-child(6) { animation-delay: 0.22s; }
+.animate-stagger > *:nth-child(7) { animation-delay: 0.26s; }
+.animate-stagger > *:nth-child(8) { animation-delay: 0.3s; }
+.animate-stagger > *:nth-child(9) { animation-delay: 0.34s; }
+.animate-stagger > *:nth-child(10) { animation-delay: 0.38s; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* ================================================================
    Prose-doc: Markdown 渲染基础 + 7 套阅读主题
    原样迁移 prototype-docvault/src/index.css:446-588
    ================================================================ */
 
-/* 基础样式 — 亮/暗通用 */
-.prose-doc h1 { @apply font-display text-2xl font-bold mt-6 mb-3; }
-.prose-doc h2 { @apply font-display text-xl font-semibold mt-5 mb-2; }
-.prose-doc h3 { @apply font-display text-lg font-semibold mt-4 mb-2; }
-.prose-doc p  { @apply text-sm leading-7 my-3; }
-.prose-doc ul { @apply list-disc pl-5 my-2 space-y-1 text-sm; }
-.prose-doc ol { @apply list-decimal pl-5 my-2 space-y-1 text-sm; }
+/* 基础样式 — 亮/暗通用
+   排版节奏：标题上方间距 > 下方（标题属于其下的内容）；正文 15px / 1.85 长阅读 */
+.prose-doc > :first-child { margin-top: 0; }
+.prose-doc h1 { @apply font-display text-[22px] font-semibold mt-9 mb-3; }
+.prose-doc h2 { @apply font-display text-[19px] font-semibold mt-8 mb-2.5; }
+.prose-doc h3 { @apply font-display text-[16px] font-semibold mt-6 mb-2; }
+.prose-doc h4, .prose-doc h5, .prose-doc h6 { @apply font-display text-[15px] font-semibold mt-5 mb-1.5; }
+.prose-doc p  { @apply text-[15px] leading-[1.85] my-3; }
+.prose-doc ul { @apply list-disc pl-5 my-2.5 space-y-1 text-[15px]; }
+.prose-doc ol { @apply list-decimal pl-5 my-2.5 space-y-1 text-[15px]; }
+.prose-doc li > p { @apply my-1; }
 .prose-doc code { @apply font-mono text-xs px-1.5 py-0.5 rounded; }
 .prose-doc pre  { @apply font-mono text-xs p-4 rounded-lg overflow-x-auto my-3; }
-.prose-doc blockquote { @apply border-l-4 pl-4 my-3 text-sm italic; }
+.prose-doc blockquote { @apply border-l-4 pl-4 my-3 text-[15px] italic; }
 .prose-doc a { @apply underline underline-offset-2; }
-.prose-doc hr { @apply my-6; }
+.prose-doc hr { @apply my-7; }
 
 /* --- 亮色默认 --- */
 .prose-doc h1, .prose-doc h2, .prose-doc h3 { color: #0f172a; }
@@ -555,7 +671,13 @@ html[data-appearance='dark'] .prose-doc .mermaid-error { color: #fca5a5; }
   max-width: 44rem;
   color: #1f2937;
 }
-.prose-doc.prose-book h1, .prose-doc.prose-book h2, .prose-doc.prose-book h3 { letter-spacing: -0.01em; }
+/* 衬线主题下标题跟随正文字体（消除黑体标题/衬线正文的气质割裂），字重降为 600 */
+.prose-doc.prose-book h1, .prose-doc.prose-book h2, .prose-doc.prose-book h3,
+.prose-doc.prose-book h4, .prose-doc.prose-book h5, .prose-doc.prose-book h6 {
+  font-family: inherit;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
 html[data-appearance='dark'] .prose-doc.prose-book { color: #e2e8f0; }
 
 /* theme-journal （期刊 / 窄栏 / 经典衬线） */
@@ -568,9 +690,15 @@ html[data-appearance='dark'] .prose-doc.prose-book { color: #e2e8f0; }
   color: #374151;
 }
 .prose-doc.prose-journal h1, .prose-doc.prose-journal h2 {
+  font-family: inherit;
   text-align: center;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
+}
+.prose-doc.prose-journal h3, .prose-doc.prose-journal h4,
+.prose-doc.prose-journal h5, .prose-doc.prose-journal h6 {
+  font-family: inherit;
+  font-weight: 600;
 }
 .prose-doc.prose-journal blockquote {
   border-left-color: #94a3b8;

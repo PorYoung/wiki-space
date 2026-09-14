@@ -452,7 +452,7 @@ function StorageDefaultsSection({ prefs, setPrefs }: {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {[
           { key: 'git' as const, label: 'Git 仓库', desc: '关联 GitLab / Gitea，可拉取与推送同步' },
-          { key: 'local' as const, label: '本地存储', desc: '平台分配目录落盘，无需同步' },
+          { key: 'local' as const, label: '服务器存储', desc: '平台服务器分配目录落盘，无需同步' },
         ].map(({ key, label, desc }) => {
           const active = prefs.defaultBackend === key;
           return (

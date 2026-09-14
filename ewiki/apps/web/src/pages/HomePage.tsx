@@ -30,10 +30,18 @@ export function HomePage(): React.ReactElement {
   const [query, setQuery] = useState('');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const notifMenuRef = useRef<HTMLDivElement>(null);
   const user = decodeAccessToken();
+
+  useEffect(() => {
+    setMounted(true);
+    const timer = setTimeout(() => inputRef.current?.focus(), 300);
+    return () => clearTimeout(timer);
+  }, []);
 
   const { data: projectsData, isLoading: projectsLoading } = useQuery({
     queryKey: ['home-projects'],
@@ -49,7 +57,9 @@ export function HomePage(): React.ReactElement {
 
   const { data: searchResults, isLoading: searchLoading } = useQuery({
     queryKey: ['home-search', query],
-    queryFn: () => apiFetch<{ items: Document[] }>(`/api/v1/documents?q=${encodeURIComponent(query)}&page=1&pageSize=10`),
+    queryFn: () => apiFetch<{ items: (Document & { snippet?: string | null })[] }>(
+      `/api/v1/documents?q=${encodeURIComponent(query)}&page=1&pageSize=10`
+    ),
     enabled: query.length >= 2,
     staleTime: 30_000,
   });
@@ -63,10 +73,6 @@ export function HomePage(): React.ReactElement {
 
   const unreadCount = notificationsData?.unread ?? 0;
   const notifications = notificationsData?.items ?? [];
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -109,11 +115,46 @@ export function HomePage(): React.ReactElement {
 
   const projectList = projectsData?.items ?? [];
 
+  const heroStyle: React.CSSProperties = {
+    opacity: mounted ? 1 : 0,
+    transform: mounted ? 'translateY(0)' : 'translateY(12px)',
+    transition: 'opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1), transform 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
+  };
+
+  const searchStyle: React.CSSProperties = {
+    opacity: mounted ? 1 : 0,
+    transform: mounted ? 'translateY(0) scale(1)' : 'translateY(8px) scale(0.98)',
+    transition: 'opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.1s, transform 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.1s',
+  };
+
+  const sectionsStyle: React.CSSProperties = {
+    opacity: mounted ? 1 : 0,
+    transform: mounted ? 'translateY(0)' : 'translateY(10px)',
+    transition: 'opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.25s, transform 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.25s',
+  };
+
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: 'var(--bg-page)' }}>
-      <header className="flex items-center justify-between px-6 py-4">
+    <div className="min-h-screen flex flex-col relative overflow-hidden" style={{ background: 'var(--bg-page)' }}>
+      {/* 背景装饰 */}
+      <div
+        className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full pointer-events-none opacity-30"
+        style={{
+          background: 'radial-gradient(circle, var(--color-primary-100) 0%, transparent 70%)',
+          filter: 'blur(40px)',
+          ...heroStyle,
+          transitionDuration: '1.2s',
+        }}
+      />
+
+      <header className="flex items-center justify-between px-6 py-4 relative z-10">
         <Link to="/" className="flex items-center gap-2 group">
-          <div className="h-8 w-8 rounded-lg flex items-center justify-center" style={{ background: 'var(--color-primary-500)' }}>
+          <div
+            className="h-8 w-8 rounded-lg flex items-center justify-center transition-all duration-300 group-hover:scale-110 group-hover:shadow-lg"
+            style={{
+              background: 'var(--color-primary-500)',
+              boxShadow: '0 0 0 0 var(--color-primary-200)',
+            }}
+          >
             <Sparkles size={18} className="text-white" />
           </div>
           <span className="font-semibold text-lg" style={{ color: 'var(--text-primary)' }}>ewiki</span>
@@ -124,7 +165,7 @@ export function HomePage(): React.ReactElement {
             type="button"
             onClick={toggleAppearance}
             aria-label="切换主题"
-            className="rounded-md p-2 transition hover:bg-neutral-100"
+            className="rounded-md p-2 transition-all duration-200 hover:bg-neutral-100 active:scale-95"
             style={{ color: 'var(--text-secondary)' }}
           >
             {appearance === 'dark' ? (
@@ -139,7 +180,7 @@ export function HomePage(): React.ReactElement {
               type="button"
               onClick={() => { setShowNotifications(!showNotifications); setShowUserMenu(false); }}
               aria-label="通知"
-              className="relative rounded-md p-2 transition hover:bg-neutral-100"
+              className="relative rounded-md p-2 transition-all duration-200 hover:bg-neutral-100 active:scale-95"
               style={{ color: 'var(--text-secondary)' }}
             >
               <Bell size={18} />
@@ -150,11 +191,14 @@ export function HomePage(): React.ReactElement {
               )}
             </button>
             {showNotifications && (
-              <div className="absolute right-0 top-full mt-2 w-80 card shadow-lg z-50 overflow-hidden">
+              <div
+                className="absolute right-0 top-full mt-2 w-80 card shadow-xl z-50 overflow-hidden rounded-xl"
+                style={{ animation: 'fade-down 0.2s cubic-bezier(0.16, 1, 0.3, 1) both' }}
+              >
                 <div className="px-4 py-3 border-b" style={{ borderColor: 'var(--border-soft)' }}>
                   <div className="flex items-center justify-between">
                     <span className="font-medium">通知</span>
-                    <Link to="/notifications" className="text-xs" style={{ color: 'var(--color-primary-600)' }}>查看全部</Link>
+                    <Link to="/notifications" className="text-xs hover:underline" style={{ color: 'var(--color-primary-600)' }}>查看全部</Link>
                   </div>
                 </div>
                 <div className="max-h-80 overflow-y-auto">
@@ -166,7 +210,7 @@ export function HomePage(): React.ReactElement {
                           key={item.id}
                           type="button"
                           onClick={() => handleNotifClick(item)}
-                          className="w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-neutral-50 transition"
+                          className="w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-neutral-50 transition-colors duration-150"
                           style={{ borderColor: 'var(--border-soft)' }}
                         >
                           <div className="flex items-start gap-3">
@@ -205,7 +249,7 @@ export function HomePage(): React.ReactElement {
             <button
               type="button"
               onClick={() => { setShowUserMenu(!showUserMenu); setShowNotifications(false); }}
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 transition hover:bg-neutral-100"
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 transition-all duration-200 hover:bg-neutral-100 active:scale-95"
             >
               <div className="h-7 w-7 rounded-full bg-primary-500 text-white flex items-center justify-center text-xs font-medium">
                 {user?.name?.charAt(0) ?? 'U'}
@@ -213,10 +257,13 @@ export function HomePage(): React.ReactElement {
               <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>{user?.name ?? '用户'}</span>
             </button>
             {showUserMenu && (
-              <div className="absolute right-0 top-full mt-2 w-48 card shadow-lg z-50 overflow-hidden">
+              <div
+                className="absolute right-0 top-full mt-2 w-48 card shadow-xl z-50 overflow-hidden rounded-xl"
+                style={{ animation: 'fade-down 0.2s cubic-bezier(0.16, 1, 0.3, 1) both' }}
+              >
                 <Link
                   to="/dashboard"
-                  className="flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-neutral-50 transition"
+                  className="flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-neutral-50 transition-colors duration-150"
                   style={{ color: 'var(--text-primary)' }}
                   onClick={() => setShowUserMenu(false)}
                 >
@@ -225,7 +272,7 @@ export function HomePage(): React.ReactElement {
                 </Link>
                 <Link
                   to="/settings"
-                  className="flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-neutral-50 transition"
+                  className="flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-neutral-50 transition-colors duration-150"
                   style={{ color: 'var(--text-primary)' }}
                   onClick={() => setShowUserMenu(false)}
                 >
@@ -236,7 +283,7 @@ export function HomePage(): React.ReactElement {
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left hover:bg-neutral-50 transition"
+                  className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left hover:bg-neutral-50 transition-colors duration-150"
                   style={{ color: 'var(--text-secondary)' }}
                 >
                   <LogOut size={16} />
@@ -248,36 +295,58 @@ export function HomePage(): React.ReactElement {
         </div>
       </header>
 
-      <main className="flex-1 flex flex-col items-center px-4 pt-16 pb-20">
-        <div className="text-center mb-10">
-          <h1 className="font-display text-5xl font-bold mb-3" style={{ color: 'var(--text-primary)' }}>
-            <span style={{ color: 'var(--color-primary-600)' }}>e</span>wiki
+      <main className="flex-1 flex flex-col items-center px-4 pt-10 pb-20 relative z-10">
+        <div className="text-center mb-8" style={heroStyle}>
+          <div
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs mb-6"
+            style={{ background: 'var(--color-primary-50)', color: 'var(--color-primary-600)' }}
+          >
+            <Sparkles size={12} />
+            <span>让知识流动起来</span>
+          </div>
+          <h1
+            className="font-display text-5xl md:text-6xl font-bold mb-4 tracking-tight"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            <span style={{
+              background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-primary-600))',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text',
+            }}>e</span>wiki
           </h1>
           <p className="text-base" style={{ color: 'var(--text-muted)' }}>
             搜索你的知识，发现每一个答案
           </p>
         </div>
 
-        <form onSubmit={handleSearch} className="w-full max-w-2xl relative">
+        <form onSubmit={handleSearch} className="w-full max-w-2xl relative" style={searchStyle}>
           <div className="relative">
-            <Search size={20} className="absolute left-5 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
+            <Search
+              size={20}
+              className="absolute left-5 top-1/2 -translate-y-1/2 transition-all duration-300"
+              style={{ color: focused ? 'var(--color-primary-500)' : 'var(--text-muted)' }}
+            />
             <input
               ref={inputRef}
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               placeholder="搜索文档、项目..."
-              className="w-full h-14 pl-14 pr-32 text-base rounded-2xl border shadow-sm focus:shadow-md focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+              className="w-full h-14 pl-14 pr-32 text-base rounded-2xl border shadow-sm focus:shadow-lg focus:outline-none transition-all duration-300"
               style={{
                 background: 'var(--bg-surface)',
-                borderColor: 'var(--border-soft)',
+                borderColor: focused ? 'var(--color-primary-500)' : 'var(--border-soft)',
                 color: 'var(--text-primary)',
+                boxShadow: focused ? '0 0 0 4px var(--color-primary-100)' : '0 1px 3px rgba(0,0,0,0.05)',
               }}
             />
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
               <button
                 type="submit"
-                className="btn-primary h-10 px-5 rounded-xl text-sm font-medium"
+                className="btn-primary h-10 px-5 rounded-xl text-sm font-medium transition-all duration-200 hover:shadow-md active:scale-95"
               >
                 搜索
               </button>
@@ -285,7 +354,10 @@ export function HomePage(): React.ReactElement {
           </div>
 
           {query.length >= 2 && (
-            <div className="absolute left-0 right-0 top-full mt-2 card shadow-lg z-40 overflow-hidden rounded-xl">
+            <div
+              className="absolute left-0 right-0 top-full mt-2 card shadow-xl z-40 overflow-hidden rounded-xl"
+              style={{ animation: 'fade-down 0.25s cubic-bezier(0.16, 1, 0.3, 1) both' }}
+            >
               {searchLoading ? (
                 <div className="px-4 py-6 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                   搜索中...
@@ -296,12 +368,16 @@ export function HomePage(): React.ReactElement {
                 </div>
               ) : hasResults ? (
                 <div className="max-h-96 overflow-y-auto">
-                  {searchResults.items.map((doc) => (
+                  {searchResults.items.map((doc, idx) => (
                     <Link
                       key={doc.id}
-                      to={`/projects/${doc.projectId}/browse?path=${encodeURIComponent(doc.path)}`}
-                      className="block px-4 py-3 hover:bg-neutral-50 transition border-b last:border-b-0"
-                      style={{ borderColor: 'var(--border-soft)' }}
+                      to={`/read/${doc.id}`}
+                      className="block px-4 py-3 hover:bg-neutral-50 transition-colors duration-150 border-b last:border-b-0"
+                      style={{
+                        borderColor: 'var(--border-soft)',
+                        animation: `fade-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) both`,
+                        animationDelay: `${idx * 0.03}s`,
+                      }}
                     >
                       <div className="flex items-start gap-3">
                         <FileText size={16} className="mt-0.5 shrink-0" style={{ color: 'var(--color-primary-500)' }} />
@@ -310,7 +386,7 @@ export function HomePage(): React.ReactElement {
                             {doc.title || doc.path.split('/').pop() || '未命名'}
                           </div>
                           <div className="text-xs mt-0.5 truncate" style={{ color: 'var(--text-muted)' }}>
-                            {doc.path}
+                            {doc.snippet || doc.path}
                           </div>
                         </div>
                       </div>
@@ -318,10 +394,11 @@ export function HomePage(): React.ReactElement {
                   ))}
                   <button
                     type="submit"
-                    className="w-full px-4 py-3 text-left text-sm font-medium hover:bg-neutral-50 transition flex items-center justify-center gap-1"
+                    className="w-full px-4 py-3 text-left text-sm font-medium hover:bg-neutral-50 transition-colors duration-150 flex items-center justify-center gap-1 group"
                     style={{ color: 'var(--color-primary-600)' }}
                   >
-                    查看全部结果 <ArrowRight size={14} />
+                    查看全部结果
+                    <ArrowRight size={14} className="transition-transform duration-200 group-hover:translate-x-0.5" />
                   </button>
                 </div>
               ) : null}
@@ -330,23 +407,24 @@ export function HomePage(): React.ReactElement {
         </form>
 
         {!query && (
-          <div className="w-full max-w-4xl mt-16 grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="w-full max-w-4xl mt-14 grid grid-cols-1 md:grid-cols-2 gap-8" style={sectionsStyle}>
             <section>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="flex items-center gap-2 text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
                   <FolderOpen size={16} style={{ color: 'var(--color-primary-500)' }} />
                   最近项目
                 </h2>
-                <Link to="/library" className="text-xs flex items-center gap-1" style={{ color: 'var(--color-primary-600)' }}>
-                  全部 <ArrowRight size={12} />
+                <Link to="/library" className="text-xs flex items-center gap-1 group" style={{ color: 'var(--color-primary-600)' }}>
+                  全部
+                  <ArrowRight size={12} className="transition-transform duration-200 group-hover:translate-x-0.5" />
                 </Link>
               </div>
               <div className="space-y-1">
                 {projectsLoading ? (
                   Array.from({ length: 4 }).map((_, i) => (
                     <div key={i} className="card-hover p-3 rounded-lg">
-                      <div className="skeleton h-4 w-32 mb-2" />
-                      <div className="skeleton h-3 w-20" />
+                      <div className="skeleton-shimmer h-4 w-32 mb-2 rounded" />
+                      <div className="skeleton-shimmer h-3 w-20 rounded" />
                     </div>
                   ))
                 ) : (
@@ -354,10 +432,10 @@ export function HomePage(): React.ReactElement {
                     <Link
                       key={p.id}
                       to={`/projects/${p.id}/browse`}
-                      className="card-hover flex items-center gap-3 p-3 rounded-lg transition"
+                      className="card-hover flex items-center gap-3 p-3 rounded-lg transition-all duration-200 hover:shadow-md hover:-translate-y-px"
                     >
                       <div
-                        className="h-9 w-9 rounded-lg flex items-center justify-center shrink-0"
+                        className="h-9 w-9 rounded-lg flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-110"
                         style={{ background: 'var(--color-primary-100, #d1fae5)' }}
                       >
                         <FolderOpen size={18} style={{ color: 'var(--color-primary-600)' }} />
@@ -382,27 +460,28 @@ export function HomePage(): React.ReactElement {
                   <Clock size={16} style={{ color: 'var(--color-primary-500)' }} />
                   最近文档
                 </h2>
-                <Link to="/library" className="text-xs flex items-center gap-1" style={{ color: 'var(--color-primary-600)' }}>
-                  全部 <ArrowRight size={12} />
+                <Link to="/library" className="text-xs flex items-center gap-1 group" style={{ color: 'var(--color-primary-600)' }}>
+                  全部
+                  <ArrowRight size={12} className="transition-transform duration-200 group-hover:translate-x-0.5" />
                 </Link>
               </div>
               <div className="space-y-1">
                 {docsLoading ? (
                   Array.from({ length: 4 }).map((_, i) => (
                     <div key={i} className="card-hover p-3 rounded-lg">
-                      <div className="skeleton h-4 w-32 mb-2" />
-                      <div className="skeleton h-3 w-20" />
+                      <div className="skeleton-shimmer h-4 w-32 mb-2 rounded" />
+                      <div className="skeleton-shimmer h-3 w-20 rounded" />
                     </div>
                   ))
                 ) : (
                   recentDocs?.items?.slice(0, 5).map((doc) => (
                     <Link
                       key={doc.id}
-                      to={`/projects/${doc.projectId}/browse?path=${encodeURIComponent(doc.path)}`}
-                      className="card-hover flex items-center gap-3 p-3 rounded-lg transition"
+                      to={`/read/${doc.id}`}
+                      className="card-hover flex items-center gap-3 p-3 rounded-lg transition-all duration-200 hover:shadow-md hover:-translate-y-px"
                     >
                       <div
-                        className="h-9 w-9 rounded-lg flex items-center justify-center shrink-0"
+                        className="h-9 w-9 rounded-lg flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-110"
                         style={{ background: 'var(--color-primary-50, #ecfdf5)' }}
                       >
                         <FileText size={18} style={{ color: 'var(--color-primary-500)' }} />
@@ -424,7 +503,14 @@ export function HomePage(): React.ReactElement {
         )}
       </main>
 
-      <footer className="py-4 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+      <footer
+        className="py-4 text-center text-xs relative z-10"
+        style={{
+          color: 'var(--text-muted)',
+          opacity: mounted ? 1 : 0,
+          transition: 'opacity 0.7s ease 0.4s',
+        }}
+      >
         ewiki · 让知识流动起来
       </footer>
     </div>

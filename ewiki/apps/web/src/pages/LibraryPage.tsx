@@ -100,7 +100,7 @@ const BACKEND_ICON: Record<BackendKind, LucideIcon> = {
 
 const BACKEND_LABEL: Record<BackendKind, string> = {
   git: 'Git',
-  local: '本地',
+  local: '服务器存储',
 };
 
 // 状态筛选候选直接从 STATUS_MAP 派生（label/dot 单一来源，避免双表维护漂移）

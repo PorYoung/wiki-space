@@ -700,7 +700,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
     }
     if (project.storageKind !== 'git' || !project.storageConnectionId) {
-      throw new HTTPException(400, { message: 'LOCAL_BACKEND_NO_SYNC: 本地存储后端无需同步' });
+      throw new HTTPException(400, { message: 'LOCAL_BACKEND_NO_SYNC: 服务器存储后端无需同步' });
     }
 
     // 去重判定不能依赖 projects.storage_status：worker 提交与本请求读状态存在竞态，

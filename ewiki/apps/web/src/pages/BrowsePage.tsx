@@ -1114,18 +1114,28 @@ export function BrowsePage(): React.ReactElement {
         if (p.deleted) {
           setSearchParams({});
         } else {
-          void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
+          // 等 refetch 真正完成后才提示：invalidate 只标记失效、不保证此刻已拉回新内容，
+          // 立即 toast 会让用户看到「已刷新」而内容还是旧的（保存通知链路误报）
+          void queryClient
+            .refetchQueries({ queryKey: ['document', docParam], type: 'active' })
+            .then(() => {
+              showToast(`${p.by ?? '其他成员'} 更新了此文件，已刷新为最新版本`);
+            });
           void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-          showToast(`${p.by ?? '其他成员'} 更新了此文件，已刷新为最新版本`);
         }
         return;
       }
       // §6.2: 文本类不再在 BrowsePage 判断 dirty —— MarkdownViewer/CodeViewer 内部各自管理 buffer
-      // 直接 invalidate，viewer 的 useEffect 会感知 file.content 变化；viewer 内部会区分
-      // clean（buffer === saved）时自动更新、dirty 时保留 buffer 等待用户保存（保存时触发 409）
-      void queryClient.invalidateQueries({ queryKey: ['document', docParam] });
+      // 等 refetch 真正完成后才提示「已刷新」：invalidate 只标记失效、不保证此刻已拉回新内容，
+      // 立即 toast 会让用户看到「已刷新」而内容还是旧的（保存通知链路误报）。
+      // viewer 内部区分 clean（buffer===saved 时同步换新，预览/干净态真实刷新）与
+      // dirty（保留 buffer 只推进 saved 基线，用户编辑不丢，保存时 409 冲突检测基于最新版）。
+      void queryClient
+        .refetchQueries({ queryKey: ['document', docParam], type: 'active' })
+        .then(() => {
+          showToast(`${p.by ?? '其他成员'} 更新了此文件，已刷新为最新内容`);
+        });
       void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
-      showToast(`${p.by ?? '其他成员'} 更新了此文件，已刷新为最新内容`);
     });
     return () => rt.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps

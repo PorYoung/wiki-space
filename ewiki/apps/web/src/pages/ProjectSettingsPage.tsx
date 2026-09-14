@@ -78,7 +78,7 @@ const VISIBILITY_META: Record<string, { label: string; desc: string }> = {
 };
 
 const BACKEND_META: Record<string, { label: string; icon: typeof HardDrive }> = {
-  local: { label: '本地存储', icon: HardDrive },
+  local: { label: '服务器存储', icon: HardDrive },
   git: { label: 'Git 仓库', icon: GitBranch },
 };
 
@@ -315,7 +315,7 @@ function StorageSection({ project, projectLoading }: { project: ProjectOverview 
   );
 }
 
-// ---- 同步设置（仅 Git 后端；本地存储无需同步） ----
+// ---- 同步设置（仅 Git 后端；服务器存储无需同步） ----
 function SyncSettingsSection({ project, projectId, projectLoading, canWrite, canManage }: {
   project: ProjectOverview | undefined;
   projectId: string;
@@ -380,8 +380,8 @@ function SyncSettingsSection({ project, projectId, projectLoading, canWrite, can
       ) : !isGit ? (
         <div className="py-10 text-center text-neutral-400">
           <HardDrive size={32} className="mx-auto mb-2 text-neutral-300" />
-          <p className="text-sm">本地存储后端无需同步</p>
-          <p className="text-xs mt-1">文档直接落盘到平台目录；需要从 Git 远端同步请创建 Git 文档库</p>
+          <p className="text-sm">服务器存储后端无需同步</p>
+          <p className="text-xs mt-1">文档直接落盘到平台服务器目录；需要从 Git 远端同步请创建 Git 文档库</p>
         </div>
       ) : (
         <>
@@ -578,7 +578,7 @@ interface ImportJob {
 }
 
 const IMPORTER_META: Array<{ key: string; label: string; desc: string; enabled: boolean; placeholder: string }> = [
-  { key: 'folder', label: '本地文件夹', desc: '递归导入 *.md', enabled: true, placeholder: '/path/to/docs' },
+  { key: 'folder', label: '服务器目录', desc: '递归导入 *.md', enabled: true, placeholder: '/path/to/docs' },
   { key: 'web-crawler', label: '网页抓取', desc: '单页 HTML → MD', enabled: true, placeholder: 'https://example.com/docs' },
   { key: 'notion', label: 'Notion', desc: '深度连接器 · 即将上线', enabled: false, placeholder: '' },
 ];
@@ -620,7 +620,7 @@ function ExternalImportSection({ projectId, canWrite }: { projectId: string; can
       <SectionHeader
         icon={<Import size={15} />}
         title="外部导入"
-        desc="从本地文件夹或网页批量迁移文档到本项目"
+        desc="从服务器目录或网页批量迁移文档到本项目"
       />
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">

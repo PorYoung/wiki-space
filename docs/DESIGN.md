@@ -62,9 +62,9 @@
 
 | 术语 | 定义 |
 | --- | --- |
-| 存储后端 | 文档库（projects）1:1 内嵌的内容存储方式，取值仅 `git`（远端 Git 仓库）或 `local`（服务器本地文件夹）；随文档库创建而定，不可经 API 更换（R4/ADR-14） |
+| 存储后端 | 文档库（projects）1:1 内嵌的内容存储方式，取值仅 `git`（远端 Git 仓库）或 `local`（服务器存储：平台/云端部署下承载于服务器卷，桌面端部署下才是用户本机——详见 ARCHITECTURE-DUAL-SCENARIO）；随文档库创建而定，不可经 API 更换（R4/ADR-14） |
 | 存储源（连接配置） | 用户级可复用连接配置 `storage_connections`：持有 Git 主机地址与加密凭据（gitlab/gitea），可被同一用户的多个 Git 文档库引用，不跨用户共享 |
-| 同步（Sync） | 从 Git 文档库的远端仓库（或本地后端目录）拉取内容并消化为平台文档的手动任务；触发方式为平台内编辑自动提交（trigger=push）与手动同步（trigger=manual） |
+| 同步（Sync） | 从 Git 文档库的远端仓库（或服务器存储后端目录）拉取内容并消化为平台文档的手动任务；触发方式为平台内编辑自动提交（trigger=push）与手动同步（trigger=manual） |
 | 发布站点（Site） | 项目对外只读站点的发布配置与产物集合 |
 | 托管地址 | 平台持有的站点地址：子域名或子路径两种形态 |
 | 协同会话 | 多人通过 CRDT 文档同时编辑的实时会话 |
@@ -100,7 +100,7 @@ graph TB
     end
     subgraph Ext["外部系统"]
         GIT["Git 仓库 / GitLab / Gitea"]
-        LOC["本地文件夹（服务器卷）"]
+        LOC["服务器存储<br/>（部署方文件系统：云端=服务器卷 / 桌面=用户本机）"]
     end
     WEB -->|HTTPS REST| CDY
     WEB -->|WSS 事件与协同| CDY
@@ -117,7 +117,7 @@ graph TB
     CDY -.->|发布站点静态服务| S3
 ```
 
-**图示走读**：客户端只与 Caddy 对话，网关按路径分流——REST 转发 Server 副本，`/ws` 与 `/collab` 转发 Realtime 副本（按 docId 粘性路由保证同文档房间落同一实例）。R4 后外部系统仅余 Git 仓库（经用户级存储源连接访问）与服务器本地卷，网页/数据库抓取与开放推送 API 已删除。三类副本全部无状态，经方言边界四接口（JobQueue/LockService/EventBus/SearchService，见 2.4）访问 PostgreSQL——队列、广播、锁、检索不因换库而扩散。存储双轨：StorageService 以 S3 为主，写失败降级 NAS 并打补偿标记、读 miss 回退 NAS，补偿任务负责回迁；发布产物由 Caddy 从 S3 直接静态服务。Phase 1 部署实体 **6 容器**（caddy/server/realtime/worker/postgres/minio）+ 既有 NAS 设施 `[Expert judgment]`。
+**图示走读**：客户端只与 Caddy 对话，网关按路径分流——REST 转发 Server 副本，`/ws` 与 `/collab` 转发 Realtime 副本（按 docId 粘性路由保证同文档房间落同一实例）。R4 后外部系统仅余 Git 仓库（经用户级存储源连接访问）与服务器存储卷，网页/数据库抓取与开放推送 API 已删除。三类副本全部无状态，经方言边界四接口（JobQueue/LockService/EventBus/SearchService，见 2.4）访问 PostgreSQL——队列、广播、锁、检索不因换库而扩散。存储双轨：StorageService 以 S3 为主，写失败降级 NAS 并打补偿标记、读 miss 回退 NAS，补偿任务负责回迁；发布产物由 Caddy 从 S3 直接静态服务。Phase 1 部署实体 **6 容器**（caddy/server/realtime/worker/postgres/minio）+ 既有 NAS 设施 `[Expert judgment]`。
 
 ### 2.3 组件职责与边界
 
@@ -297,7 +297,7 @@ erDiagram
 - document_versions：`(document_id, version_no DESC)`。
 - activities：`(project_id, created_at DESC)`、`(verb)`。
 - sync_jobs / publish_jobs：`(status, created_at)`（Worker 扫描）。sync_jobs 不设 commit_hash 唯一约束（无增量重复同步正常留痕），手动同步投递互斥由 pg-boss singletonKey 承载。
-- publish_sites：`slug` 唯一、`custom_domain` 唯一。
+- publish_sites：`slug` 唯一、`custom_domain` 唯一。\
 `[Expert judgment]`
 
 ---
@@ -410,14 +410,7 @@ erDiagram
 
 #### PU2 执行发布
 
-| Field | Value |
-| --- | --- |
-| Operation | `POST /api/v1/projects/{projectId}/publish` |
-| Auth | Bearer；Maintainer+ |
-| Request body | `{ "versionScope": "current|published", "contentScope": "single|whole", "documentIds?": ["uuid"], "autoSync": true }`（发布目标/调度取自 publish_sites 配置） |
-| Success | `202 Accepted`；`{ jobId }`；完成后 WS 事件 `publish.finished` |
-| Error codes | 400（未配置发布站点）/ 403 / 409 PUBLISH_RUNNING / 429 |
-| 幂等 | `Idempotency-Key` 头；服务端以 `(siteId, contentHash)` 去重 |
+
 
 #### AI1 / I1（任务型接口统一模式）
 
@@ -425,12 +418,7 @@ POST → `202 { runId | jobId }`；GET 列表含 status/progress/stats；同任�
 
 ### 4.4 WebSocket 事件协议（F53 / F17）
 
-| 项 | 设计 |
-| --- | --- |
-| 连接 | `wss://…/ws?accessToken=…`；鉴权失败关闭码 4401 |
-| 房间订阅 | 客户端发送 `{type:"subscribe", room:"project:{id}"|"doc:{id}"|"user:{id}"}`；服务端按 RBAC 校验后加入 |
-| 跨副本广播 | 事件经 PG LISTEN/NOTIFY 广播，各 server 副本订阅后投递给本地连接——任意副本可服务，无粘性依赖 `[Research-backed：pg-boss 同机制]` |
-| 事件信封 | `{ event, room, payload, at }` |
+
 
 事件目录：
 
@@ -484,7 +472,7 @@ sequenceDiagram
     WS-->>客户端: 事件推送 / 失败置 error 并通知全体成员
 ```
 
-**走读**：手动同步对 Git 工作副本执行 pull（本地后端直接消化配置目录或 `FS_ROOT/local-library/<projectId>`），随后按相对路径将文件树消化为 documents——新增/更新执行 upsert，副本中消失的文档软删除，收尾重建 `document_links` 供图谱消费。状态经 `storage_status`（connected/synced/syncing/error）与 overview 接口对外可观测。冲突状态机（untracked/synced/modified/conflict）仍保留于 documents.status，平台内修改与远端更新分叉的裁决策略沿用 PRD F43。当前无定时调度：`auto_sync`/`interval_seconds` 只持久化偏好，任何文案不得声称定时同步已生效。
+**走读**：手动同步对 Git 工作副本执行 pull（服务器存储后端直接消化配置目录或 `FS_ROOT/local-library/<projectId>`），随后按相对路径将文件树消化为 documents——新增/更新执行 upsert，副本中消失的文档软删除，收尾重建 `document_links` 供图谱消费。状态经 `storage_status`（connected/synced/syncing/error）与 overview 接口对外可观测。冲突状态机（untracked/synced/modified/conflict）仍保留于 documents.status，平台内修改与远端更新分叉的裁决策略沿用 PRD F43。当前无定时调度：`auto_sync`/`interval_seconds` 只持久化偏好，任何文案不得声称定时同步已生效。
 
 ### 5.2 发布管线（F33–F36 / R4 双地址）
 

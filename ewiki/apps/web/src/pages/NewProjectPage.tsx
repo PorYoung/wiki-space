@@ -129,7 +129,7 @@ export function NewProjectPage(): React.ReactElement {
               <Cloud size={20} />
             </div>
             <div className="flex-1">
-              <div className="font-semibold">本地存储（平台分配目录）</div>
+              <div className="font-semibold">服务器存储（平台分配目录）</div>
               <div className="text-xs" style={{ color: 'var(--text-muted, #64748b)' }}>
                 文档保存在服务器配置的存储目录（模拟 NAS 盘），按文档库分目录落盘
               </div>
@@ -205,7 +205,7 @@ export function NewProjectPage(): React.ReactElement {
           <CheckCircle2 size={40} className="mx-auto mb-3 text-emerald-500" />
           <div className="text-lg font-bold">文档库「{created.project.name}」创建成功</div>
           <div className="mt-2 text-sm" style={{ color: 'var(--text-muted, #64748b)' }}>
-            存储源：{created.git ? 'Git 仓库' : '本地存储（平台目录）'}
+            存储源：{created.git ? 'Git 仓库' : '服务器存储（平台目录）'}
             {created.docs > 0 && ` · 已预置 ${created.docs} 篇模板文档`}
           </div>
           {created.git && (

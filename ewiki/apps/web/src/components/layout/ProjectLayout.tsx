@@ -83,7 +83,7 @@ const TABS = [
 // 存储后端徽章：项目行内嵌 storage_kind（git | local）
 const BACKEND_TYPE_TAG: Record<string, { cls: string; label: string }> = {
   git: { cls: 'tag-primary', label: 'Git 仓库' },
-  local: { cls: 'tag-neutral', label: '本地存储' },
+  local: { cls: 'tag-neutral', label: '服务器存储' },
 };
 
 function relativeTime(iso: string | null | undefined): string {

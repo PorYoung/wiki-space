@@ -34,7 +34,7 @@ import { renderSite, type SiteAsset } from '@ewiki/render';
 import { pipeline } from 'node:stream/promises';
 
 // Worker（SDD ADR-1：与 server 分池伸缩）
-// sync 队列为真实实现：文档库（projects 内嵌 Git/本地存储后端）→ MD 消化 → 状态机 → 动态写入 → LISTEN/NOTIFY 广播
+// sync 队列为真实实现：文档库（projects 内嵌 Git/服务器存储后端）→ MD 消化 → 状态机 → 动态写入 → LISTEN/NOTIFY 广播
 
 const { sql, db } = createDb();
 const boss = new PgBoss({
