@@ -78,6 +78,20 @@
       "when": 1789413709274,
       "tag": "0010_thick_scorpion",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789419794877,
+      "tag": "0011_open_api",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789423490068,
+      "tag": "0012_open_api_hardening",
+      "breakpoints": true
     }
   ]
 }

@@ -31,6 +31,8 @@ import { and, desc, eq, inArray, isNull, lt, ne, sql } from 'drizzle-orm';
 import {
   activities,
   aiClassifyRuns,
+  apiTokenUsage,
+  apiTokens,
   auditLogs,
   documentChunks,
   documentLinks,
@@ -71,6 +73,9 @@ import { registerStarterRoutes } from './routes-starter.js';
 import { docStorageEffects, docStorageEffectsBatch, registerPlatformRoutes, type DocEffectResult } from './routes-platform.js';
 import { registerFileRoutes } from './routes-files.js';
 import { buildRawUrl } from '../lib/raw-sign.js';
+import { checkIssuePolicy, effectiveTokenPolicyFor, generateApiToken, isTokenScope, parseTokenPolicy } from '../lib/open-tokens.js';
+import { getOpenSettings, saveOpenSettings } from '../lib/open-settings.js';
+import { registerOpenRoutes } from './routes-open.js';
 import { checkProjectTransfer, denyIfNot, projectAccess, readableProjectIds, readableProjectIdsSql, teamAccess, type TeamRole } from '../lib/permissions.js';
 
 // ---- 发布模板元数据（PLAN 3.5 / 5.2.1：服务端权威源，ThemesPage / PublishPage 从此拉取） ----
@@ -903,6 +908,108 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     }
     const [inserted] = await db.insert(userPrefs).values({ userId, ...set }).returning();
     return c.json(inserted, 201);
+  });
+
+  // ---- API 令牌（OPEN-API-MCP-DESIGN §6.1：自助机器身份管理，内部面 JWT 鉴权） ----
+  app.get('/api/v1/me/token-policy', async (c) => {
+    const userId = c.get('userId') as string;
+    return c.json(await effectiveTokenPolicyFor(db, userId));
+  });
+
+  app.get('/api/v1/me/tokens', async (c) => {
+    const userId = c.get('userId') as string;
+    const rows = await db
+      .select({
+        id: apiTokens.id,
+        name: apiTokens.name,
+        tokenPrefix: apiTokens.tokenPrefix,
+        scopes: apiTokens.scopes,
+        expiresAt: apiTokens.expiresAt,
+        lastUsedAt: apiTokens.lastUsedAt,
+        lastIp: apiTokens.lastIp,
+        revokedAt: apiTokens.revokedAt,
+        createdAt: apiTokens.createdAt,
+      })
+      .from(apiTokens)
+      .where(eq(apiTokens.userId, userId))
+      .orderBy(desc(apiTokens.createdAt));
+    // 近 7 天用量（设置页可见；管理端有完整视图）
+    const since = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
+    const usageRows = (await db
+      .select({
+        tokenId: apiTokenUsage.tokenId,
+        searchCount: sql<number>`coalesce(sum(${apiTokenUsage.searchCount}), 0)::int`,
+        readCount: sql<number>`coalesce(sum(${apiTokenUsage.readCount}), 0)::int`,
+        writeCount: sql<number>`coalesce(sum(${apiTokenUsage.writeCount}), 0)::int`,
+        rejectedCount: sql<number>`coalesce(sum(${apiTokenUsage.rejectedCount}), 0)::int`,
+      })
+      .from(apiTokenUsage)
+      .innerJoin(apiTokens, eq(apiTokens.id, apiTokenUsage.tokenId))
+      .where(and(eq(apiTokens.userId, userId), sql`${apiTokenUsage.day} >= ${since}`))
+      .groupBy(apiTokenUsage.tokenId)) as unknown as Array<{
+      tokenId: string;
+      searchCount: number;
+      readCount: number;
+      writeCount: number;
+      rejectedCount: number;
+    }>;
+    const usageByToken = new Map(usageRows.map((u) => [u.tokenId, u]));
+    return c.json({
+      items: rows.map((r) => ({ ...r, usage7d: usageByToken.get(r.id) ?? { searchCount: 0, readCount: 0, writeCount: 0, rejectedCount: 0 } })),
+      total: rows.length,
+    });
+  });
+
+  app.post('/api/v1/me/tokens', async (c) => {
+    const userId = c.get('userId') as string;
+    const body = (await c.req.json().catch(() => null)) as { name?: unknown; scopes?: unknown; expiresInDays?: unknown } | null;
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    if (!name || name.length > 80) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 令牌名称需为 1-80 字符' });
+    const scopes = [...new Set(Array.isArray(body?.scopes) ? body.scopes.filter(isTokenScope) : [])];
+    if (scopes.length === 0) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 至少选择一个 scope（search/read/write）' });
+
+    // 团队令牌策略（评审决议 3）：禁用开关 + scope 最严封顶
+    const policy = await effectiveTokenPolicyFor(db, userId);
+    const denied = checkIssuePolicy(policy, scopes);
+    if (denied === 'TOKENS_DISABLED') {
+      throw new HTTPException(403, { message: 'TOKEN_POLICY_DISABLED: 所属组织的团队令牌策略已禁用 API 令牌' });
+    }
+    if (denied === 'SCOPE_EXCEEDS_POLICY') {
+      throw new HTTPException(403, { message: `TOKEN_POLICY_SCOPE: 团队策略将令牌权限封顶为 ${policy.maxScope}，请调整勾选的权限` });
+    }
+
+    const expiresInDays = typeof body?.expiresInDays === 'number' && body.expiresInDays > 0 ? Math.floor(Math.min(body.expiresInDays, 3650)) : null;
+    const { plaintext, prefix, hash } = generateApiToken();
+    const expiresAt = expiresInDays ? new Date(Date.now() + expiresInDays * 86_400_000) : null;
+    const [row] = await db
+      .insert(apiTokens)
+      .values({ userId, name, tokenPrefix: prefix, tokenHash: hash, scopes, expiresAt })
+      .returning({ id: apiTokens.id });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'token.created',
+      resourceType: 'api_token',
+      resourceId: row!.id,
+      meta: { name, scopes, expiresInDays, maxScopePolicy: policy.maxScope },
+    });
+    // 明文仅本次响应返回一次；前端以弹窗展示并引导复制
+    return c.json({ token: plaintext, prefix, id: row!.id, name, scopes, expiresAt, policy }, 201);
+  });
+
+  app.delete('/api/v1/me/tokens/:id', async (c) => {
+    const userId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const [row] = await db
+      .select()
+      .from(apiTokens)
+      .where(and(eq(apiTokens.id, id), eq(apiTokens.userId, userId)))
+      .limit(1);
+    if (!row) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    if (!row.revokedAt) {
+      await db.update(apiTokens).set({ revokedAt: new Date() }).where(eq(apiTokens.id, id));
+      await db.insert(auditLogs).values({ actorId: userId, action: 'token.revoked', resourceType: 'api_token', resourceId: id, meta: { name: row.name } });
+    }
+    return c.json({ ok: true });
   });
 
   // ---- 团队（TEAM-PERMISSIONS-DESIGN §5.1 T1-T9） ----
@@ -2725,7 +2832,9 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const userId = c.get('userId') as string;
     const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
     denyIfNot(access.canManage, 'FORBIDDEN: 仅项目所有者/维护者可重建索引');
-    if (config.EMBEDDING_PROVIDER === 'none') {
+    // 与 search-config PUT 同口径：按生效配置（env ⊕ 管理端运行时覆盖）判断，而非仅 env
+    const runtime = await getSearchSettings(db, process.env);
+    if (runtime.provider === 'none' || !runtime.vectorEnabled) {
       return c.json({ code: 'EMBEDDING_NOT_CONFIGURED', message: '未配置嵌入服务，无法重建向量索引' }, 422);
     }
 
@@ -2801,6 +2910,132 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       meta: { queuedDocs: stale.length },
     });
     return c.json({ ok: true, queuedDocs: stale.length });
+  });
+
+  // ---- 管理端「开放接口」（OPEN-API-MCP-DESIGN §10/§6.5）：开关 · 配额 · 用量 · 令牌全景 ----
+  app.get('/api/v1/admin/open-api', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const settings = await getOpenSettings(db);
+    const [counts] = (
+      (await db.execute(sql`
+        SELECT
+          (SELECT count(*)::int FROM api_tokens WHERE revoked_at IS NULL) AS active_tokens,
+          (SELECT count(*)::int FROM api_tokens) AS total_tokens,
+          (SELECT count(*)::int FROM api_tokens WHERE revoked_at IS NULL AND scopes @> '{write}') AS write_tokens
+      `)) as unknown as Array<{ active_tokens: number; total_tokens: number; write_tokens: number }>
+    ) ?? { active_tokens: 0, total_tokens: 0, write_tokens: 0 };
+    return c.json({ settings, envEnabled: config.OPENAPI_ENABLED, counts });
+  });
+
+  app.put('/api/v1/admin/open-api', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const adminId = c.get('userId') as string;
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 请求体需为 JSON' });
+    const patch: Record<string, unknown> = {};
+    if (typeof body.publicSearchEnabled === 'boolean') patch.publicSearchEnabled = body.publicSearchEnabled;
+    for (const k of ['publicPerIpPerMin', 'searchPerMin', 'readPerMin', 'writePerMin'] as const) {
+      if (typeof body[k] === 'number' && Number.isFinite(body[k]) && (body[k] as number) >= 0) patch[k] = body[k];
+    }
+    const saved = await saveOpenSettings(db, patch, adminId);
+    await db.insert(auditLogs).values({ actorId: adminId, action: 'admin.openapi_config', resourceType: 'platform_setting', resourceId: null, meta: { patch } });
+    return c.json({ settings: saved });
+  });
+
+  app.get('/api/v1/admin/open-api/usage', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const days = Math.min(90, Math.max(1, Math.floor(Number(c.req.query('days') ?? '14') || 14)));
+    const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const byToken = (await db
+      .select({
+        tokenId: apiTokenUsage.tokenId,
+        tokenName: apiTokens.name,
+        tokenPrefix: apiTokens.tokenPrefix,
+        userName: users.name,
+        userEmail: users.email,
+        revokedAt: apiTokens.revokedAt,
+        searchCount: sql<number>`coalesce(sum(${apiTokenUsage.searchCount}), 0)::int`,
+        readCount: sql<number>`coalesce(sum(${apiTokenUsage.readCount}), 0)::int`,
+        writeCount: sql<number>`coalesce(sum(${apiTokenUsage.writeCount}), 0)::int`,
+        rejectedCount: sql<number>`coalesce(sum(${apiTokenUsage.rejectedCount}), 0)::int`,
+      })
+      .from(apiTokenUsage)
+      .innerJoin(apiTokens, eq(apiTokens.id, apiTokenUsage.tokenId))
+      .innerJoin(users, eq(users.id, apiTokens.userId))
+      .where(sql`${apiTokenUsage.day} >= ${since}`)
+      .groupBy(apiTokenUsage.tokenId, apiTokens.name, apiTokens.tokenPrefix, users.name, users.email, apiTokens.revokedAt)
+      .orderBy(desc(sql`sum(${apiTokenUsage.searchCount} + ${apiTokenUsage.readCount} + ${apiTokenUsage.writeCount})`))
+      .limit(100)) as unknown as Array<Record<string, unknown>>;
+    const daily = (await db
+      .select({
+        day: apiTokenUsage.day,
+        searchCount: sql<number>`coalesce(sum(${apiTokenUsage.searchCount}), 0)::int`,
+        readCount: sql<number>`coalesce(sum(${apiTokenUsage.readCount}), 0)::int`,
+        writeCount: sql<number>`coalesce(sum(${apiTokenUsage.writeCount}), 0)::int`,
+        rejectedCount: sql<number>`coalesce(sum(${apiTokenUsage.rejectedCount}), 0)::int`,
+      })
+      .from(apiTokenUsage)
+      .where(sql`${apiTokenUsage.day} >= ${since}`)
+      .groupBy(apiTokenUsage.day)
+      .orderBy(apiTokenUsage.day)) as unknown as Array<Record<string, unknown>>;
+    return c.json({ days, byToken, daily });
+  });
+
+  app.get('/api/v1/admin/open-api/tokens', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const rows = await db
+      .select({
+        id: apiTokens.id,
+        name: apiTokens.name,
+        tokenPrefix: apiTokens.tokenPrefix,
+        scopes: apiTokens.scopes,
+        userId: apiTokens.userId,
+        userName: users.name,
+        userEmail: users.email,
+        expiresAt: apiTokens.expiresAt,
+        lastUsedAt: apiTokens.lastUsedAt,
+        lastIp: apiTokens.lastIp,
+        revokedAt: apiTokens.revokedAt,
+        createdAt: apiTokens.createdAt,
+      })
+      .from(apiTokens)
+      .innerJoin(users, eq(users.id, apiTokens.userId))
+      .orderBy(desc(apiTokens.createdAt))
+      .limit(200);
+    return c.json({ items: rows, total: rows.length });
+  });
+
+  app.post('/api/v1/admin/open-api/tokens/:id/revoke', async (c) => {
+    if (c.get('globalRole') !== 'admin') throw new HTTPException(403, { message: 'FORBIDDEN: 仅管理员' });
+    const adminId = c.get('userId') as string;
+    const id = c.req.param('id')!;
+    const [row] = await db.select().from(apiTokens).where(eq(apiTokens.id, id)).limit(1);
+    if (!row) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    if (!row.revokedAt) {
+      await db.update(apiTokens).set({ revokedAt: new Date() }).where(eq(apiTokens.id, id));
+      await db.insert(auditLogs).values({ actorId: adminId, action: 'admin.token_revoke', resourceType: 'api_token', resourceId: id, meta: { name: row.name, ownerId: row.userId } });
+    }
+    return c.json({ ok: true });
+  });
+
+  // ---- 团队令牌策略（评审决议 3：企业组织规范钩子；team owner 可设置） ----
+  app.put('/api/v1/teams/:id/token-policy', async (c) => {
+    const userId = c.get('userId') as string;
+    const teamId = c.req.param('id')!;
+    const access = await teamAccess(teamId, userId, c.get('globalRole') as string);
+    denyIfNot(access.canManageTeam, 'FORBIDDEN: 需要团队 owner 权限');
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) throw new HTTPException(400, { message: 'VALIDATION_FAILED: 请求体需为 JSON' });
+    const current = parseTokenPolicy(access.team.tokenPolicy);
+    const next = {
+      allowTokens: typeof body.allowTokens === 'boolean' ? body.allowTokens : current.allowTokens,
+      maxScope: isTokenScope(body.maxScope) ? body.maxScope : current.maxScope,
+      ipAllowlist: Array.isArray(body.ipAllowlist) ? body.ipAllowlist.filter((s): s is string => typeof s === 'string' && s.length <= 64).slice(0, 32) : current.ipAllowlist,
+      source: 'local' as const,
+    };
+    await db.update(teams).set({ tokenPolicy: next, updatedAt: new Date() }).where(eq(teams.id, teamId));
+    await db.insert(auditLogs).values({ actorId: userId, action: 'team.token_policy', resourceType: 'team', resourceId: teamId, meta: { from: current, to: next } });
+    return c.json({ policy: next });
   });
 
   // ---- 管理端「检索与任务」（SEARCH-VECTOR-DESIGN §15）：全局配置 · 队列视图 · 任务视图 ----
@@ -3938,4 +4173,6 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
   // ---- 平台化扩展路由（需求 1-10）：注册/系统管理/存储配置/建库向导/站点公开访问 ----
   registerPlatformRoutes(app, deps);
   registerFileRoutes(app, deps);
+  // ---- 开放面（OPEN-API-MCP-DESIGN）：/api/open/v1（PAT 鉴权 + 限流 + 用量 + MCP） ----
+  registerOpenRoutes(app, deps);
 }

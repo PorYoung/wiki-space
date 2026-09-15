@@ -563,10 +563,12 @@ interface AssetCopy {
   storageRef: string;
 }
 
+// searchEndpoint：站点检索入口（开放面 D1；slug 由 handlePublish 传入，自定义域名站点为 null）
 async function renderDocsToHtml(
   projectId: string,
   templateId: string | null,
-): Promise<{ pages: Array<{ rel: string; html: string }>; hash: string; assets: SiteAsset[]; assetCopies: AssetCopy[] }> {
+  searchEndpoint: string | null,
+): Promise<{ pages: Array<{ rel: string; html: string }>; hash: string; assets: SiteAsset[]; assetCopies: AssetCopy[]; manifestDocs: Array<{ path: string; title: string }> }> {
   const rows = await db
     .select({
       id: documents.id,
@@ -609,10 +611,26 @@ async function renderDocsToHtml(
     assetCopies.push({ rel, storageRef: a.storageRef });
   }
 
-  const rendered = renderSite({ docs: textRows, siteTitle: textRows[0]?.title ?? 'Wiki', templateId, assets });
-  return { pages: rendered.pages, hash: rendered.hash, assets, assetCopies };
+  const rendered = renderSite({
+    docs: textRows,
+    siteTitle: textRows[0]?.title ?? 'Wiki',
+    templateId,
+    assets,
+    ...(searchEndpoint ? { search: { endpoint: searchEndpoint } } : {}),
+  });
+  return {
+    pages: rendered.pages,
+    hash: rendered.hash,
+    assets,
+    assetCopies,
+    manifestDocs: textRows.map((r) => ({ path: r.path, title: r.title ?? r.path })),
+  };
 }
 
+/**
+ * 站点检索清单（OPEN-API-MCP-DESIGN ADR-O6）：随发布写入 manifest.json（文档 path 白名单），
+ * server 侧 /sites/:slug/search 按其过滤 —— 防止"未发布编辑"经检索泄露给匿名访客（R3）。
+ */
 async function writeArtifacts(
   siteId: string,
   slug: string,
@@ -620,6 +638,7 @@ async function writeArtifacts(
   versionNo: number,
   pages: Array<{ rel: string; html: string }>,
   assetCopies: AssetCopy[] = [],
+  manifestDocs: Array<{ path: string; title: string }> = [],
 ): Promise<string> {
   // 站点资源写入用户分配的存储目录（模拟 NAS）：<NAS>/users/<owner>/sites/<slug>/vN
   const nasRoot = resolveRoot(process.env.FS_NAS_ROOT);
@@ -644,6 +663,13 @@ async function writeArtifacts(
       log('publish asset copy failed', { siteId, rel: a.rel, storageRef: a.storageRef, err: String(err) });
     }
   }
+
+  // 站点检索清单：文档 path 白名单（server /sites/:slug/search 消费；缺失时检索退化为活库 + degraded）
+  await fs.writeFile(
+    path.join(root, 'manifest.json'),
+    JSON.stringify({ version: versionNo, docs: manifestDocs }, null, 2),
+    'utf8',
+  );
 
   // 原子切换：写 current.json 指针（server /sites/:slug 读取该指针定位当前版本）
   const siteRoot = siteDir(nasRoot, ownerName, slug);
@@ -716,11 +742,20 @@ async function handlePublish(job: Job): Promise<void> {
     .returning({ id: publishJobs.id });
 
   try {
-    const { pages, hash, assetCopies } = await renderDocsToHtml(projectId, site.templateId ?? null);
+    // 站点检索端点（OPEN-API-MCP-DESIGN §15.5）：subpath 站点同源相对路径即可；
+    // 子域/自定义域名站点跨源 → 绝对地址指向主域（依赖开放面 CORS，默认放行）
+    const siteApiOrigin = process.env.EWIKI_SITE_API_ORIGIN ?? `https://${process.env.EWIKI_BASE_DOMAIN ?? 'ewiki.yfzx.cn'}`;
+    const sameOrigin = (site.addressMode ?? 'subdomain') === 'subpath';
+    const searchEndpoint = slugForSite
+      ? sameOrigin
+        ? `/api/open/v1/sites/${slugForSite}/search`
+        : `${siteApiOrigin}/api/open/v1/sites/${slugForSite}/search`
+      : null;
+    const { pages, hash, assetCopies, manifestDocs } = await renderDocsToHtml(projectId, site.templateId ?? null, searchEndpoint);
     contentHash = hash;
     pagesCount = pages.filter((p) => p.rel.endsWith('.html')).length;
 
-    await writeArtifacts(site.id, slugForSite, ownerNameForSite, nextVersion, pages, assetCopies);
+    await writeArtifacts(site.id, slugForSite, ownerNameForSite, nextVersion, pages, assetCopies, manifestDocs);
     artifactRef = `v${nextVersion}`;
 
     // 状态机：building → published

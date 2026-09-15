@@ -37,6 +37,7 @@ import { commitAndPush, ensureWorkdir, validateConnection, type ConnLike, type P
 import { getLibraryTemplate, LIBRARY_TEMPLATES } from '../lib/library-templates.js';
 import { ensureWritableDir, getNasRoot, getReposRoot, mirrorDoc, moveMirror, NAS_ROOT_SETTING_KEY } from '../lib/nas.js';
 import { denyIfNot } from '../lib/permissions.js';
+import { getSearchSettings } from '../lib/search-settings.js';
 import type { Context } from 'hono';
 import type { AppDeps } from './app.js';
 
@@ -803,6 +804,8 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
       zhparser: false,
     };
 
+    // 生效配置（env ⊕ 管理端运行时覆盖），与查询/索引侧同源；env-only 会让运行时配置"看起来没生效"
+    const searchRuntime = await getSearchSettings(db, process.env);
     return c.json({
       db: {
         version: dbInfo?.version?.split(' on ')[0] ?? 'PostgreSQL',
@@ -812,8 +815,8 @@ export function registerPlatformRoutes(app: Hono, deps: AppDeps): void {
       search: {
         ftsConfig: config.SEARCH_FTS_CONFIG,
         zhparser: searchStats?.zhparser ?? false,
-        embeddingProvider: config.EMBEDDING_PROVIDER,
-        embeddingModel: config.EMBEDDING_MODEL,
+        embeddingProvider: searchRuntime.provider,
+        embeddingModel: searchRuntime.model,
         embeddingDim: config.EMBEDDING_DIM,
         totalChunks: Number(searchStats?.total_chunks ?? 0),
         pendingChunks: Number(searchStats?.pending_chunks ?? 0),

@@ -7,6 +7,7 @@ import {
   Eye,
   Globe,
   HardDrive,
+  KeyRound,
   Keyboard,
   LogOut,
   Moon,
@@ -21,6 +22,7 @@ import {
   User,
 } from 'lucide-react';
 import { apiFetch, tokenStore } from '../lib/api/client';
+import { TokenSettings } from '../components/TokenSettings';
 import { useTheme } from '../theme/ThemeProvider';
 import { THEMES } from '@ewiki/theme';
 import { HeaderToast } from '../components/Toast';
@@ -726,12 +728,14 @@ function NotificationToggle({ label, desc, checked, onChange }: {
 // Main page
 // ---------------------------------------------------------------------------
 
-// 左侧分区导航 6 tab（对齐原型 Settings.jsx:622-629；账户危险操作并入「关于」）
+// 左侧分区导航（对齐原型 Settings.jsx:622-629；账户危险操作并入「关于」；
+// 「API 令牌」为开放 API 机器身份管理，OPEN-API-MCP-DESIGN §6.1）
 const SETTINGS_TABS = [
   { key: 'profile', label: '个人资料', Icon: User },
   { key: 'appearance', label: '外观与主题', Icon: Palette },
   { key: 'notifications', label: '通知', Icon: Bell },
   { key: 'storage', label: '存储默认', Icon: HardDrive },
+  { key: 'tokens', label: 'API 令牌', Icon: KeyRound },
   { key: 'shortcuts', label: '快捷键', Icon: Keyboard },
   { key: 'about', label: '关于 / 帮助', Icon: Settings2 },
 ] as const;
@@ -883,6 +887,7 @@ export function SettingsPage(): React.ReactElement {
                 {activeTab === 'storage' && (
                   <StorageDefaultsSection prefs={prefs} setPrefs={setPrefs} />
                 )}
+                {activeTab === 'tokens' && <TokenSettings />}
                 {activeTab === 'shortcuts' && (
                   <KeyboardSection prefs={prefs} setPrefs={setPrefs} />
                 )}

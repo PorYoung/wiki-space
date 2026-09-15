@@ -128,6 +128,21 @@ export async function readableProjectIds(uid: string): Promise<string[]> {
   return rows.map((r) => r.id);
 }
 
+// ---- 匿名可读集合（OPEN-API-MCP-DESIGN §6.2，D1 平台公开面专用）----
+// uid=null 的退化口径：仅 public-* 档且未删除。是既有单口径的参数退化，不是平行实现。
+// 站点维度（/sites/:slug/search）不走本函数：发布本身已是显式公开动作，范围 = 发布清单。
+
+export function anonymousReadableProjectIdsSql() {
+  return sql`(select p.id from projects p where p.deleted_at is null and p.visibility in ('public-read','public-write'))`;
+}
+
+export async function anonymousReadableProjectIds(): Promise<string[]> {
+  const rows = (await db.execute(
+    sql`select id from ${anonymousReadableProjectIdsSql()} as t(id)`,
+  )) as unknown as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
 // ---------------------------------------------------------------------------
 // 团队访问（TEAM-PERMISSIONS-DESIGN §3.6）
 // ---------------------------------------------------------------------------

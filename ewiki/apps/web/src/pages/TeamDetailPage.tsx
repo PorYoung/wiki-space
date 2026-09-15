@@ -223,6 +223,36 @@ export function TeamDetailPage(): React.ReactElement {
     onError: () => showToast('更新失败'),
   });
 
+  // ---- API 令牌策略（OPEN-API-MCP-DESIGN 评审决议 3：企业组织规范钩子） ----
+  const [allowTokens, setAllowTokens] = useState(true);
+  const [maxScope, setMaxScope] = useState<'search' | 'read' | 'write'>('write');
+  const [ipAllowlistText, setIpAllowlistText] = useState('');
+  useEffect(() => {
+    if (team) {
+      const tp = (team as { tokenPolicy?: { allowTokens?: boolean; maxScope?: 'search' | 'read' | 'write'; ipAllowlist?: string[] } }).tokenPolicy;
+      setAllowTokens(tp?.allowTokens !== false);
+      setMaxScope(tp?.maxScope ?? 'write');
+      setIpAllowlistText((tp?.ipAllowlist ?? []).join('\n'));
+    }
+  }, [team?.id, (team as unknown as { tokenPolicy?: unknown })?.tokenPolicy]);
+
+  const saveTokenPolicy = useMutation({
+    mutationFn: () =>
+      apiFetch<unknown>(`/api/v1/teams/${teamId}/token-policy`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          allowTokens,
+          maxScope,
+          ipAllowlist: ipAllowlistText.split(/[\n,]/).map((t) => t.trim()).filter(Boolean),
+        }),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['team', teamId] });
+      showToast('令牌策略已保存');
+    },
+    onError: () => showToast('保存失败，请检查权限'),
+  });
+
   const archiveMutation = useMutation({
     mutationFn: (archived: boolean) =>
       apiFetch<{ ok: boolean; archived: boolean }>(`/api/v1/teams/${teamId}/archive`, {
@@ -499,6 +529,33 @@ export function TeamDetailPage(): React.ReactElement {
                         <div className="mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>{desc}</div>
                       </button>
                     ))}
+                  </div>
+                </div>
+
+                <div className="border-t pt-5" style={{ borderColor: 'var(--border-soft)' }}>
+                  <div className="mb-2 text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>API 令牌策略（约束本团队成员签发的开放 API 令牌）</div>
+                  <label className="mb-3 flex cursor-pointer items-center gap-2 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    <input type="checkbox" className="accent-primary-500" checked={allowTokens} onChange={(e) => setAllowTokens(e.target.checked)} />
+                    允许成员签发 API 令牌（关闭后成员签发一律被拒）
+                  </label>
+                  <div className="mb-3 grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>权限封顶</label>
+                      <select className="input" value={maxScope} onChange={(e) => setMaxScope(e.target.value as 'search' | 'read' | 'write')}>
+                        <option value="search">search · 仅检索</option>
+                        <option value="read">read · 检索 + 读取</option>
+                        <option value="write">write · 读写（默认）</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>IP 白名单（每行一条，留空不限制）</label>
+                      <textarea rows={2} className="input resize-none font-mono text-xs" placeholder={'10.0.0.0/8\n192.168.1.20'} value={ipAllowlistText} onChange={(e) => setIpAllowlistText(e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <button className="btn-secondary !h-8 !text-xs" disabled={saveTokenPolicy.isPending} onClick={() => saveTokenPolicy.mutate()}>
+                      {saveTokenPolicy.isPending ? '保存中…' : '保存令牌策略'}
+                    </button>
                   </div>
                 </div>
 

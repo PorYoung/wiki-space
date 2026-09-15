@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Users, Database, ScrollText, ShieldCheck, UserCheck, UserX, KeyRound, UserCog, Search } from 'lucide-react';
+import { Users, Database, ScrollText, ShieldCheck, UserCheck, UserX, KeyRound, UserCog, Search, Globe } from 'lucide-react';
 import { apiFetch } from '../lib/api/client';
 import { SearchAdminSection } from '../components/SearchAdminSection';
+import { OpenApiAdminSection } from '../components/OpenApiAdminSection';
 
-/** 系统管理（本期需求 1 + SEARCH-VECTOR-DESIGN §15）：用户 / 数据库与存储 / 检索与任务 / 审计台账 */
+/** 系统管理（本期需求 1 + SEARCH-VECTOR-DESIGN §15 + OPEN-API-MCP-DESIGN §10）：
+ *  用户 / 数据库与存储 / 检索与任务 / 开放接口 / 审计台账 */
 
 interface AdminUser {
   id: string;
@@ -32,7 +34,7 @@ interface AuditRow {
   actorEmail: string | null;
 }
 
-type Tab = 'users' | 'system' | 'search' | 'audit';
+type Tab = 'users' | 'system' | 'search' | 'open' | 'audit';
 const fmtBytes = (n: number): string => (n > 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n > 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round(n / 1024))} KB`);
 const fmtTime = (t?: string | null): string => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '—');
 
@@ -81,6 +83,7 @@ export function AdminPage(): React.ReactElement {
     { key: 'users', label: '用户管理', icon: Users },
     { key: 'system', label: '数据库与存储', icon: Database },
     { key: 'search', label: '检索与任务', icon: Search },
+    { key: 'open', label: '开放接口', icon: Globe },
     { key: 'audit', label: '审计日志', icon: ScrollText },
   ];
 
@@ -232,6 +235,7 @@ export function AdminPage(): React.ReactElement {
       )}
 
       {tab === 'search' && <SearchAdminSection />}
+      {tab === 'open' && <OpenApiAdminSection />}
 
       {tab === 'audit' && (
         <div>

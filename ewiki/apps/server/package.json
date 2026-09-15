@@ -18,6 +18,7 @@
   "dependencies": {
     "@ewiki/db": "workspace:*",
     "@ewiki/git": "workspace:*",
+    "@ewiki/mcp": "workspace:*",
     "@ewiki/render": "workspace:*",
     "@ewiki/shared": "workspace:*",
     "@ewiki/storage": "workspace:*",

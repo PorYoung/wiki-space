@@ -40,10 +40,18 @@ export function createApp(deps: AppDeps): Hono {
       if (err.status >= 500) {
         console.error(JSON.stringify({ level: 'error', msg: 'http_5xx', requestId, err: String(err?.stack ?? err) }));
       }
-      return c.json(
-        { code: 'HTTP_ERROR', message: err.message, requestId },
-        err.status,
-      );
+      // 开放面（OPEN-API-MCP-DESIGN §7.1）：message 以 "CODE: 文案" 形态抛出时，
+      // 提取机器可读 code —— 仅作用于 /api/open/*，内部面信封行为不变
+      let code = 'HTTP_ERROR';
+      let message = err.message;
+      if (c.req.path.startsWith('/api/open/')) {
+        const m = err.message.match(/^([A-Z0-9_]+):\s*([\s\S]*)$/);
+        if (m) {
+          code = m[1]!;
+          message = m[2]!;
+        }
+      }
+      return c.json({ code, message, requestId }, err.status);
     }
     console.error(JSON.stringify({
       level: 'error',

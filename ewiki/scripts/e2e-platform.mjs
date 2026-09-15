@@ -869,13 +869,14 @@ async function main() {
     record('P11g', '增量去重：重命名（title 变更、内容不变）触发索引刷新但零重复嵌入',
       statsAfter.texts === statsBefore.texts, `texts ${statsBefore.texts} → ${statsAfter.texts}`);
 
-    // P11h 删除：软删后索引自动清除（关键词不再命中 + chunk 数下降）
+    // P11h 删除：软删后索引自动清除（关键词不再命中 + chunk 数下降）。
+    // 清理走防抖队列（索引防抖默认 30s、管理端可调），窗口需宽于防抖上限
     const chunksBefore = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
     const del = await req(`/api/v1/documents/${docBId}`, { token: ctx.alice, method: 'DELETE' });
     const afterDel = await waitFor(async () => {
       const r = await req(`/api/v1/projects/${spId}/search-index`, { token: ctx.alice });
       return (r.json?.stats?.total_chunks ?? 0) < (chunksBefore.json?.stats?.total_chunks ?? 0) ? r.json?.stats : null;
-    }, { timeoutMs: 20_000 });
+    }, { timeoutMs: 75_000 });
     const kwDel = await req(`/api/v1/search?q=${encodeURIComponent('zhparser')}&mode=keyword`, { token: ctx.alice });
     const delLeak = (kwDel.json?.items ?? []).some((it) => it.documentId === docBId);
     record('P11h', '删除：软删后向量 chunk 自动清除，且关键词不再命中',
@@ -1094,6 +1095,332 @@ async function main() {
 
     // P13f projectIds 越权不报错回归（cleanup：恢复全局默认值已由 P12g 承担，此处无操作）
     record('P13f', '多库/混合库与触达验收完成', true, `built chunks=${built?.stats?.total_chunks}`);
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // ---- P14 开放 API：机器身份 · 个人检索/管理 · MCP（OPEN-API-MCP-DESIGN P14 验收） ----
+  // ---------------------------------------------------------------------------
+  {
+    // 准备：独立库 + 基线文档（内容含唯一标记词，供检索断言）
+    const proj = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST',
+      body: { name: `开放接口验证库-${runId}`, storage: { kind: 'local' } },
+    });
+    const projId = proj.json?.project?.id ?? proj.json?.id;
+    const marker = `OPENAPIBASELINE${runId}`;
+    const doc1 = await req(`/api/v1/projects/${projId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '规范/开放基线.md', content: `# 开放基线\n\n开放接口基线文档 ${marker}，用于个人检索对齐断言。` },
+    });
+    const doc1Id = doc1.json?.id;
+
+    // 三种 scope 预设令牌
+    const issue = async (name, scopes, expiresInDays = 365) => req('/api/v1/me/tokens', {
+      token: ctx.alice, method: 'POST', body: { name, scopes, expiresInDays },
+    });
+    const tokSearch = await issue(`e2e-检索-${runId}`, ['search']);
+    const tokRead = await issue(`e2e-只读-${runId}`, ['search', 'read']);
+    const tokWrite = await issue(`e2e-读写-${runId}`, ['search', 'read', 'write']);
+    const S = tokSearch.json?.token;
+    const R = tokRead.json?.token;
+    const W = tokWrite.json?.token;
+    const openReq = (path, opts = {}) => req(path, { ...opts, token: opts.token });
+
+    // P14a 契约文档：OpenAPI 3.1 自动产出，关键端点在场
+    const spec = await openReq('/api/open/v1/openapi.json');
+    const specPaths = Object.keys(spec.json?.paths ?? {});
+    record('P14a', 'openapi.json 契约文档：3.1 结构 + 三个维度端点在场',
+      spec.status === 200 && String(spec.json?.openapi ?? '').startsWith('3.1') &&
+        specPaths.includes('/api/open/v1/search') && specPaths.includes('/api/open/v1/documents/{id}') &&
+        specPaths.includes('/api/open/v1/sites/{slug}/search') && specPaths.includes('/api/open/v1/mcp'),
+      `status=${spec.status} paths=${specPaths.length}`);
+
+    // P14b 检索专用令牌：search 可用；读全文 403 INSUFFICIENT_SCOPE
+    const s1 = await openReq(`/api/open/v1/search?q=${marker}`, { token: S });
+    const s2 = await openReq(`/api/open/v1/documents/${doc1Id}`, { token: S });
+    record('P14b', '检索专用令牌：search 可用；读全文被 scope 门拒绝',
+      s1.status === 200 && (s1.json?.items ?? []).some((it) => it.documentId === doc1Id) &&
+        s2.status === 403 && s2.json?.code === 'INSUFFICIENT_SCOPE',
+      `search=${s1.status} read=${s2.status}/${s2.json?.code}`);
+
+    // P14c 只读令牌：读全文可用；写被拒；ai-suggestions 可读
+    const r1 = await openReq(`/api/open/v1/documents/${doc1Id}`, { token: R });
+    const r2 = await openReq(`/api/open/v1/projects/${projId}/documents`, { method: 'POST', token: R, body: { path: 'x.md' } });
+    const r3 = await openReq(`/api/open/v1/projects/${projId}/ai-suggestions`, { token: R });
+    record('P14c', '只读令牌：读全文/整理建议可用；写被拒',
+      r1.status === 200 && String(r1.json?.content ?? '').includes('开放基线') &&
+        r2.status === 403 && r3.status === 200 && Array.isArray(r3.json?.items),
+      `read=${r1.status} write=${r2.status}/${r2.json?.code} suggest=${r3.status}`);
+
+    // P14d 个人检索对齐：开放面与登录态（内部面）同源 —— 结果集一致
+    const internal = await req(`/api/v1/search?q=${marker}`, { token: ctx.alice });
+    const external = await openReq(`/api/open/v1/search?q=${marker}`, { token: R });
+    const idsIn = (r) => (r.json?.items ?? []).map((it) => it.documentId).sort().join(',');
+    record('P14d', '个人检索与登录态同源：内外检索结果一致',
+      internal.status === 200 && external.status === 200 && idsIn(internal) === idsIn(external) && idsIn(internal).includes(doc1Id),
+      `internal=[${idsIn(internal).slice(0, 60)}] external=[${idsIn(external).slice(0, 60)}]`);
+
+    // P14e 个人管理写链路：建/改/标签/移/删（副作用收敛点：版本 + 索引）
+    const w1 = await openReq(`/api/open/v1/projects/${projId}/documents`, {
+      method: 'POST', token: W,
+      body: { path: '规范/写入链路.md', content: `# 写入链路\n\n开放写基线 ${marker}WRITE。` },
+    });
+    const w1Id = w1.json?.id;
+    let indexed = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const sr = await openReq(`/api/open/v1/search?q=${marker}WRITE`, { token: R });
+      if ((sr.json?.items ?? []).some((it) => it.documentId === w1Id)) { indexed = true; break; }
+    }
+    // 乐观并发：以 baseVersionNo=1 正确保存；再用过期版本保存 → 409
+    const w2 = await openReq(`/api/open/v1/documents/${w1Id}`, {
+      method: 'PUT', token: W, body: { content: `# 写入链路\n\n开放写更新 ${marker}WRITE2。`, baseVersionNo: 1, message: 'openapi e2e' },
+    });
+    const w3 = await openReq(`/api/open/v1/documents/${w1Id}`, {
+      method: 'PUT', token: W, body: { content: 'stale write', baseVersionNo: 1 },
+    });
+    const w4 = await openReq(`/api/open/v1/documents/${w1Id}/tags`, { method: 'PUT', token: W, body: { tags: ['openapi', 'e2e'] } });
+    const w5 = await openReq(`/api/open/v1/documents/${w1Id}`, { method: 'PATCH', token: W, body: { path: '规范/写入链路-新.md' } });
+    const w5Detail = await openReq(`/api/open/v1/documents/${w1Id}`, { token: R });
+    record('P14e-1', '开放写链路：建→索引可见→保存(乐观并发)→409 冲突→标签→移动',
+      w1.status === 201 && indexed && w2.status === 200 && w3.status === 409 &&
+        (w4.json?.document?.tags ?? []).includes('openapi') && w5.status === 200 &&
+        w5Detail.json?.path === '规范/写入链路-新.md',
+      `create=${w1.status} indexed=${indexed} save=${w2.status} conflict=${w3.status} tags=${w4.status} move=${w5.status}`);
+    const w6 = await openReq(`/api/open/v1/documents/${w1Id}`, { method: 'DELETE', token: W });
+    let cleared = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const sr = await openReq(`/api/open/v1/search?q=${marker}WRITE`, { token: R });
+      if (!(sr.json?.items ?? []).some((it) => it.documentId === w1Id)) { cleared = true; break; }
+    }
+    record('P14e-2', '开放删除（软删）：索引自动清除',
+      w6.status === 200 && cleared, `delete=${w6.status} cleared=${cleared}`);
+
+    // P14f 建库（评审决议 1：进 REST 工具面）→ 内部列表可见
+    const np = await openReq('/api/open/v1/projects', {
+      method: 'POST', token: W, body: { name: `令牌建库-${runId}`, ownerType: 'user' },
+    });
+    const mine = await req('/api/v1/projects', { token: ctx.alice });
+    const npId = np.json?.id ?? np.json?.project?.id;
+    record('P14f', '令牌建库：创建成功且属主内部列表可见',
+      np.status === 201 && (mine.json?.items ?? []).some((p) => p.id === npId),
+      `create=${np.status}`);
+
+    // P14g 吊销即时生效
+    await req(`/api/v1/me/tokens/${tokSearch.json?.id}`, { token: ctx.alice, method: 'DELETE' });
+    const revoked = await openReq(`/api/open/v1/search?q=${marker}`, { token: S });
+    record('P14g', '吊销即时生效：已吊销令牌 401',
+      revoked.status === 401 && revoked.json?.code === 'TOKEN_INVALID',
+      `status=${revoked.status} code=${revoked.json?.code}`);
+
+    // P14h 配额限流：临时 searchPerMin=2 → 第 3 次 429；恢复
+    const rlTok = await issue(`e2e-限流-${runId}`, ['search']);
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { searchPerMin: 2 } });
+    const h1 = await openReq(`/api/open/v1/search?q=${marker}`, { token: rlTok.json?.token });
+    const h2 = await openReq(`/api/open/v1/search?q=${marker}`, { token: rlTok.json?.token });
+    const h3 = await openReq(`/api/open/v1/search?q=${marker}`, { token: rlTok.json?.token });
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { searchPerMin: 60 } });
+    record('P14h', '令牌配额限流：超出后 429 RATE_LIMITED',
+      h1.status === 200 && h2.status === 200 && h3.status === 429 && h3.json?.code === 'RATE_LIMITED',
+      `h1=${h1.status} h2=${h2.status} h3=${h3.status}/${h3.json?.code}`);
+
+    // P14i 用量记账：管理端按令牌聚合可见（决议 8）。写令牌只产生 write 维度，
+    // 读写计数分别断言在各自实际使用的令牌上（W→write，R→read/search）
+    const usage = await req('/api/v1/admin/open-api/usage?days=14', { token: ctx.admin });
+    const writeUsage = (usage.json?.byToken ?? []).find((t) => t.tokenId === tokWrite.json?.id);
+    const readUsage = (usage.json?.byToken ?? []).find((t) => t.tokenId === tokRead.json?.id);
+    record('P14i', 'per-token 用量记账：管理端聚合视图可见读写计数',
+      usage.status === 200 && !!writeUsage && writeUsage.writeCount >= 1 &&
+        !!readUsage && readUsage.readCount >= 1 && readUsage.searchCount >= 1,
+      `write=${writeUsage?.writeCount} read=${readUsage?.readCount} search=${readUsage?.searchCount}`);
+
+    // P14j MCP 托管端点：initialize / tools/list（按 scope 裁剪）/ tools/call
+    const mcp = async (body, token) => openReq('/api/open/v1/mcp', { method: 'POST', token, body });
+    const init = await mcp({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } } }, R);
+    const tools = await mcp({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, R);
+    const toolNames = ((tools.json?.result?.tools ?? [])).map((t) => t.name);
+    const call = await mcp({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'kb_search', arguments: { q: marker } } }, R);
+    const callOk = call.json?.result && !call.json?.error && call.json.result.isError !== true;
+    const noAuth = await req('/api/open/v1/mcp', { method: 'POST', body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
+    record('P14j', 'MCP 托管：握手/工具清单按 scope 裁剪/工具调用成功/无令牌 401',
+      init.json?.result?.protocolVersion === '2025-06-18' &&
+        toolNames.includes('kb_search') && toolNames.includes('kb_suggest_organization') &&
+        !toolNames.includes('kb_create_document') && !toolNames.includes('kb_delete_document') &&
+        callOk && noAuth.status === 401,
+      `proto=${init.json?.result?.protocolVersion} tools=${toolNames.length} call=${call.status} noAuth=${noAuth.status}`);
+
+    // P14k 团队令牌策略（评审决议 3）：禁用/封顶在签发侧强制
+    const team = await req('/api/v1/teams', { token: ctx.alice, method: 'POST', body: { name: `令牌策略团队-${runId}` } });
+    const teamId = team.json?.id ?? team.json?.team?.id;
+    const bobEmail = (await req('/api/v1/me', { token: ctx.bob })).json?.email;
+    await req(`/api/v1/teams/${teamId}/members`, { token: ctx.alice, method: 'POST', body: { email: bobEmail, role: 'member' } });
+    await req(`/api/v1/teams/${teamId}/token-policy`, { token: ctx.alice, method: 'PUT', body: { allowTokens: false } });
+    // alice 也在团队里 → 签发应被 TOKENS_DISABLED 拒绝
+    const deniedAll = await issue(`e2e-策略禁用-${runId}`, ['search']);
+    await req(`/api/v1/teams/${teamId}/token-policy`, { token: ctx.alice, method: 'PUT', body: { allowTokens: true, maxScope: 'read' } });
+    const deniedScope = await req('/api/v1/me/tokens', { token: ctx.bob, method: 'POST', body: { name: `e2e-越权-${runId}`, scopes: ['search', 'read', 'write'] } });
+    const bobOk = await req('/api/v1/me/tokens', { token: ctx.bob, method: 'POST', body: { name: `e2e-合规-${runId}`, scopes: ['search', 'read'] } });
+    await req(`/api/v1/teams/${teamId}/token-policy`, { token: ctx.alice, method: 'PUT', body: { allowTokens: true, maxScope: 'write' } });
+    record('P14k', '团队令牌策略：allowTokens=false 拒签；maxScope=read 封顶 write',
+      deniedAll.status === 403 && String(deniedAll.json?.message ?? '').startsWith('TOKEN_POLICY_DISABLED') &&
+        deniedScope.status === 403 && String(deniedScope.json?.message ?? '').startsWith('TOKEN_POLICY_SCOPE') && bobOk.status === 201,
+      `disabled=${deniedAll.status}/${deniedAll.json?.message} scope=${deniedScope.status}/${deniedScope.json?.message} ok=${bobOk.status}`);
+
+    // ---- P14l/m/n（§15.5 增补）：CORS · MCP SSE · Idempotency-Key（需 header/原文访问，局部 raw fetch） ----
+    const rawReq = async (path, { method = 'GET', token, headers = {}, body } = {}) => {
+      const h = { ...headers };
+      if (token) h.Authorization = `Bearer ${token}`;
+      if (body !== undefined) h['Content-Type'] = 'application/json';
+      const res = await fetch(`${BASE}${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+      const text = await res.text();
+      return { status: res.status, text, headers: res.headers };
+    };
+
+    // P14l CORS：预检放行（含 MCP/幂等头）+ 实际响应 Origin 回显
+    const preflight = await rawReq(`/api/open/v1/search?q=x`, { method: 'OPTIONS', headers: { Origin: 'https://example.org', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization,content-type,mcp-protocol-version' } });
+    const corsGet = await rawReq(`/api/open/v1/openapi.json`, { headers: { Origin: 'https://example.org' } });
+    record('P14l', '开放面 CORS：预检 204 放行（authorization/mcp 头）；实际响应回显 Origin',
+      preflight.status === 204 && (preflight.headers.get('access-control-allow-origin') ?? '') !== '' &&
+        (preflight.headers.get('access-control-allow-headers') ?? '').toLowerCase().includes('authorization') &&
+        (preflight.headers.get('access-control-allow-headers') ?? '').toLowerCase().includes('mcp-protocol-version') &&
+        corsGet.headers.get('access-control-allow-origin') === 'https://example.org',
+      `preflight=${preflight.status} aco=${preflight.headers.get('access-control-allow-origin')} acah=${(preflight.headers.get('access-control-allow-headers') ?? '').slice(0, 48)}`);
+
+    // P14m MCP Streamable HTTP：POST Accept: text/event-stream → SSE 单消息流
+    const sse = await rawReq('/api/open/v1/mcp', { method: 'POST', token: R, headers: { Accept: 'text/event-stream' }, body: { jsonrpc: '2.0', id: 21, method: 'tools/list' } });
+    record('P14m', 'MCP SSE 协商：POST 以 text/event-stream 单消息流回包（event: message + tools 数组）',
+      sse.status === 200 && (sse.headers.get('content-type') ?? '').includes('text/event-stream') &&
+        sse.text.includes('event: message') && sse.text.includes('"tools"'),
+      `status=${sse.status} ct=${sse.headers.get('content-type')} head=${sse.text.slice(0, 48)}`);
+
+    // P14n Idempotency-Key（决议 6）：同键重放同响应 + 仅创建一份
+    const idemKey = `e2e-idem-${runId}`;
+    const idemBody = { path: '规范/幂等.md', content: `# 幂等\n\n${marker}IDEM` };
+    const i1 = await rawReq(`/api/open/v1/projects/${projId}/documents`, { method: 'POST', token: W, headers: { 'Idempotency-Key': idemKey }, body: idemBody });
+    const i2 = await rawReq(`/api/open/v1/projects/${projId}/documents`, { method: 'POST', token: W, headers: { 'Idempotency-Key': idemKey }, body: idemBody });
+    let i1Id = null;
+    let i2Id = null;
+    try { i1Id = JSON.parse(i1.text)?.id; i2Id = JSON.parse(i2.text)?.id; } catch { /* 非 JSON */ }
+    const idemList = await req(`/api/v1/projects/${projId}/documents?q=${encodeURIComponent('规范/幂等')}`, { token: ctx.alice });
+    record('P14n', 'Idempotency-Key 幂等：同键重放同响应（Replayed 头），仅创建一份文档',
+      i1.status === 201 && i2.status === 201 && i1Id === i2Id &&
+        i2.headers.get('idempotency-replayed') === 'true' && (idemList.json?.total ?? 0) === 1,
+      `i1=${i1.status} i2=${i2.status} sameId=${i1Id === i2Id} replayed=${i2.headers.get('idempotency-replayed')} total=${idemList.json?.total}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ---- P15 开放 API：公开检索（D1）· kill switch · IP 限流 · 审计（P15 验收） ----
+  // ---------------------------------------------------------------------------
+  {
+    const markerPub = `PUBLICSEARCH${runId}`;
+    const markerLate = `POSTPUBLISH${runId}`;
+    // 公开库（发布站点）+ 私有库各一篇
+    const pubProj = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST',
+      body: { name: `公开检索库-${runId}`, storage: { kind: 'local' }, visibility: 'public-read' },
+    });
+    const pubId = pubProj.json?.project?.id ?? pubProj.json?.id;
+    await req(`/api/v1/projects/${pubId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '公开/欢迎.md', content: `# 欢迎\n\n公开检索基线 ${markerPub}。` },
+    });
+    const privProj = await req('/api/v1/projects', {
+      token: ctx.alice, method: 'POST',
+      body: { name: `私有库-${runId}`, storage: { kind: 'local' } },
+    });
+    const privId = privProj.json?.project?.id ?? privProj.json?.id;
+    await req(`/api/v1/projects/${privId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '机密/私有.md', content: `# 私有\n\n不应被匿名检索 ${markerPub}。` },
+    });
+
+    // P15a 默认关：公开检索两端点 404（不泄露存在性）
+    const off1 = await req(`/api/open/v1/public/search?q=${markerPub}`);
+    const off2 = await req(`/api/open/v1/sites/never-existed-${runId}/search?q=x`);
+    record('P15a', '公开检索默认关：匿名端点一律 404',
+      off1.status === 404 && off2.status === 404, `public=${off1.status} site=${off2.status}`);
+
+    // 开启（非管理员 403 断言）→ 平台公开面仅 public-* 可见
+    const deniedAdmin = await req('/api/v1/admin/open-api', { token: ctx.alice, method: 'PUT', body: { publicSearchEnabled: true } });
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { publicSearchEnabled: true } });
+    await new Promise((r) => setTimeout(r, 10_500)); // 运行时配置 TTL 10s
+    const pub = await req(`/api/open/v1/public/search?q=${encodeURIComponent(markerPub)}`);
+    const pubPaths = (pub.json?.items ?? []).map((it) => `${it.path}`);
+    record('P15b', '平台公开面：仅 public-read 库可被匿名检索；非管理员不可改开关',
+      deniedAdmin.status === 403 && pub.status === 200 &&
+        pubPaths.some((p) => p.includes('公开')) && !pubPaths.some((p) => p.includes('机密')),
+      `denied=${deniedAdmin.status} status=${pub.status} paths=${pubPaths.join(',').slice(0, 80)}`);
+
+    // P15c 站点检索：发布清单过滤 —— 发布后新增文档不可被站点检索（R3 缓解），但活库公开面可见
+    const site = await req(`/api/v1/projects/${pubId}/publish-sites`, {
+      token: ctx.alice, method: 'POST',
+      body: { slug: `openapi-site-${runId}`, addressMode: 'subpath', templateId: 't-docs', schedule: 'manual' },
+    });
+    const siteId = site.json?.id;
+    let siteReady = false;
+    if (site.status === 201 && siteId) {
+      await req(`/api/v1/publish-sites/${siteId}/jobs`, { token: ctx.alice, method: 'POST' });
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const jobs = await req(`/api/v1/publish-sites/${siteId}/jobs`, { token: ctx.alice });
+        if (jobs.json?.items?.[0]?.status === 'published') { siteReady = true; break; }
+        if (jobs.json?.items?.[0]?.status === 'failed') break;
+      }
+    }
+    await req(`/api/v1/projects/${pubId}/documents`, {
+      token: ctx.alice, method: 'POST',
+      body: { path: '公开/发布后新增.md', content: `# 发布后新增\n\n ${markerLate} 不应在发布清单内。` },
+    });
+    await new Promise((r) => setTimeout(r, 11_000)); // 等待配置 TTL + 索引
+    const siteSearch = await req(`/api/open/v1/sites/openapi-site-${runId}/search?q=${encodeURIComponent('公开检索基线 ' + markerPub)}`);
+    const lateHit = await req(`/api/open/v1/sites/openapi-site-${runId}/search?q=${encodeURIComponent(markerLate)}`);
+    const pubLate = await req(`/api/open/v1/public/search?q=${encodeURIComponent(markerLate)}`);
+    record('P15c', '站点检索：已发布内容可搜；发布后新增被清单过滤（公开面活库可见）',
+      siteReady && siteSearch.status === 200 && (siteSearch.json?.items ?? []).some((it) => String(it.path).includes('欢迎')) &&
+        (lateHit.json?.items ?? []).length === 0 && (pubLate.json?.items ?? []).some((it) => String(it.path).includes('发布后新增')),
+      `ready=${siteReady} site=${siteSearch.status}/hits=${siteSearch.json?.items?.length} lateFiltered=${lateHit.json?.items?.length} pubLate=${pubLate.json?.items?.length}`);
+
+    // P15d 匿名 IP 限流。固定 60s 窗口可能已被前序匿名调用（P15b/c）占满：
+    // 轮询至窗口滚动后的首个 200（配额=1），随后立即第 2 发必须 429（拒绝不计数，轮询不延长窗口）
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { publicPerIpPerMin: 1 } });
+    await new Promise((r) => setTimeout(r, 10_500));
+    let ip1 = null;
+    let ip2 = null;
+    for (let i = 0; i < 20 && ip1 === null; i++) {
+      const probe = await req(`/api/open/v1/public/search?q=${encodeURIComponent(markerPub)}`);
+      if (probe.status === 200) {
+        ip1 = 200;
+        ip2 = (await req(`/api/open/v1/public/search?q=${encodeURIComponent(markerPub)}`)).status;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { publicPerIpPerMin: 10 } });
+    await new Promise((r) => setTimeout(r, 10_500));
+    record('P15d', '匿名 IP 限流：超限 429',
+      ip1 === 200 && ip2 === 429, `ip1=${ip1} ip2=${ip2}`);
+
+    // P15e kill switch：关闭后两端点立即 404
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { publicSearchEnabled: false } });
+    await new Promise((r) => setTimeout(r, 10_500));
+    const kill1 = await req(`/api/open/v1/public/search?q=${encodeURIComponent(markerPub)}`);
+    const kill2 = await req(`/api/open/v1/sites/openapi-site-${runId}/search?q=x`);
+    record('P15e', '公开检索 kill switch：关闭即 404',
+      kill1.status === 404 && kill2.status === 404, `public=${kill1.status} site=${kill2.status}`);
+
+    // P15f 审计闭环（决议 8）：签发/开放写均落审计
+    const auditRows = await req('/api/v1/admin/audit?action=token.created', { token: ctx.admin });
+    const auditOpen = await req('/api/v1/admin/audit?action=open.write', { token: ctx.admin });
+    record('P15f', '审计闭环：token.created 与 open.write.* 均可检索',
+      auditRows.status === 200 && (auditRows.json?.items?.length ?? 0) >= 1 &&
+        auditOpen.status === 200 && (auditOpen.json?.items?.length ?? 0) >= 1,
+      `created=${auditRows.json?.items?.length} openWrite=${auditOpen.json?.items?.length}`);
+
+    // P15g 恢复平台态（cleanup）：公开检索回到默认关闭
+    await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { publicSearchEnabled: false, publicPerIpPerMin: 10, searchPerMin: 60, readPerMin: 120, writePerMin: 30 } });
+    record('P15g', '平台态恢复：公开检索关闭、配额回默认', true, 'cleanup');
   }
 
   const passed = results.filter((r) => r.pass).length;

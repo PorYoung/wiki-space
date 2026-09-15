@@ -8,6 +8,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -86,6 +87,11 @@ export const teams = pgTable(
       .notNull()
       .references(() => users.id), // 团队主 owner（与 team_members.role='owner' 冗余，便于兜底查询）
     archived: boolean('archived').notNull().default(false), // 归档：团队只读，不可再建库/加成员
+    // ---- 开放 API 团队令牌策略（OPEN-API-MCP-DESIGN §6.4，决议 3：企业组织规范钩子）----
+    // source 预留：组织架构接入后可整体切换为从组织系统同步（本地校验逻辑不变）
+    tokenPolicy: jsonb('token_policy')
+      .notNull()
+      .default({ allowTokens: true, maxScope: 'write', ipAllowlist: [], source: 'local' }),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -525,4 +531,81 @@ export const indexBuilds = pgTable(
     check('index_builds_kind_check', sql`${t.kind} IN ('vector','vector-rebuild')`),
     check('index_builds_status_check', sql`${t.status} IN ('pending','running','done','failed','canceled')`),
   ],
+);
+
+// ---------------------------------------------------------------------------
+// 开放 API 机器身份与治理（OPEN-API-MCP-DESIGN §6，2026-09-15 评审决议 1/3/8）
+// ---------------------------------------------------------------------------
+
+/** PAT（Personal Access Token）：act-as-user 机器凭据。
+ *  明文 `ewk_<base64url(32B)>` 仅签发响应出现一次；库内只存 sha256 + 前 12 字符前缀。 */
+export const apiTokens = pgTable(
+  'api_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    tokenPrefix: text('token_prefix').notNull(), // 前 12 字符：列表展示/定位，不构成可还原信息
+    tokenHash: text('token_hash').notNull(), // sha256(token) hex；认证按哈希等值查
+    scopes: text('scopes').array().notNull(), // 'search' | 'read' | 'write' 的子集
+    expiresAt: ts('expires_at'), // NULL = 永不过期（UI 引导 1 年）
+    lastUsedAt: ts('last_used_at'),
+    revokedAt: ts('revoked_at'),
+    lastIp: text('last_ip'), // 最近使用来源（审计辅助）
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [unique('api_tokens_hash_uq').on(t.tokenHash)],
+);
+
+/** per-token 用量日汇总（决议 8：健全管理与审计）：开放面每请求 UPSERT 累加；
+ *  限流拒绝计 rejectedCount。管理端「开放接口」页签与设置页消费。 */
+export const apiTokenUsage = pgTable(
+  'api_token_usage',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tokenId: uuid('token_id')
+      .notNull()
+      .references(() => apiTokens.id, { onDelete: 'cascade' }),
+    day: text('day').notNull(), // UTC 日期 YYYY-MM-DD
+    searchCount: integer('search_count').notNull().default(0),
+    readCount: integer('read_count').notNull().default(0),
+    writeCount: integer('write_count').notNull().default(0),
+    rejectedCount: integer('rejected_count').notNull().default(0),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [unique('api_token_usage_token_day_uq').on(t.tokenId, t.day)],
+);
+
+/** 跨副本精确限流（OPEN-API-MCP-DESIGN ADR-O7 增补：server×2 硬配额）：
+ *  固定窗口计数（bucket_key × window_start 唯一）；单语句原子 check-and-increment（CAS 语义
+ *  的 CASE UPDATE），限额 = 读取 returned count ≤ limit。窗口粒度 1 分钟，历史窗口概率性清理。 */
+export const apiRateWindows = pgTable(
+  'api_rate_windows',
+  {
+    bucketKey: text('bucket_key').notNull(), // 't:search:<tokenId>' | 'ip:<addr>'
+    windowStart: ts('window_start').notNull(),
+    count: integer('count').notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.bucketKey, t.windowStart] })],
+);
+
+/** 写接口幂等键（评审决议 6 落地）：Idempotency-Key × token 唯一；仅存 2xx 响应快照，
+ *  重放返回原响应（Idempotency-Replayed 头），method/path 不一致 → 409 IDEMPOTENCY_CONFLICT。 */
+export const apiIdempotencyKeys = pgTable(
+  'api_idempotency_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tokenId: uuid('token_id')
+      .notNull()
+      .references(() => apiTokens.id, { onDelete: 'cascade' }),
+    idemKey: text('idem_key').notNull(),
+    method: text('method').notNull(),
+    path: text('path').notNull(),
+    status: integer('status').notNull(),
+    responseBody: text('response_body').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [unique('api_idempotency_uq').on(t.tokenId, t.idemKey)],
 );

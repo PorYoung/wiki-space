@@ -36,6 +36,18 @@ const EnvSchema = z.object({
   EMBEDDING_DIM: z.coerce.number().int().min(1).default(1024),
   EMBEDDING_BATCH_SIZE: z.coerce.number().int().min(1).default(32),
   EMBEDDING_TIMEOUT_MS: z.coerce.number().int().default(10000),
+  // ---- 开放 API / MCP（OPEN-API-MCP-DESIGN §10）：进程级总开关（气隙可整体关；
+  //      公开检索开关与限流配额走 platform_settings 运行时配置，见 lib/open-settings.ts）----
+  OPENAPI_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  OPENAPI_PUBLIC_SEARCH: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  // CORS 允许来源：'*' 反射任意 Origin（token/匿名鉴权无 cookie，安全）；逗号分隔白名单可收紧
+  OPENAPI_CORS_ORIGINS: z.string().default('*'),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

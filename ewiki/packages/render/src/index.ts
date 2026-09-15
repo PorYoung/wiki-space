@@ -117,7 +117,9 @@ function makeAssetRewriter(
 }
 
 const BASE_CSS =
-  'body{font-family:var(--tpl-font),system-ui,sans-serif;max-width:780px;margin:2rem auto;padding:0 1rem;line-height:1.7;color:#222}header{margin-bottom:2rem;border-bottom:1px solid #eee;padding-bottom:1rem}a{color:var(--tpl-accent)}pre{background:#f6f8fa;padding:1rem;border-radius:6px;overflow-x:auto}code{background:#f1f5f9;padding:.15em .35em;border-radius:4px;font-size:.92em}pre code{background:transparent;padding:0}blockquote{border-left:3px solid #d1d5db;padding-left:1rem;color:#6b7280;margin:1rem 0}h1,h2,h3{line-height:1.35}';
+  'body{font-family:var(--tpl-font),system-ui,sans-serif;max-width:780px;margin:2rem auto;padding:0 1rem;line-height:1.7;color:#222}header{margin-bottom:2rem;border-bottom:1px solid #eee;padding-bottom:1rem}a{color:var(--tpl-accent)}pre{background:#f6f8fa;padding:1rem;border-radius:6px;overflow-x:auto}code{background:#f1f5f9;padding:.15em .35em;border-radius:4px;font-size:.92em}pre code{background:transparent;padding:0}blockquote{border-left:3px solid #d1d5db;padding-left:1rem;color:#6b7280;margin:1rem 0}h1,h2,h3{line-height:1.35}' +
+  // 站点搜索框（OPEN-API-MCP-DESIGN D1：发布模板检索入口）
+  '.site-search{position:relative;margin:0 0 1rem}.site-search input{width:100%;box-sizing:border-box;padding:.5rem .75rem;border:1px solid #e2e8f0;border-radius:8px;font-size:.95rem;font-family:inherit}.site-search input:focus{outline:2px solid var(--tpl-accent);outline-offset:-1px}.ss-results{position:absolute;z-index:9;left:0;right:0;top:calc(100% + 4px);background:#fff;border:1px solid #e2e8f0;border-radius:8px;max-height:60vh;overflow:auto;box-shadow:0 8px 24px rgba(15,23,42,.08)}.ss-item{display:block;padding:.55rem .75rem;border-bottom:1px solid #f1f5f9;text-decoration:none;color:#222}.ss-item:last-child{border-bottom:none}.ss-item:hover{background:#f8fafc}.ss-item strong{display:block;font-size:.9rem;color:var(--tpl-accent)}.ss-item span{display:block;font-size:.8rem;color:#64748b;margin-top:.15rem}.ss-empty{padding:.6rem .75rem;font-size:.85rem;color:#94a3b8}';
 
 // 文档级排版补充（与应用内预览 prose-doc 同能力的发布侧版本）：
 // GFM 表格（块级 + 横向滚动）、highlight.js github-light 令牌色、KaTeX/公式块、mermaid 容器
@@ -150,7 +152,71 @@ function tailExtras(body: string): string {
   return hasMermaidBlock(body) ? MERMAID_LOADER : '';
 }
 
-function pageShell(title: string, body: string, opts: { accent: string; font: string; relativeRoot: string; headerHtml?: string }): string {
+/**
+ * 站点搜索框（OPEN-API-MCP-DESIGN D1）：注入发布站每页 header 下方，检索开放面
+ * /api/open/v1/sites/{slug}/search。结果链接按发布页命名规则（page-<path 压平 __>.html）
+ * 由文档 path 前端换算；snippet/title 以 textContent 写入（防内容注入）。
+ */
+function searchBoxHtml(endpoint: string): string {
+  const ep = escapeHtml(endpoint);
+  return `<div class="site-search">
+  <input id="ss-input" type="search" placeholder="搜索本站…" autocomplete="off" />
+  <div id="ss-results" class="ss-results" hidden></div>
+</div>
+<script>
+(function () {
+  var input = document.getElementById('ss-input');
+  var box = document.getElementById('ss-results');
+  if (!input || !box) return;
+  var timer = null;
+  input.addEventListener('input', function () {
+    clearTimeout(timer);
+    var q = input.value.trim();
+    if (!q) { box.hidden = true; box.textContent = ''; return; }
+    timer = setTimeout(function () {
+      fetch('${ep}?q=' + encodeURIComponent(q))
+        .then(function (r) { if (!r.ok) throw r.status; return r.json(); })
+        .then(function (d) {
+          box.textContent = '';
+          var items = d.items || [];
+          if (!items.length) {
+            var empty = document.createElement('div');
+            empty.className = 'ss-empty';
+            empty.textContent = '未找到匹配内容';
+            box.appendChild(empty);
+          }
+          items.forEach(function (it) {
+            var a = document.createElement('a');
+            a.className = 'ss-item';
+            a.href = 'page-' + String(it.path || '').replace(/\\.(md|markdown)$/i, '').replace(/\\//g, '__') + '.html';
+            var t = document.createElement('strong');
+            t.textContent = it.title || it.path;
+            a.appendChild(t);
+            var sp = document.createElement('span');
+            sp.textContent = String(it.snippet || '').replace(/<\\/?em>/g, '');
+            a.appendChild(sp);
+            box.appendChild(a);
+          });
+          box.hidden = false;
+        })
+        .catch(function (s) {
+          box.textContent = '';
+          var empty = document.createElement('div');
+          empty.className = 'ss-empty';
+          empty.textContent = '搜索暂不可用（' + s + '）';
+          box.appendChild(empty);
+          box.hidden = false;
+        });
+    }, 250);
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target !== input && !box.contains(e.target)) box.hidden = true;
+  });
+})();
+</script>`;
+}
+
+function pageShell(title: string, body: string, opts: { accent: string; font: string; relativeRoot: string; headerHtml?: string; searchHtml?: string }): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -163,6 +229,7 @@ function pageShell(title: string, body: string, opts: { accent: string; font: st
 </head>
 <body>
   ${opts.headerHtml ?? `<header><a href="${opts.relativeRoot}index.html">← 首页</a></header>`}
+  ${opts.searchHtml ?? ''}
   <main>${body}</main>${tailExtras(body)}
 </body>
 </html>`;
@@ -178,10 +245,13 @@ export function renderSite(input: {
   templateId?: string | null;
   /** 二进制资源映射（被 md 图片相对引用、需复制到站点 assets/ 的文档）；缺省 = 不改写图片地址 */
   assets?: SiteAsset[];
+  /** 站点检索入口（开放面 D1）；缺省 = 不注入搜索框 */
+  search?: { endpoint: string };
 }): { pages: SitePage[]; hash: string } {
   const tpl = resolveTemplate(input.templateId);
   const pages: SitePage[] = [];
   const links: string[] = [];
+  const searchHtml = input.search ? searchBoxHtml(input.search.endpoint) : '';
 
   const assetByPath = new Map<string, string>();
   for (const a of input.assets ?? []) assetByPath.set(a.path.replace(/\\/g, '/'), a.url);
@@ -191,7 +261,7 @@ export function renderSite(input: {
     const pageName = `page-${safeName}.html`;
     const title = d.title ?? d.path;
     const body = markdownToHtml(d.content ?? '', { rewriteAsset: makeAssetRewriter(d.path, assetByPath) });
-    pages.push({ rel: pageName, html: pageShell(title, body, { accent: tpl.accent, font: tpl.bodyFont, relativeRoot: '' }) });
+    pages.push({ rel: pageName, html: pageShell(title, body, { accent: tpl.accent, font: tpl.bodyFont, relativeRoot: '', searchHtml }) });
     links.push(`<li><a href="${pageName}">${escapeHtml(title)}</a></li>`);
   }
 
@@ -201,6 +271,7 @@ export function renderSite(input: {
     font: tpl.bodyFont,
     relativeRoot: '',
     headerHtml: `<header><h1>${escapeHtml(input.siteTitle)}</h1></header>`,
+    searchHtml,
   });
   pages.unshift({ rel: 'index.html', html: indexHtml });
 
