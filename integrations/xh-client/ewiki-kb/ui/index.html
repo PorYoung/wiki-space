@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ewiki 知识库</title>
+  <link rel="stylesheet" href="./app.css" />
+</head>
+<body>
+  <header>
+    <h1>ewiki 知识库</h1>
+    <span id="conn-badge" class="badge off">未连接</span>
+    <nav>
+      <button id="tab-conn" class="tab active">连接</button>
+      <button id="tab-search" class="tab">检索</button>
+      <button id="tab-browse" class="tab">浏览</button>
+    </nav>
+  </header>
+
+  <!-- 连接配置 -->
+  <section id="panel-conn" class="panel">
+    <p class="hint">填写 ewiki 服务地址与访问令牌（ewiki Web 端「设置 → API 令牌」签发；建议「检索/只读」预设）。令牌由平台密钥托管，本面板不保存明文。</p>
+    <label>服务地址 <input id="in-baseurl" type="url" placeholder="https://wiki.example.com" /></label>
+    <label>访问令牌 <input id="in-token" type="password" placeholder="ewk_…（已配置则留空表示不修改）" /></label>
+    <div class="row">
+      <button id="btn-save" class="primary">保存</button>
+      <button id="btn-test">测试连接</button>
+      <button id="btn-unlink" class="danger">解除绑定</button>
+    </div>
+    <pre id="conn-out" class="out"></pre>
+  </section>
+
+  <!-- 检索 -->
+  <section id="panel-search" class="panel hidden">
+    <div class="row">
+      <input id="in-q" type="text" placeholder="检索知识库…" />
+      <button id="btn-search" class="primary">搜索</button>
+    </div>
+    <div id="search-results" class="list"></div>
+    <pre id="doc-view" class="out hidden"></pre>
+  </section>
+
+  <!-- 浏览 -->
+  <section id="panel-browse" class="panel hidden">
+    <div class="row"><button id="btn-projects">刷新知识库列表</button></div>
+    <div id="project-list" class="list"></div>
+    <div id="doc-list" class="list"></div>
+  </section>
+
+  <script src="/api/v1/plugins/bridge-client.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

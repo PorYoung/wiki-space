@@ -6,3 +6,4 @@ export * from './tar.js';
 export * from './filter.js';
 export * from './search.js';
 export * from './adapters/embedding.js';
+export * from './client-onboarding.js';

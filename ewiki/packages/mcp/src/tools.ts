@@ -33,6 +33,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_search',
     title: '检索知识库',
+    annotations: { readOnlyHint: true },
     description:
       '全文/语义/混合检索用户可读的知识库（含标题加权与段落级语义命中）。' +
       '回答用户知识性问题前必须先调用本工具，再按需读取全文。' +
@@ -79,6 +80,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_read_document',
     title: '读取文档全文',
+    annotations: { readOnlyHint: true },
     description: '按 documentId 读取文档全文（Markdown）与元数据。通常在 kb_search 命中后调用以获取完整上下文。',
     inputSchema: {
       type: 'object',
@@ -94,6 +96,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_list_projects',
     title: '列出知识库',
+    annotations: { readOnlyHint: true },
     description:
       '列出当前令牌属主可读的全部知识库（含可见性与文档数）。采集入库前先用本工具确认目标库，' +
       'kb_create_project 前必须先调用本工具确认没有合适的既有库（抑制库蔓延）。',
@@ -120,6 +123,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_list_documents',
     title: '列出库内文档',
+    annotations: { readOnlyHint: true },
     description: '列出知识库内的文档清单（元数据与摘要，不含全文）。维护治理场景用它按库拉清单。',
     inputSchema: {
       type: 'object',
@@ -153,6 +157,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_get_versions',
     title: '查看版本历史',
+    annotations: { readOnlyHint: true },
     description: '查看文档的版本时间线（谁在何时改了什么）。维护治理场景判断文档是否长期未更新。',
     inputSchema: {
       type: 'object',
@@ -168,6 +173,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_suggest_organization',
     title: '获取 AI 整理建议',
+    annotations: { readOnlyHint: true },
     description:
       '读取平台 AI 整理（ai-classify）对库内文档的归档建议（目标文件夹与标签，附依据）。' +
       '建议只读——采纳任何一条都必须向用户复述并经其确认后，显式调用 kb_move_document / kb_set_tags 执行。',
@@ -214,6 +220,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_update_document',
     title: '更新文档内容',
+    annotations: { idempotentHint: true },
     description:
       '更新文档全文（产生新版本快照）。标准序列：kb_read_document → 修改 → 本工具（携带读到的 latestVersionNo 作为 baseVersionNo）。' +
       '返回 409（版本冲突）说明他人已先保存：必须重新 kb_read_document 后基于最新内容重试，禁止盲目覆盖。',
@@ -267,6 +274,7 @@ export const KB_TOOLS: ToolDef[] = [
   {
     name: 'kb_set_tags',
     title: '设置文档标签',
+    annotations: { idempotentHint: true },
     description: '整体替换文档标签（最多 8 个）。采纳整理建议时使用。',
     inputSchema: {
       type: 'object',

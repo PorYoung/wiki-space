@@ -1,0 +1,212 @@
+{
+  "id": "ewiki-kb",
+  "name": "ewiki 知识库",
+  "version": "0.1.0",
+  "description": "对接企业知识库平台 ewiki：AI 检索/读取/整理文档 + 独立知识库面板。经开放 API（/api/open/v1）以 PAT act-as-user 访问，权限与登录态完全一致；令牌入平台密钥托管，插件只持引用。",
+  "trust": "official",
+  "runtime": "in-process",
+  "entry": "backend/main.mjs",
+  "uiEntry": "ui/index.html",
+  "scopes": ["global", "project", "session"],
+  "contributes": {
+    "tools": [
+      {
+        "id": "ewiki.search",
+        "name": "ewiki_search",
+        "description": "检索 ewiki 知识库（全文/语义/混合）。回答知识性问题前先调用本工具，回答时引用 path 与 heading。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "q": { "type": "string", "description": "检索词（自然语言或关键词）" },
+            "projectId": { "type": "string", "description": "限定知识库 id（ewiki.list_projects 获取）" },
+            "mode": { "type": "string", "enum": ["auto", "keyword", "semantic"], "description": "缺省 auto" },
+            "limit": { "type": "number", "description": "返回条数，缺省 10，上限 50" }
+          },
+          "required": ["q"]
+        }
+      },
+      {
+        "id": "ewiki.read_document",
+        "name": "ewiki_read_document",
+        "description": "按 documentId 读取 ewiki 文档全文（Markdown）与元数据。通常在 ewiki.search 命中后调用。",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "documentId": { "type": "string", "description": "文档 id（检索结果给出）" } },
+          "required": ["documentId"]
+        }
+      },
+      {
+        "id": "ewiki.list_projects",
+        "name": "ewiki_list_projects",
+        "description": "列出令牌属主可读的全部 ewiki 知识库（可见性/文档数）。采集入库前先确认目标库。",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "id": "ewiki.list_documents",
+        "name": "ewiki_list_documents",
+        "description": "列出 ewiki 知识库内的文档清单（元数据，不含全文）。维护治理场景按库拉清单。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "projectId": { "type": "string", "description": "知识库 id" },
+            "q": { "type": "string", "description": "按路径/标题/标签子串过滤" },
+            "tag": { "type": "string", "description": "按标签过滤" }
+          },
+          "required": ["projectId"]
+        }
+      },
+      {
+        "id": "ewiki.get_versions",
+        "name": "ewiki_get_versions",
+        "description": "查看 ewiki 文档版本时间线（谁在何时改了什么）。判断文档是否长期未更新。",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "documentId": { "type": "string" } },
+          "required": ["documentId"]
+        }
+      },
+      {
+        "id": "ewiki.create_document",
+        "name": "ewiki_create_document",
+        "description": "在指定 ewiki 知识库新建 Markdown 文档（自动版本快照 + Git 提交 + 进检索索引）。创建前必须先 ewiki.search 查重；path 为库内 POSIX 路径且必须含扩展名。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "projectId": { "type": "string", "description": "目标知识库 id" },
+            "path": { "type": "string", "description": "库内路径（POSIX，含扩展名，如 notes/2026-09-17-方案.md）" },
+            "title": { "type": "string", "description": "文档标题" },
+            "content": { "type": "string", "description": "Markdown 全文" }
+          },
+          "required": ["projectId", "path", "content"]
+        }
+      },
+      {
+        "id": "ewiki.update_document",
+        "name": "ewiki_update_document",
+        "description": "更新 ewiki 文档全文（产生新版本）。标准序列：read → 修改 → update（携带 latestVersionNo 作 baseVersionNo）；409 冲突时重读重试，禁止盲写。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "documentId": { "type": "string" },
+            "content": { "type": "string", "description": "修改后的 Markdown 全文（整文替换）" },
+            "title": { "type": "string" },
+            "message": { "type": "string", "description": "版本说明（一句话摘要）" },
+            "baseVersionNo": { "type": "number", "description": "并发保护：读取时返回的 latestVersionNo" }
+          },
+          "required": ["documentId", "content"]
+        }
+      },
+      {
+        "id": "ewiki.move_document",
+        "name": "ewiki_move_document",
+        "description": "移动/重命名 ewiki 文档（新路径或新标题，不产生新版本）。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "documentId": { "type": "string" },
+            "path": { "type": "string", "description": "新路径（POSIX，含扩展名）" },
+            "title": { "type": "string", "description": "新标题" }
+          },
+          "required": ["documentId"]
+        }
+      },
+      {
+        "id": "ewiki.set_tags",
+        "name": "ewiki_set_tags",
+        "description": "整体替换 ewiki 文档标签（最多 8 个）。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "documentId": { "type": "string" },
+            "tags": { "type": "array", "items": { "type": "string" }, "description": "标签清单（替换式）" }
+          },
+          "required": ["documentId", "tags"]
+        }
+      },
+      {
+        "id": "ewiki.delete_document",
+        "name": "ewiki_delete_document",
+        "description": "软删除 ewiki 文档（可在 Web 端恢复）。破坏性操作：执行前必须向用户复述目标文档标题与路径并取得确认。",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "documentId": { "type": "string" } },
+          "required": ["documentId"]
+        },
+        "permissions": ["ewiki-kb.delete"],
+        "dangerous": true
+      },
+      {
+        "id": "ewiki.connection_status",
+        "name": "ewiki_connection_status",
+        "description": "查看本插件与 ewiki 的连接状态（是否已配置/服务地址/令牌前缀）。未配置时引导用户打开「ewiki 知识库」面板完成连接。",
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ],
+    "skills": [
+      {
+        "id": "knowledge-retrieval",
+        "name": "知识库检索",
+        "description": "使用 ewiki 知识库回答问题与沉淀文档：检索 → 读全文 → 引用 path；写入前查重、乐观并发、软删确认（依托 ewiki.* 工具）"
+      }
+    ],
+    "agents": [
+      {
+        "id": "kb-assistant",
+        "name": "知识库助理",
+        "description": "专职 ewiki 知识库场景：答疑检索、采集入库、整理归档、过期内容治理"
+      }
+    ],
+    "ui": [
+      {
+        "slot": "work.main.view",
+        "viewId": "ewiki-kb:main",
+        "title": "ewiki 知识库",
+        "icon": "book",
+        "renderer": {
+          "type": "iframe-app",
+          "entry": "ui/index.html",
+          "requiredBridgeCaps": ["plugin.invoke"]
+        }
+      },
+      {
+        "slot": "work.home.quick",
+        "viewId": "ewiki-kb:quick",
+        "title": "知识库",
+        "label": "知识库",
+        "icon": "book",
+        "renderer": { "type": "iframe-app", "entry": "ui/index.html", "requiredBridgeCaps": ["plugin.invoke"] },
+        "scenes": ["办公", "编码"],
+        "action": { "type": "open-panel", "viewId": "ewiki-kb:main" },
+        "order": 50
+      },
+      {
+        "slot": "settings.section",
+        "viewId": "ewiki-kb:settings",
+        "title": "ewiki 知识库",
+        "icon": "book",
+        "renderer": {
+          "type": "iframe-app",
+          "entry": "ui/index.html",
+          "requiredBridgeCaps": ["plugin.invoke"]
+        }
+      }
+    ]
+  },
+  "permissions": [
+    "ui.slot",
+    "tool.register",
+    "skill.register",
+    "agent.register",
+    "route.mount",
+    {
+      "name": "secret.scoped",
+      "value": "ewiki-kb/*",
+      "description": "按 ewiki-kb/* 前缀访问平台密钥托管（ewiki 访问令牌）"
+    },
+    {
+      "name": "ewiki-kb.delete",
+      "dangerous": true,
+      "description": "删除 ewiki 文档（软删，可在 ewiki Web 端恢复；执行前有会话内确认）"
+    }
+  ]
+}

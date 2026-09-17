@@ -5,8 +5,9 @@
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Copy, KeyRound, Plus, ShieldAlert, Trash2 } from 'lucide-react';
+import { BookOpenCheck, Copy, KeyRound, Plus, ShieldAlert, Trash2 } from 'lucide-react';
 import { apiFetch } from '../lib/api/client.js';
+import { ClientOnboardingWizard } from './ClientOnboarding.js';
 
 interface TokenRow {
   id: string;
@@ -63,6 +64,8 @@ export function TokenSettings(): React.ReactElement {
   const [issued, setIssued] = useState<IssuedToken | null>(null);
   const [copied, setCopied] = useState(false);
   const [formMsg, setFormMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // AI 客户端接入向导（ClientOnboarding）：'' = 常驻入口占位预览；非空 = 携带刚签发的明文
+  const [wizardToken, setWizardToken] = useState<string | null>(null);
 
   const { data: policy } = useQuery<TokenPolicy>({
     queryKey: ['me-token-policy'],
@@ -120,6 +123,14 @@ export function TokenSettings(): React.ReactElement {
         <div className="mb-1 flex items-center gap-2">
           <KeyRound size={16} className="text-primary-600" />
           <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>签发 API 令牌</h2>
+          <button
+            type="button"
+            className="btn-ghost ml-auto !h-7 !px-2 !text-[11px]"
+            onClick={() => setWizardToken('')}
+            title="生成 edith / Claude / Cursor 等 AI 客户端的接入配置"
+          >
+            <BookOpenCheck size={13} /> AI 客户端接入
+          </button>
         </div>
         <p className="mb-4 text-xs leading-relaxed" style={{ color: 'var(--text-muted, #94a3b8)' }}>
           供 AI 客户端（MCP）或第三方工具以你的身份访问知识库。令牌权限不超过你的账号权限；泄露请立即吊销。
@@ -252,13 +263,25 @@ export function TokenSettings(): React.ReactElement {
                 <Copy size={13} /> {copied ? '已复制' : '复制'}
               </button>
             </div>
-            <div className="mb-4 rounded-md border p-2.5 text-[11px] leading-relaxed" style={{ borderColor: 'var(--border-soft)', color: 'var(--text-secondary)' }}>
-              MCP 接入：<code>EWIKI_BASE_URL=服务地址 EWIKI_TOKEN={issued.prefix}…</code>，详见开放 API 文档 <code>/api/open/v1/openapi.json</code>
+            <div className="mb-4 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className="btn-primary !h-8 !text-xs"
+                onClick={() => {
+                  const tok = issued.token;
+                  setIssued(null);
+                  setWizardToken(tok);
+                }}
+              >
+                <BookOpenCheck size={13} /> 接入 AI 客户端
+              </button>
+              <button type="button" className="btn-secondary !h-8 !text-xs" onClick={() => setIssued(null)}>我已保存，关闭</button>
             </div>
-            <button type="button" className="btn-primary !h-8 w-full !text-xs" onClick={() => setIssued(null)}>我已保存，关闭</button>
           </div>
         </div>
       )}
+      {/* AI 客户端接入向导（edith 优先；携带明文或占位预览） */}
+      {wizardToken !== null && <ClientOnboardingWizard token={wizardToken} onClose={() => setWizardToken(null)} />}
     </>
   );
 }
