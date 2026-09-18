@@ -7,6 +7,7 @@ import {
   basenameOf,
   CreateProjectSchema,
   CreateTeamSchema,
+  enqueueGitFlush,
   enqueueSearchIndex,
   extOf,
   resolveFileType,
@@ -40,6 +41,7 @@ import {
   documents,
   indexBuilds,
   exportJobs,
+  gitPendingOps,
   importJobs,
   notifications,
   projectMembers,
@@ -1934,7 +1936,8 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       targetTitle: updated?.title ?? existing.path,
     });
 
-    // NAS 镜像 + Git 自动提交（平台化扩展）；再向项目房间广播变更（实时互见）
+    // NAS 镜像 + Git 提交动作（平台化扩展）；再向项目房间广播变更（实时互见）
+    // coalesced 模式下用户备注随台账进聚合提交 body（GIT-COMMIT-COALESCING-DESIGN §8）
     const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
     const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, existing.projectId)).limit(1);
     const effects = await docStorageEffects(
@@ -1944,6 +1947,7 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
       newContent ?? '',
       { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
       id,
+      body.message ?? null,
     );
     // Git 推送成功后回填版本提交号（时间线 commit hash 展示；未填保存说明时以提交信息兜底）
     if (versionRow && effects.git.ok && effects.git.pushed && effects.git.commitHash) {
@@ -2159,13 +2163,16 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
     const [projRow] = await db.select({ name: projects.name, ownerId: projects.ownerId }).from(projects).where(eq(projects.id, existing.projectId)).limit(1);
 
-    // NAS / Git 同步（文本：写回 content → NAS 落盘；binary：blob 引用不变但 storageRef 可能变 → 落 blob）
+    // NAS / Git 同步（文本：写回恢复内容 → NAS 落盘；binary：blob 引用不变但 storageRef 可能变 → 落 blob）
+    // 修复：此前误传 content=null，按 docStorageEffects 语义会被展开成「删除」操作
     const effects = await docStorageEffects(
       deps,
       { id: existing.projectId, name: projRow?.name ?? '', ownerId: projRow?.ownerId ?? '' },
       existing.path,
-      null,
+      existing.kind === 'text' ? newContent ?? '' : null,
       { id: userId, name: meUser?.name ?? 'unknown', email: meUser?.email ?? 'unknown@local' },
+      existing.id,
+      body.message ?? null,
     );
 
     await db.insert(activities).values({
@@ -2652,6 +2659,83 @@ export function registerRoutes(app: Hono, deps: AppDeps): void {
     });
 
     return c.json({ ok: true, deleted: affected.length, effects });
+  });
+
+  // ---- Git 提交聚合（GIT-COMMIT-COALESCING-DESIGN §9）：checkpoint「立即提交」 ----
+  // 台账写一条 checkpoint 行（承载提交备注），startAfter=1s 入队让 worker 立即关闭窗口；
+  // 结果经 projects.storageStatus / syncJobs(trigger='flush') / git.flushed 事件呈现。
+  app.post('/api/v1/projects/:id/git-flush', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    const body = (await c.req.json().catch(() => ({}))) as { message?: string };
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canWrite, 'FORBIDDEN: 需要该项目空间的编辑权限');
+    }
+    const [projRow] = await db
+      .select({ storageKind: projects.storageKind, storageConfig: projects.storageConfig })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!projRow) throw new HTTPException(404, { message: 'NOT_FOUND' });
+    const cfg = (projRow.storageConfig ?? {}) as Record<string, unknown>;
+    if (projRow.storageKind !== 'git' || cfg.autoCommit !== true) {
+      return c.json({ ok: true, skipped: 'GIT_BACKEND_DISABLED' });
+    }
+    const [meUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    const note = (body.message ?? '').trim();
+    await db.insert(gitPendingOps).values({
+      projectId,
+      documentId: null,
+      path: '',
+      op: 'checkpoint',
+      kind: 'text',
+      actorId: userId,
+      actorName: meUser?.name ?? 'unknown',
+      actorEmail: meUser?.email ?? '',
+      message: note || null,
+    });
+    // cp: 独立去重键：绕开防抖任务的 pending 去重，保证 checkpoint 真正「立即」（§7.1）
+    await enqueueGitFlush(boss, projectId, { startAfterSeconds: 1, singletonKey: `cp:${projectId}` });
+    await db.insert(auditLogs).values({
+      actorId: userId,
+      action: 'git.checkpoint',
+      resourceType: 'project',
+      resourceId: projectId,
+      meta: { message: note || null },
+    });
+    return c.json({ ok: true }, 202);
+  });
+
+  // ---- Git 提交聚合：待提交窗口查询（前端徽标 + eta 提示） ----
+  app.get('/api/v1/projects/:id/git-pending', async (c) => {
+    const userId = c.get('userId') as string;
+    const projectId = c.req.param('id')!;
+    {
+      const access = await projectAccess(projectId, userId, c.get('globalRole') as string);
+      denyIfNot(access.canRead);
+    }
+    const [row] = await db
+      .select({
+        count: sql<number>`count(*)::int`,
+        oldest: sql<string | null>`min(${gitPendingOps.createdAt})`,
+      })
+      .from(gitPendingOps)
+      .where(
+        and(
+          eq(gitPendingOps.projectId, projectId),
+          isNull(gitPendingOps.consumedAt),
+          ne(gitPendingOps.op, 'checkpoint'),
+        ),
+      );
+    const oldestMs = row?.oldest ? new Date(row.oldest).getTime() : 0;
+    const maxWaitMs = deps.config.GIT_FLUSH_MAX_WAIT_SECONDS * 1000;
+    return c.json({
+      pendingCount: Number(row?.count ?? 0),
+      oldestPendingAt: row?.oldest ?? null,
+      etaSeconds: oldestMs ? Math.max(0, Math.round((oldestMs + maxWaitMs - Date.now()) / 1000)) : 0,
+      mode: deps.config.GIT_PUSH_MODE,
+    });
   });
 
   // ---- PATCH projects/:id（P5 ProjectSettingsPage） ----

@@ -27,6 +27,18 @@ build:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
 
+# 检索扩展镜像（postgres:16 + pgvector + zhparser）；内网离线交付亦可在
+# 任意可联网构建机上执行 `bash scripts/airgap-export.sh` 产出（docs/offline-deploy.md）
+build:pg:
+  stage: build
+  image: docker:24
+  services: [docker:24-dind]
+  script:
+    - docker build -f deploy/postgres/Dockerfile -t $REG/ewiki/pg16-search:$TAG deploy/postgres
+    - docker push $REG/ewiki/pg16-search:$TAG
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
 migrate:
   stage: migrate
   image: node:22-slim

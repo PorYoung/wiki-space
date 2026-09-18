@@ -12,3 +12,6 @@ coverage/
 .write-test*
 
 *.log
+
+# 离线交付包产物（airgap-export.sh）
+deploy/airgap/

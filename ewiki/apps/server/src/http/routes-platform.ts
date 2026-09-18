@@ -19,6 +19,7 @@ import {
   activities,
   auditLogs,
   documents,
+  gitPendingOps,
   platformSettings,
   projectMembers,
   projects,
@@ -30,13 +31,15 @@ import {
 } from '../db/schema.js';
 import { encryptJson } from '@ewiki/db';
 import { safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
-import { db } from '../db/client.js';
+import { db, sql as pgSql } from '../db/client.js';
 import { hashPassword, generateRefreshToken, hashToken, signAccessToken } from '../auth/utils.js';
 import { ldapAutoLogin } from '../lib/ldap.js';
 import { commitAndPush, ensureWorkdir, validateConnection, type ConnLike, type PushChange } from '@ewiki/git';
+import { enqueueGitFlush } from '@ewiki/shared';
 import { getLibraryTemplate, LIBRARY_TEMPLATES } from '../lib/library-templates.js';
 import { ensureWritableDir, getNasRoot, getReposRoot, mirrorDoc, moveMirror, NAS_ROOT_SETTING_KEY } from '../lib/nas.js';
 import { denyIfNot } from '../lib/permissions.js';
+import { PgLockService } from '../adapters/pg/lock.js';
 import { getSearchSettings } from '../lib/search-settings.js';
 import type { Context } from 'hono';
 import type { AppDeps } from './app.js';
@@ -103,11 +106,20 @@ export interface DocEffectResult {
     ok: boolean;
     pushed: boolean;
     noop?: boolean;
+    /** coalesced 模式：提交已转交 worker git-flush 聚合，本请求不等待 push */
+    deferred?: boolean;
+    pendingOps?: number;
+    etaSeconds?: number;
     commitHash?: string;
     message?: string;
     error?: string;
   };
 }
+
+// 工作副本互斥（GIT-COMMIT-COALESCING-DESIGN §11）：inline 分支与 worker 的
+// flush/sync 共用同一把 PG advisory lock，消除「并发 commit 同一工作副本」与
+// 「sync pull 的 reset --hard 撞上提交」两个竞态。
+const gitWorkdirLock = new PgLockService(pgSql);
 
 /** 批量存储副作用操作（单文档保存/删除是 N=1 特例；移动/重命名 → move；文件夹级联 → 多个 move） */
 export interface DocStorageOp {
@@ -131,7 +143,11 @@ export interface DocStorageOp {
 }
 
 /**
- * 批量副作用：一次调用 = 一批 NAS 镜像动作 + 一次 Git add/commit/push。
+ * 批量副作用：一次调用 = 一批 NAS 镜像动作 + 一次 Git 提交动作。
+ * Git 部分按 GIT_PUSH_MODE 分流（GIT-COMMIT-COALESCING-DESIGN §6）：
+ *   - coalesced（默认）：只向 git_pending_ops 记台账 + 防抖入队，worker『git-flush』
+ *     在窗口关闭时把窗口内操作折叠为单提交；保存请求不等待 push。
+ *   - inline（kill-switch）：既有同步 add/commit/push 链路，包裹工作副本锁。
  * 单文档保存/删除路由也收敛到本函数（docStorageEffects 为其 N=1 薄包装）。
  */
 export async function docStorageEffectsBatch(
@@ -140,6 +156,7 @@ export async function docStorageEffectsBatch(
   ops: DocStorageOp[],
   actor: { id: string; name: string; email: string },
   message: string,
+  userNote?: string | null,
 ): Promise<DocEffectResult> {
   const out: DocEffectResult = { mirrored: false, git: { attempted: false, ok: true, pushed: false } };
 
@@ -193,6 +210,11 @@ export async function docStorageEffectsBatch(
   }
   out.git.attempted = true;
 
+  // coalesced 模式：git 部分转交 worker 聚合（NAS 镜像已在上方同步落盘）
+  if (deps.config.GIT_PUSH_MODE !== 'inline') {
+    return commitThroughPendingOps(deps, project.id, ops, actor, userNote ?? null, out);
+  }
+
   const [connRow] = await db
     .select({ tokenEncrypted: storageConnections.tokenEncrypted })
     .from(storageConnections)
@@ -225,15 +247,18 @@ export async function docStorageEffectsBatch(
       defaultNamespace: (cfg.namespace as string) ?? null,
     };
     const login = String(cfg.namespace ?? 'owner');
-    const { workdir } = await ensureWorkdir(
-      getReposRoot(deps.config),
-      project.id,
-      conn,
-      String(cfg.url ?? ''),
-      login,
-      String(projRow.defaultBranch ?? 'main'),
-    );
-    const result = await commitAndPush(workdir, changes, { name: actor.name, email: actor.email }, message);
+    // inline 分支同样持有工作副本锁：与 worker flush/sync 互斥（§11 锁矩阵）
+    const result = await gitWorkdirLock.withLock(`git-workdir:${project.id}`, async () => {
+      const { workdir } = await ensureWorkdir(
+        getReposRoot(deps.config),
+        project.id,
+        conn,
+        String(cfg.url ?? ''),
+        login,
+        String(projRow.defaultBranch ?? 'main'),
+      );
+      return commitAndPush(workdir, changes, { name: actor.name, email: actor.email }, message);
+    });
     out.git = { attempted: true, ok: result.ok, pushed: result.pushed, noop: result.noop, commitHash: result.commitHash, message, error: result.error };
     if (result.ok) {
       await db
@@ -314,6 +339,53 @@ export async function docStorageEffectsBatch(
   return out;
 }
 
+/**
+ * coalesced 提交路径（GIT-COMMIT-COALESCING-DESIGN §6/§7）：git 部分不在请求内落提交，
+ * 向 git_pending_ops 记台账 + 防抖入队即返回；窗口内后续操作由 singletonKey 去重，
+ * worker『git-flush』关闭窗口时折叠为单提交（latest-wins，内容以 documents 表为准）。
+ */
+async function commitThroughPendingOps(
+  deps: AppDeps,
+  projectId: string,
+  ops: DocStorageOp[],
+  actor: { id: string; name: string; email: string },
+  userNote: string | null,
+  out: DocEffectResult,
+): Promise<DocEffectResult> {
+  const rows = ops.map((op, i) => ({
+    projectId,
+    documentId: op.documentId ?? null,
+    path: op.path,
+    op: op.op,
+    fromPath: op.fromPath ?? null,
+    kind: op.kind ?? 'text',
+    actorId: actor.id,
+    actorName: actor.name,
+    actorEmail: actor.email,
+    // 批量路由的 message 是自动模板（inline 时进提交 subject）；用户备注只随首个操作入台账
+    message: i === 0 ? userNote : null,
+  }));
+  if (rows.length === 0) return out;
+  try {
+    await db.insert(gitPendingOps).values(rows);
+    await enqueueGitFlush(deps.boss, projectId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // 台账/入队失败不阻断保存（DB 真源已落）：如实回报 git 侧异常，夜间 sync 可对账兜底
+    out.git = { attempted: true, ok: false, pushed: false, deferred: true, error: `待提交台账写入失败：${msg}` };
+    return out;
+  }
+  out.git = {
+    attempted: true,
+    ok: true,
+    pushed: false,
+    deferred: true,
+    pendingOps: rows.length,
+    etaSeconds: deps.config.GIT_FLUSH_MAX_WAIT_SECONDS,
+  };
+  return out;
+}
+
 /** 单文档副作用（保存/删除）：docStorageEffectsBatch 的 N=1 薄包装，保持既有调用语义不变 */
 export async function docStorageEffects(
   deps: AppDeps,
@@ -322,6 +394,7 @@ export async function docStorageEffects(
   content: string | null,
   actor: { id: string; name: string; email: string },
   documentId?: string,
+  userNote?: string | null,
 ): Promise<DocEffectResult> {
   const message =
     content === null
@@ -333,6 +406,7 @@ export async function docStorageEffects(
     [{ op: content === null ? 'delete' : 'upsert', path: docPath, content, documentId }],
     actor,
     message,
+    userNote,
   );
 }
 

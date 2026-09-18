@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  bigserial,
   boolean,
   check,
   customType,
@@ -268,6 +269,40 @@ export const documentVersions = pgTable('document_versions', {
   changedSummary: jsonb('changed_summary'),
   createdAt: ts('created_at').notNull().defaultNow(),
 });
+
+// ---- Git 提交聚合（GIT-COMMIT-COALESCING-DESIGN §5）：待提交操作台账 ----
+// 写路径只记台账 + 防抖入队，worker『git-flush』队列在窗口关闭时折叠为一个提交。
+// 窗口起点/最后活动由未消费行的 created_at 推导，无需独立窗口表；
+// checkpoint 行承载「立即提交」意图与备注，不产生文件变更。台账型流水表，无 updated_at。
+export const gitPendingOps = pgTable(
+  'git_pending_ops',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    seq: bigserial('seq', { mode: 'number' }).notNull(), // 批量插入同 createdAt 时保序，折叠定序用
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id),
+    documentId: uuid('document_id').references(() => documents.id),
+    path: text('path').notNull(), // checkpoint 行为空串
+    op: text('op').notNull(), // upsert | delete | move | checkpoint
+    fromPath: text('from_path'), // move 专用
+    kind: text('kind').notNull().default('text'), // text | binary（binary 不入 git，仅 NAS 镜像）
+    actorId: uuid('actor_id')
+      .notNull()
+      .references(() => users.id),
+    actorName: text('actor_name').notNull(), // 冗余，提交信息组装免 join
+    actorEmail: text('actor_email').notNull().default(''), // Co-authored-by trailer 用
+    message: text('message'), // 用户备注（窗口注解，flush 时进提交 body）
+    commitHash: text('commit_hash'), // 消费后回填
+    consumedAt: ts('consumed_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    check('git_pending_ops_op_check', sql`${t.op} IN ('upsert','delete','move','checkpoint')`),
+    index('git_pending_ops_pending_idx').on(t.projectId, t.seq).where(sql`consumed_at IS NULL`),
+    index('git_pending_ops_document_idx').on(t.documentId).where(sql`consumed_at IS NULL`),
+  ],
+);
 
 export const documentLinks = pgTable('document_links', {
   id: uuid('id').primaryKey().defaultRandom(),

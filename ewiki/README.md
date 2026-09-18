@@ -30,8 +30,17 @@ apps/realtime   # 实时服务（WS 事件 + Yjs 协同）
 apps/worker     # 后台任务（同步/发布/导入/AI 整理/补偿）
 packages/shared # 领域类型、Zod schema、方言边界四接口（ports）
 packages/theme  # 8 套 UI 主题与令牌
-packages/editor # TipTap 封装（占位）
+packages/db     # Drizzle schema + 连接
+packages/git    # GitLab/Gitea 连接方言
+packages/mcp    # 开放 API + MCP 服务
+packages/render # 渲染管线（Markdown/KaTeX/Mermaid/模板）
+packages/storage # 存储双轨（S3 主 + NAS 回退）与发布产物
 ```
+
+## 部署
+
+- 单机/常规：`docs/deploy.md`（生产部署、初始账号、Git 连接、E2E 验收）
+- **内网离线容器**：`docs/offline-deploy.md`（airgap 打包 → 导入 → compose 启动，含迁移/种子/升级回滚）
 
 ## 注意事项
 

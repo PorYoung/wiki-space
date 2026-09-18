@@ -8,7 +8,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "echo ok",
-    "test": "echo ok"
+    "test": "vitest run"
   },
   "dependencies": {
     "@ewiki/db": "workspace:*",
@@ -19,6 +19,7 @@
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.38.0",
     "pg-boss": "^10.1.0",
+    "postgres": "^3.4.5",
     "@ewiki/storage": "workspace:*"
   },
   "devDependencies": {

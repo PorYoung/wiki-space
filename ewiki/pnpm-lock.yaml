@@ -317,6 +317,9 @@ importers:
       pg-boss:
         specifier: ^10.1.0
         version: 10.4.2
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
     devDependencies:
       '@types/node':
         specifier: ^22.10.0

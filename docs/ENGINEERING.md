@@ -141,7 +141,7 @@ COPY --from=build /app/apps ./apps
 COPY --from=build /app/packages ./packages
 COPY --from=build /app/package.json ./
 ENV NODE_ENV=production
-ENTRYPOINT ["node", "apps/server/dist/server.js"]   # 由 compose 覆盖 command 切换入口
+ENTRYPOINT ["node", "apps/server/dist/index.js"]   # 由 compose 覆盖 command 切换入口
 ```
 
 ---
@@ -166,20 +166,20 @@ services:
     volumes: ["./deploy/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data", "web_dist:/srv/web:ro", "sites:/srv/sites:ro"]
   server:
     image: registry/ewiki/app:${TAG}
-    command: ["node", "apps/server/dist/server.js"]
+    command: ["node", "apps/server/dist/index.js"]
     env_file: [.env.production]
     depends_on: { postgres: { condition: service_healthy } }
     healthcheck: { test: ["CMD", "wget -qO- http://localhost:3000/healthz"], interval: 10s }
     deploy: { replicas: 2 }
   realtime:
     image: registry/ewiki/app:${TAG}
-    command: ["node", "apps/realtime/dist/realtime.js"]
+    command: ["node", "apps/realtime/dist/index.js"]
     env_file: [.env.production]
     healthcheck: { test: ["CMD", "wget -qO- http://localhost:3001/healthz"], interval: 10s }
     deploy: { replicas: 1 }        # Phase 1 单副本 + 粘性路由；扩容见 SDD 6.2
   worker:
     image: registry/ewiki/app:${TAG}
-    command: ["node", "apps/worker/dist/worker.js"]
+    command: ["node", "apps/worker/dist/index.js"]
     env_file: [.env.production]
     deploy: { replicas: 2 }        # sync/publish/ai 分池由队列名路由
   postgres:
@@ -192,6 +192,8 @@ services:
     volumes: ["minio_data:/data"]
 volumes: { caddy_data: {}, web_dist: {}, sites: {}, pg_data: {}, minio_data: {} }
 ```
+
+> 注：上图为设计骨架；**实际部署清单以 `ewiki/deploy/compose.yml` 为准**（已落地 web-init/migrate/seed 任务、NAS bind 挂载与基础镜像版本固定；发布站点经 server `/sites/:slug/*` 服务）。
 
 规则：三类应用副本均可 `--scale`（无状态）；MinIO 单实例起步（SDD 6.2）；NAS 由宿主机挂载后以 `FS_NAS_ROOT` 交给 fs 适配器（回退路径）。
 

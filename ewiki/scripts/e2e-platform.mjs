@@ -314,25 +314,34 @@ async function main() {
     });
     ctx.gitDocId = gitDoc.json?.id;
     const pushed = gitDoc.json?.effects?.git;
-    record('P6d', '平台内新建文档自动提交并推送', pushed?.attempted && pushed?.ok && pushed?.pushed, `commit=${pushed?.commitHash?.slice(0, 10)} err=${pushed?.error ?? '-'}`);
+    // GIT-COMMIT-COALESCING-DESIGN：保存即刻成功，git 部分转交 worker 聚合（deferred）
+    record('P6d', '平台内新建文档转交聚合提交（deferred）', pushed?.attempted && pushed?.ok && pushed?.deferred, `pending=${pushed?.pendingOps} err=${pushed?.error ?? '-'}`);
+
+    // checkpoint 立即提交：关闭聚合窗口，让后续 Gitea 断言在秒级内可达
+    const cp1 = await req(`/api/v1/projects/${ctx.gitId}/git-flush`, { token: ctx.alice, method: 'POST', body: { message: 'e2e checkpoint 首次落库' } });
+    record('P6d2', 'checkpoint 立即提交入队（202）', cp1.status === 202 && cp1.json?.ok === true, JSON.stringify(cp1.json).slice(0, 100));
 
     const commits = await giteaPoll(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/commits`, {
+      timeoutMs: 20_000,
       check: (r) => r.status === 200 && Array.isArray(r.json) && r.json.length > 0
         && JSON.stringify(r.json).includes('docs(') && JSON.stringify(r.json).includes('Alice'),
     });
     const msg = JSON.stringify(commits.json ?? []);
-    record('P6e', 'Git 服务端可查到提交历史', commits.status === 200 && msg.includes('docs(') && msg.includes('Alice'), `commits=${Array.isArray(commits.json) ? commits.json.length : 0}`);
+    record('P6e', 'Git 服务端可查到提交历史（checkpoint 后）', commits.status === 200 && msg.includes('docs(') && msg.includes('Alice'), `commits=${Array.isArray(commits.json) ? commits.json.length : 0}`);
 
-    // 更新文档 → 自动提交新版本
+    // 更新文档 → 转交聚合提交
     const upd = await req(`/api/v1/documents/${ctx.gitDocId}`, {
       token: ctx.alice,
       method: 'PUT',
       body: { content: '# e2e 自动提交验证\n\n第二版。' },
     });
     const updGit = upd.json?.effects?.git;
-    record('P6f', '更新文档自动提交推送', updGit?.attempted && updGit?.pushed, `commit=${updGit?.commitHash?.slice(0, 10)}`);
+    record('P6f', '更新文档转交聚合提交（deferred）', updGit?.attempted && updGit?.ok && updGit?.deferred, `pending=${updGit?.pendingOps}`);
+    const cp2 = await req(`/api/v1/projects/${ctx.gitId}/git-flush`, { token: ctx.alice, method: 'POST', body: {} });
+    record('P6f2', '第二次 checkpoint 入队', cp2.status === 202, `status=${cp2.status}`);
 
     const raw = await giteaPoll(`/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/raw/%E5%86%B3%E7%AD%96%E8%AE%B0%E5%BD%95/e2e-check.md?ref=main`, {
+      timeoutMs: 20_000,
       check: (r) => r.status === 200 && String(r.json.raw ?? r.json).includes('第二版'),
     });
     record('P6g', 'Git 服务端文件内容与平台一致', raw.status === 200 && String(raw.json.raw ?? raw.json).includes('第二版'), `status=${raw.status}`);
@@ -1421,6 +1430,78 @@ async function main() {
     // P15g 恢复平台态（cleanup）：公开检索回到默认关闭
     await req('/api/v1/admin/open-api', { token: ctx.admin, method: 'PUT', body: { publicSearchEnabled: false, publicPerIpPerMin: 10, searchPerMin: 60, readPerMin: 120, writePerMin: 30 } });
     record('P15g', '平台态恢复：公开检索关闭、配额回默认', true, 'cleanup');
+  }
+
+  // ---------------------------------------------------------------------------
+  // ---- P16 Git 提交聚合（GIT-COMMIT-COALESCING-DESIGN 验收）：窗口折叠 · checkpoint · 回填 ----
+  // ---------------------------------------------------------------------------
+  {
+    const docPath = encodeURIComponent('决策记录/e2e-check.md');
+    const rawUrl = `/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/raw/${docPath}?ref=main`;
+    const commitsUrl = `/api/v1/repos/${GITEA_USER}/${ctx.gitRepo}/commits`;
+
+    // 记录当前主分支提交数（作为窗口折叠后 +1 断言的基线）
+    const beforeCommits = await gitea(commitsUrl);
+    const baseline = Array.isArray(beforeCommits.json) ? beforeCommits.json.length : 0;
+
+    // 16a 连续 3 次保存（同一文档），窗口内应只记台账不落提交
+    const saved = [];
+    for (let i = 1; i <= 3; i++) {
+      const r = await req(`/api/v1/documents/${ctx.gitDocId}`, {
+        token: ctx.alice,
+        method: 'PUT',
+        body: { content: `# e2e 聚合窗口\n\n第 ${i} 次保存。`, message: i === 2 ? '补充窗口说明' : undefined },
+      });
+      saved.push(r);
+    }
+    const deferredOk = saved.every((r) => r.status === 200 && r.json?.effects?.git?.deferred === true);
+    const pending1 = await req(`/api/v1/projects/${ctx.gitId}/git-pending`, { token: ctx.alice });
+    record(
+      'P16a',
+      '连续保存均转交聚合（deferred）且台账计数 > 0',
+      deferredOk && pending1.json?.mode === 'coalesced' && pending1.json?.pendingCount >= 3,
+      `pending=${pending1.json?.pendingCount} eta=${pending1.json?.etaSeconds}s`,
+    );
+
+    // 16b checkpoint：窗口内 3 次保存折叠为恰好 1 个提交，message 含备注与明细
+    const cp = await req(`/api/v1/projects/${ctx.gitId}/git-flush`, { token: ctx.alice, method: 'POST', body: { message: 'e2e 聚合验收' } });
+    const flushed = await giteaPoll(commitsUrl, {
+      timeoutMs: 25_000,
+      intervalMs: 500,
+      check: (r) => r.status === 200 && Array.isArray(r.json) && r.json.length === baseline + 1,
+    });
+    const count = Array.isArray(flushed.json) ? flushed.json.length : 0;
+    const latest = Array.isArray(flushed.json) ? flushed.json[0] : null;
+    const commitMsg = latest?.commit?.message ?? '';
+    record(
+      'P16b',
+      'checkpoint 后窗口折叠为恰好一个提交（含用户备注与变更明细）',
+      cp.status === 202 && count === baseline + 1 && commitMsg.includes('e2e 聚合验收') && commitMsg.includes('变更明细'),
+      `commits=${count} (base=${baseline}) msg=${commitMsg.split('\n')[0] ?? ''}`,
+    );
+
+    // 16c 提交内容 = 窗口内最后一次保存（latest-wins），台账清零
+    const raw = await giteaPoll(rawUrl, {
+      timeoutMs: 10_000,
+      check: (r) => r.status === 200 && String(r.json.raw ?? r.json).includes('第 3 次保存'),
+    });
+    const pending2 = await req(`/api/v1/projects/${ctx.gitId}/git-pending`, { token: ctx.alice });
+    record(
+      'P16c',
+      '提交内容为最后一次保存（latest-wins）且待提交台账清零',
+      raw.status === 200 && String(raw.json.raw ?? raw.json).includes('第 3 次保存') && pending2.json?.pendingCount === 0,
+      `pending=${pending2.json?.pendingCount}`,
+    );
+
+    // 16d 版本时间线回填：窗口内创建的版本快照在 flush 后挂上提交号
+    const versions = await req(`/api/v1/documents/${ctx.gitDocId}/versions`, { token: ctx.alice });
+    const recent = (versions.json.items ?? []).slice(0, 3);
+    const backfilled = recent.length > 0 && recent.every((v) => !!v.commitHash);
+    record('P16d', '版本时间线批量回填 commitHash', backfilled, recent.map((v) => `${v.versionNo}:${v.commitHash?.slice(0, 8) ?? 'null'}`).join(','));
+
+    // 16e 无写权限用户触发 checkpoint → 403
+    const guest = await req(`/api/v1/projects/${ctx.gitId}/git-flush`, { token: ctx.carol, method: 'POST', body: {} });
+    record('P16e', '无写权限用户触发 checkpoint 被拒（403）', guest.status === 403, `status=${guest.status}`);
   }
 
   const passed = results.filter((r) => r.pass).length;

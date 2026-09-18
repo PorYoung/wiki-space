@@ -1,8 +1,9 @@
-# 本地开发拓扑：只容器化 PostgreSQL（有状态服务），应用进程走 pnpm dev（见 README）
+# 本地/内网开发拓扑：只容器化有状态设施，应用进程走 pnpm dev（见 README/docs/deploy.md）
 # 用法: docker compose -f deploy/compose.dev.yml up -d
+# 离线环境：postgres 与 minio 镜像均已包含在 airgap 离线包内（docs/offline-deploy.md §5）
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.9 # PIN：与 scripts/airgap-export.sh 同步
     container_name: ewiki-pg
     environment:
       POSTGRES_USER: ewiki
@@ -16,5 +17,16 @@ services:
       timeout: 3s
       retries: 10
 
+  minio:
+    # 开发/内网演示 S3 存储（STORAGE_DRIVER=s3 时使用）；控制台 http://localhost:9001
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z # PIN：与 scripts/airgap-export.sh 同步
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ewiki
+      MINIO_ROOT_PASSWORD: ewiki-secret
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio_data:/data]
+
 volumes:
   pg_data: {}
+  minio_data: {}

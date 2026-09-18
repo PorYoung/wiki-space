@@ -1,0 +1,19 @@
+# docker build 上下文裁剪（构建上下文 = 仓库根）；deps/build 阶段只需源码与清单
+**/node_modules
+**/dist
+**/.tsbuildinfo
+.git
+.github
+data
+data-nas
+data-nas2
+logs
+backups
+coverage
+docs
+specs
+*.log
+.env
+.env.*
+.deploy-conn
+deploy/airgap

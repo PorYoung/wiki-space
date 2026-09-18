@@ -325,6 +325,7 @@ export const WsEventName = z.enum([
   'publish.finished',
   'notification.new',
   'presence.updated',
+  'git.flushed', // Git 提交聚合窗口关闭（GIT-COMMIT-COALESCING-DESIGN §7.3）
 ]);
 export type WsEventName = z.infer<typeof WsEventName>;
 

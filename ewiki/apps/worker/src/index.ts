@@ -28,6 +28,8 @@ import { ensureWorkdir, pullWorkdir, type ConnLike } from '@ewiki/git';
 import { LocalBlobStore, reposRoot, resolveRoot, safeJoin, siteDir, siteVersionDir } from '@ewiki/storage';
 import type { BlobStore } from '@ewiki/storage';
 import { runBlobGC } from '@ewiki/server/src/lib/blob-gc.js';
+import { PgLockService } from '@ewiki/server/src/adapters/pg/lock.js';
+import { createGitFlushHandler } from './git-flush.js';
 import { extractDocLinks, resolveFileType, type ImportDocPayload, type Job } from '@ewiki/shared';
 import type { ClassifyProvider, ImportProvider, Notifier, NotificationType } from '@ewiki/shared';
 import { enqueueSearchIndex } from '@ewiki/shared';
@@ -45,6 +47,9 @@ const { sql, db } = createDb();
 const boss = new PgBoss({
   connectionString: process.env.DATABASE_URL ?? 'postgres://ewiki:ewiki@localhost:5432/ewiki',
 });
+// 工作副本互斥（GIT-COMMIT-COALESCING-DESIGN §11）：flush / sync 共用一把项目级
+// advisory lock，串行化同一 <FS_ROOT>/repos/<projectId> 的 git 写操作
+const gitWorkdirLock = new PgLockService(sql);
 
 const log = (msg: string, extra?: object): void =>
   console.log(JSON.stringify({ level: 'info', msg, ...extra })); // pino 接入点（SDD 6.4）
@@ -467,14 +472,19 @@ async function syncProject(
       const branch = project.defaultBranch || 'main';
       // 工作副本根目录与 server 保存推送链路一致：<FS_ROOT>/repos/<projectId>
       const root = reposRoot(path.resolve(process.cwd(), process.env.FS_ROOT ?? './data'));
-      const ensured = await ensureWorkdir(root, project.id, conn, cloneUrl, login, branch);
-      const workdir = ensured.workdir;
-      if (ensured.hadCommits) {
-        const pulled = await pullWorkdir(workdir, branch);
-        out.commitHash = pulled.commitHash;
-        advanced = pulled.advanced;
-      }
-      Object.assign(out, await harvestDocsFromDir(project.id, workdir));
+      // pull 遇分叉会 reset --hard，必须与 flush 提交互斥（GIT-COMMIT-COALESCING-DESIGN §11）
+      Object.assign(
+        out,
+        await gitWorkdirLock.withLock(`git-workdir:${project.id}`, async () => {
+          const ensured = await ensureWorkdir(root, project.id, conn, cloneUrl, login, branch);
+          if (ensured.hadCommits) {
+            const pulled = await pullWorkdir(ensured.workdir, branch);
+            out.commitHash = pulled.commitHash;
+            advanced = pulled.advanced;
+          }
+          return harvestDocsFromDir(project.id, ensured.workdir);
+        }),
+      );
     } else {
       // storageKind CHECK 仅允许 git/local：本地后端直接消化指定文件夹
       const cfg = (project.storageConfig ?? {}) as { path?: string };
@@ -1469,7 +1479,7 @@ async function handleSearchReconcile(job: Job): Promise<void> {
 
 async function main(): Promise<void> {
   await boss.start();
-  for (const q of ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile']) {
+  for (const q of ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile', 'git-flush']) {
     await boss.createQueue(q);
   }
 
@@ -1503,6 +1513,11 @@ async function main(): Promise<void> {
   await boss.work('search-reconcile', { batchSize: 1 }, async (jobs) => {
     for (const j of jobs) await handleSearchReconcile({ id: j.id, queue: 'search-reconcile', data: j.data });
   });
+  // Git 提交聚合（GIT-COMMIT-COALESCING-DESIGN）：串行执行（git 副本 I/O 不并发，与 gc-blob 同理）
+  const handleGitFlush = createGitFlushHandler({ db, sql, boss, lock: gitWorkdirLock, env: process.env, log });
+  await boss.work('git-flush', { batchSize: 1 }, async (jobs) => {
+    for (const j of jobs) await handleGitFlush({ id: j.id, data: j.data as { projectId?: string } });
+  });
 
   // 定时任务：每日 03:00 发布调度检查（PRD F35）
   await boss.schedule('publish', '0 3 * * *', { trigger: 'daily' });
@@ -1513,7 +1528,7 @@ async function main(): Promise<void> {
 
   const bootSettings = await getSearchSettings(db, process.env);
   log('worker started', {
-    queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile'],
+    queues: ['sync', 'publish', 'ai-classify', 'import', 'export', 'compensate', 'gc-blob', 'search-index', 'search-build', 'search-reconcile', 'git-flush'],
     embedding: bootSettings.provider === 'none' ? 'disabled' : bootSettings.provider + ':' + bootSettings.model + '@' + bootSettings.dim,
     vectorEnabled: bootSettings.vectorEnabled,
     searchConfig: 'runtime (platform_settings override, 10s ttl)',

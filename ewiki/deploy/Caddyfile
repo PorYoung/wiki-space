@@ -1,12 +1,17 @@
 # ewiki 网关（ENGINEERING 第 5.3 / SDD ADR-6/13）
 # 双发布地址形态（PRD R4）：子域名 {slug}.ewiki.yfzx.cn + 子路径 ewiki.yfzx.cn/wiki/{slug}
+#
+# 发布站点由 server 服务（GET /sites/:slug/* 公开路由，读 NAS 上的 current.json 指针定位版本，
+# 见 apps/server/src/http/routes-platform.ts）——这里反代到 server:3000，而不是 MinIO：
+# 发布产物由 worker 写入 NAS 文件系统（packages/storage：<NAS>/users/<user>/sites/<slug>/vN + current.json），
+# MinIO 仅承载 STORAGE_DRIVER=s3 时的对象存储，不经 Caddy 对外路由。
 {
     on_demand_tls {
         ask http://server:3000/api/v1/open/site-check
     }
 }
 
-# ---- 主站：SPA + API + 实时 ----
+# ---- 主站：SPA + API + 实时 + 发布站点 ----
 ewiki.yfzx.cn {
     handle /api/* {
         reverse_proxy server:3000
@@ -17,10 +22,10 @@ ewiki.yfzx.cn {
     handle /collab* {
         reverse_proxy realtime:3001
     }
-    # 子路径形态：/wiki/{slug}/* → S3 上 {slug}/current 产物
-    handle_path /wiki/{slug}/* {
-        rewrite * /{slug}/current{path}
-        reverse_proxy minio:9000
+    # 子路径形态：/wiki/{slug}/* → server 的 /sites/{slug}/*
+    handle_path /wiki/* {
+        rewrite * /sites{path}
+        reverse_proxy server:3000
     }
     handle {
         root * /srv/web
@@ -29,14 +34,14 @@ ewiki.yfzx.cn {
     }
 }
 
-# ---- 子域名形态：{slug}.ewiki.yfzx.cn → S3 产物 ----
+# ---- 子域名形态：{slug}.ewiki.yfzx.cn → server 的 /sites/{slug}/* ----
 *.ewiki.yfzx.cn {
     tls {
         on_demand
     }
     @slug header_regexp Host Host ^(?<sub>[a-z0-9-]+)\.ewiki\.yfzx\.cn$
-    handle {
-        rewrite * /sites/{sub}/current{path}
-        reverse_proxy minio:9000
+    handle @slug {
+        rewrite * /sites/{re.slug.1}{uri}
+        reverse_proxy server:3000
     }
 }

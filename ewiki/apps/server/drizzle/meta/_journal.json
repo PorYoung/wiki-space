@@ -92,6 +92,13 @@
       "when": 1789423490068,
       "tag": "0012_open_api_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789604969159,
+      "tag": "0013_volatile_jack_power",
+      "breakpoints": true
     }
   ]
 }

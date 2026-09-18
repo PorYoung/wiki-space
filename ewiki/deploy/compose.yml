@@ -1,39 +1,92 @@
 # 生产/staging 拓扑（ENGINEERING 第 5 章，SDD ADR-8/12/13：6 容器 + NAS）
+#
+# 内网离线部署：
+#   1) 连接侧 `bash scripts/airgap-export.sh` 产出 deploy/airgap/ 离线包（镜像 tar + 配置）
+#   2) 内网侧 `docker load` 后按 docs/offline-deploy.md 启动；本文件镜像名与导出脚本保持一致
+#   3) 首次启动自动执行 migrate（service_completed_successfully 门禁）；种子管理员：
+#      `docker compose --env-file deploy/.env.production -f deploy/compose.yml --profile init run --rm seed`
+#
+# 基础镜像已固定版本（与 scripts/airgap-export.sh 的 PIN 保持同步）；接入私有 registry 时
+# 整体替换镜像前缀即可，TAG 由 deploy/.env.production 提供（缺省 latest）。
 services:
+  web-init:
+    # 前端静态产物：镜像构建时已随 `pnpm -r build` 生成 apps/web/dist，
+    # 由本任务灌入 web_dist 卷供 Caddy 只读服务（每次 up 幂等覆盖）
+    image: ewiki/app:${TAG:-latest}
+    restart: "no"
+    command: ["sh", "-c", "rm -rf /srv/web/* && cp -r /app/apps/web/dist/. /srv/web/"]
+    volumes: [web_dist:/srv/web]
+
+  migrate:
+    # 迁移只向前（ENGINEERING 4）：drizzle-kit migrate，幂等可重复执行；
+    # 运行时镜像内直接 node 调用 drizzle-kit bin，避免依赖 corepack 联网拉取 pnpm
+    image: ewiki/app:${TAG:-latest}
+    restart: "no"
+    working_dir: /app/apps/server
+    command: ["sh", "-c", "node node_modules/drizzle-kit/bin.cjs migrate"]
+    env_file: [.env.production]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    # 种子管理员（仅首次部署）：--profile init 显式触发，默认 up 不执行
+    image: ewiki/app:${TAG:-latest}
+    restart: "no"
+    profiles: ["init"]
+    working_dir: /app/apps/server
+    command: ["sh", "-c", "./node_modules/.bin/tsx src/seed.ts"]
+    env_file: [.env.production]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   caddy:
-    image: caddy:2
+    image: caddy:2.10 # PIN：与 scripts/airgap-export.sh 同步
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
       - web_dist:/srv/web:ro
-    depends_on: [server, realtime]
+    depends_on:
+      web-init:
+        condition: service_completed_successfully
+      server:
+        condition: service_healthy
+      realtime:
+        condition: service_healthy
 
   server:
-    image: registry/ewiki/app:${TAG:-latest}
+    image: ewiki/app:${TAG:-latest}
     command: ["node", "apps/server/dist/index.js"]
     env_file: [.env.production]
+    volumes:
+      # NAS：宿主机目录只读/读写挂进容器，容器内路径由 .env.production 的 FS_NAS_ROOT/FS_ROOT 引用
+      - ${NAS_HOST_ROOT:-/srv/nas/wiki}:/srv/nas/wiki
+      - ${PLATFORM_DATA_HOST_ROOT:-/srv/nas/wiki-platform}:/srv/platform/data
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthz || exit 1"]
+      # node:20-slim 无 wget/curl，用 node 内置 fetch 探活
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 5
     deploy:
-      replicas: 2
+      replicas: 2 # Git 直连源（自动 commit+push）场景建议 --scale server=1，避免共享工作副本并发写
 
   realtime:
-    image: registry/ewiki/app:${TAG:-latest}
+    image: ewiki/app:${TAG:-latest}
     command: ["node", "apps/realtime/dist/index.js"]
     env_file: [.env.production]
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3001 || exit 1"]
+      # realtime 对任意 HTTP GET 返回 200（{ok:true,service:'ewiki-realtime'}）
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -41,19 +94,22 @@ services:
       replicas: 1 # Phase 1 单副本 + Caddy 粘性路由（ADR-13）
 
   worker:
-    image: registry/ewiki/app:${TAG:-latest}
+    image: ewiki/app:${TAG:-latest}
     command: ["node", "apps/worker/dist/index.js"]
     env_file: [.env.production]
+    volumes:
+      - ${NAS_HOST_ROOT:-/srv/nas/wiki}:/srv/nas/wiki
+      - ${PLATFORM_DATA_HOST_ROOT:-/srv/nas/wiki-platform}:/srv/platform/data
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     deploy:
       replicas: 2
 
   postgres:
     # 检索扩展镜像（SEARCH-VECTOR-DESIGN §9.2）：postgres:16 + pgvector + zhparser
-    # 构建见 deploy/postgres/Dockerfile；CI 构建推送私有 registry，气隙环境 docker save/load 导入
-    image: registry/ewiki/pg16-search:${TAG:-latest}
+    # 构建见 deploy/postgres/Dockerfile；连接侧构建后随离线包 docker load 导入
+    image: ewiki/pg16-search:${TAG:-latest}
     build:
       context: ./postgres
       dockerfile: Dockerfile
@@ -69,7 +125,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z # PIN：与 scripts/airgap-export.sh 同步
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-ewiki}
@@ -81,6 +137,5 @@ volumes:
   caddy_data: {}
   caddy_config: {}
   web_dist: {}
-  sites: {}
   pg_data: {}
   minio_data: {}

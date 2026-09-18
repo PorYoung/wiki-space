@@ -48,6 +48,7 @@ import FileHost, { type FileMeta } from '../fileview/FileHost';
 import { FileInfoDrawer } from '../fileview/FileInfoDrawer';
 import { useProjectRole } from '../lib/api/use-project-role';
 import { useShowToast } from '../components/Toast';
+import { GitPendingBar } from '../components/GitPendingBar';
 import {
   ConfirmDialog,
   MoveToDialog,
@@ -1048,7 +1049,7 @@ export function BrowsePage(): React.ReactElement {
       ok: boolean;
       document: DocumentDetail;
       version: number;
-      effects?: { git: { attempted: boolean; ok: boolean; pushed: boolean; noop?: boolean; commitHash?: string; error?: string } };
+      effects?: { git: { attempted: boolean; ok: boolean; pushed: boolean; noop?: boolean; commitHash?: string; error?: string; deferred?: boolean; pendingOps?: number; etaSeconds?: number } };
     }>(
       `/api/v1/documents/${activeDoc.id}`,
       {
@@ -1068,9 +1069,13 @@ export function BrowsePage(): React.ReactElement {
     void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
     void queryClient.invalidateQueries({ queryKey: ['activities'] });
 
-    // Git 效果 toast（对齐原 saveMutation.onSuccess，§4.4）
+    // Git 效果 toast（§4.4）：coalesced 模式下保存即刻成功，提交由窗口聚合异步完成
     const git = result.effects?.git;
-    if (git?.attempted && git.ok && git.pushed) {
+    if (git?.attempted && git.ok && git.deferred) {
+      void queryClient.invalidateQueries({ queryKey: ['git-pending', projectId] });
+      const min = Math.max(1, Math.round((git.etaSeconds ?? 300) / 60));
+      showToast(`已保存，Git 将在约 ${min} 分钟内聚合提交（文件列表页可「立即提交」）`);
+    } else if (git?.attempted && git.ok && git.pushed) {
       showToast(`已保存，Git 自动提交 ${git.commitHash?.slice(0, 8) ?? ''} 并推送`);
     } else if (git?.attempted && git.ok && git.noop) {
       showToast('已保存（与仓库内容一致，无需提交）');
@@ -1167,6 +1172,21 @@ export function BrowsePage(): React.ReactElement {
     const rt = new EwikiRealtime();
     rt.connect();
     rt.subscribe(`project:${projectId}`);
+    // Git 提交聚合窗口关闭（GIT-COMMIT-COALESCING-DESIGN §7.3）：版本时间线的 commitHash
+    // 此刻才回填，刷新版本与目录树状态；文档详情内容不变（真源在 DB，保存时已可见）
+    rt.on('git.flushed', (payload) => {
+      const p = payload as { documentIds?: string[]; commitHash?: string | null };
+      void queryClient.invalidateQueries({ queryKey: ['git-pending', projectId] });
+      void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] });
+      if (!docParam || !Array.isArray(p.documentIds)) {
+        void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
+        return;
+      }
+      if (p.documentIds.length === 0 || p.documentIds.includes(docParam)) {
+        void queryClient.invalidateQueries({ queryKey: ['document-versions', docParam] });
+        if (p.commitHash) showToast(`已提交到 Git（${p.commitHash.slice(0, 8)}）`);
+      }
+    });
     rt.on('document.updated', (payload) => {
       const p = payload as {
         documentId?: string;
@@ -1705,6 +1725,7 @@ export function BrowsePage(): React.ReactElement {
                 );
               })}
             </div>
+            {projectId && <GitPendingBar projectId={projectId} canWrite={canWrite} />}
             <button type="button" className="btn-secondary !h-9 !text-xs"
               onClick={() => void queryClient.invalidateQueries({ queryKey: ['project-documents', projectId] })}>
               <RefreshCw size={15} /> 刷新

@@ -36,6 +36,12 @@ const EnvSchema = z.object({
   EMBEDDING_DIM: z.coerce.number().int().min(1).default(1024),
   EMBEDDING_BATCH_SIZE: z.coerce.number().int().min(1).default(32),
   EMBEDDING_TIMEOUT_MS: z.coerce.number().int().default(10000),
+  // ---- Git 提交聚合（GIT-COMMIT-COALESCING-DESIGN §12）----
+  // coalesced：保存只记台账，worker git-flush 在窗口关闭时聚合为单提交；
+  // inline：kill-switch，回退「保存即同步 commit+push」旧链路（回滚无需回代码）
+  GIT_PUSH_MODE: z.enum(['coalesced', 'inline']).default('coalesced'),
+  GIT_FLUSH_DEBOUNCE_SECONDS: z.coerce.number().min(5).max(3600).default(300),
+  GIT_FLUSH_MAX_WAIT_SECONDS: z.coerce.number().min(60).max(21600).default(1800),
   // ---- 开放 API / MCP（OPEN-API-MCP-DESIGN §10）：进程级总开关（气隙可整体关；
   //      公开检索开关与限流配额走 platform_settings 运行时配置，见 lib/open-settings.ts）----
   OPENAPI_ENABLED: z
